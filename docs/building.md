@@ -21,7 +21,8 @@ source, build integration, upstream version record, and license notices. CMake
 does not fetch from the network.
 
 Large runtime libraries that are impractical to embed are discovered explicitly
-from the build host. Their supported versions, feature configuration, runtime
-packaging, and license obligations must be recorded when introduced. A release
-must ship the notices and source/build-offer information required by each
-dependency.
+from the build host. FFmpeg is currently required with `libavcodec`, `libavutil`,
+and `libswscale`; the development build is verified with FFmpeg 9.0.1. Their
+supported versions, feature configuration, runtime packaging, and license
+obligations must be recorded when introduced. A release must ship the notices
+and source/build-offer information required by each dependency.

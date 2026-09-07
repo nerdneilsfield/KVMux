@@ -13,15 +13,17 @@ bool plane_fits(const PlaneLayout& plane, const std::size_t payload_size) {
     }
     const auto stride = static_cast<std::size_t>(
         plane.stride < 0 ? -plane.stride : plane.stride);
-    if (stride < plane.row_bytes) {
+    if (stride < plane.row_bytes ||
+        plane.rows - 1U > std::numeric_limits<std::size_t>::max() / stride) {
         return false;
     }
-    if (plane.rows - 1U >
-        (std::numeric_limits<std::size_t>::max() - plane.row_bytes) / stride) {
-        return false;
+    const auto row_distance = (plane.rows - 1U) * stride;
+    if (plane.stride < 0) {
+        return plane.offset >= row_distance && plane.offset <= payload_size &&
+               plane.row_bytes <= payload_size - plane.offset;
     }
-    const auto extent = (plane.rows - 1U) * stride + plane.row_bytes;
-    return plane.offset <= payload_size && extent <= payload_size - plane.offset;
+    return plane.offset <= payload_size && row_distance <= payload_size - plane.offset &&
+           plane.row_bytes <= payload_size - plane.offset - row_distance;
 }
 
 }  // namespace

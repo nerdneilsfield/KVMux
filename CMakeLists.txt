@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.25)
 project(KVMux VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+find_package(FFmpeg REQUIRED)
 
 option(KVMUX_ENABLE_SANITIZERS "Enable the supported address and undefined behavior sanitizers" OFF)
 
@@ -12,10 +14,12 @@ add_library(kvmux_core STATIC
     src/control/hid_keyboard.cpp
     src/support/build_info.cpp
     src/video/capture_sample.cpp
+    src/video/video_processor.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale)
 
 if(MSVC)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
@@ -45,5 +49,6 @@ if(BUILD_TESTING)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
-    add_test(NAME video_contract COMMAND kvmux_video_contract_test)
+    add_test(NAME video_contract COMMAND kvmux_video_contract_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
 endif()
