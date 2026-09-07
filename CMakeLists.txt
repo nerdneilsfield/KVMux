@@ -23,6 +23,7 @@ add_library(kvmux_core STATIC
     src/support/build_info.cpp
     src/video/capture_sample.cpp
     src/video/video_processor.cpp
+    src/video/video_pipeline.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
 
