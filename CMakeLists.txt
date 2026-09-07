@@ -14,6 +14,8 @@ add_library(kvmux_core STATIC
     src/control/ch9329_protocol.cpp
     src/control/control_queue.cpp
     src/control/hid_keyboard.cpp
+    src/control/serial_transport.cpp
+    src/control/serial_worker.cpp
     src/support/build_info.cpp
     src/video/capture_sample.cpp
     src/video/video_processor.cpp
@@ -21,7 +23,7 @@ add_library(kvmux_core STATIC
 add_library(kvmux::core ALIAS kvmux_core)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale)
+target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport)
 
 if(MSVC)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
@@ -48,6 +50,10 @@ if(BUILD_TESTING)
     add_executable(kvmux_ch9329_control_test tests/ch9329_control_test.cpp)
     target_link_libraries(kvmux_ch9329_control_test PRIVATE kvmux::core)
     add_test(NAME ch9329_control COMMAND kvmux_ch9329_control_test)
+
+    add_executable(kvmux_serial_worker_test tests/serial_worker_test.cpp)
+    target_link_libraries(kvmux_serial_worker_test PRIVATE kvmux::core)
+    add_test(NAME serial_worker COMMAND kvmux_serial_worker_test)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)

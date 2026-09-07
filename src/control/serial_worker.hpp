@@ -1,0 +1,49 @@
+#pragma once
+
+#include "control/control_queue.hpp"
+#include "control/control_sink.hpp"
+
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <thread>
+
+namespace kvmux {
+
+struct SerialIo {
+    std::function<bool(const std::string&, int)> open;
+    std::function<void()> close;
+    std::function<std::ptrdiff_t(std::span<const std::uint8_t>)> write;
+    std::function<std::ptrdiff_t(std::span<std::uint8_t>)> read;
+};
+
+class Ch9329ControlSink final : public ControlSink {
+public:
+    Ch9329ControlSink();
+    explicit Ch9329ControlSink(SerialIo io);
+    ~Ch9329ControlSink() override;
+    Ch9329ControlSink(const Ch9329ControlSink&) = delete;
+    Ch9329ControlSink& operator=(const Ch9329ControlSink&) = delete;
+
+    void connect(std::string port, int baud_rate, std::uint8_t address = 0);
+    void disconnect() noexcept;
+    void set_mouse_mode(MouseMode mode);
+    void set_control_active(bool active) noexcept;
+    void update_ui_heartbeat() noexcept;
+
+    [[nodiscard]] SubmitResult submit(ControlEvent event) override;
+    void release_all() noexcept override;
+    [[nodiscard]] ControlSnapshot snapshot() const override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace kvmux
