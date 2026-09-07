@@ -287,7 +287,9 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
     CMTime frame_duration = kCMTimeInvalid;
     for (AVCaptureDeviceFormat* format in device.formats) {
         CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
-        if (size.width != requested.width || size.height != requested.height) continue;
+        if (size.width <= 0 || size.height <= 0 ||
+            static_cast<std::uint32_t>(size.width) != requested.width ||
+            static_cast<std::uint32_t>(size.height) != requested.height) continue;
         const CMTime candidate = CMTimeMake(requested.frame_rate.denominator,
                                             requested.frame_rate.numerator);
         for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges) {

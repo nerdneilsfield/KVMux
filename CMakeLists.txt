@@ -57,8 +57,12 @@ target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::s
 
 if(MSVC)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
+    target_compile_options(kvmux_capture PRIVATE /W4 /permissive-)
+    target_compile_options(kvmux_renderer PRIVATE /W4 /permissive-)
 else()
     target_compile_options(kvmux_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+    target_compile_options(kvmux_capture PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+    target_compile_options(kvmux_renderer PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 endif()
 
 if(KVMUX_ENABLE_SANITIZERS)

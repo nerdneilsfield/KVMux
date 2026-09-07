@@ -18,6 +18,10 @@ void VideoPipeline::start(std::uint64_t generation) {
     worker_ = std::thread([this] { run(); });
 }
 
+void VideoPipeline::set_generation(std::uint64_t generation) {
+    frames_.set_generation(generation);
+}
+
 void VideoPipeline::stop() noexcept {
     stopping_.store(true, std::memory_order_release);
     if (worker_.joinable()) worker_.join();

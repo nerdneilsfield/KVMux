@@ -30,6 +30,7 @@ public:
     VideoPipeline& operator=(const VideoPipeline&) = delete;
 
     void start(std::uint64_t generation);
+    void set_generation(std::uint64_t generation);
     void stop() noexcept;
     [[nodiscard]] std::optional<VideoFrame> take_latest_frame();
     [[nodiscard]] VideoPipelineSnapshot snapshot() const;
