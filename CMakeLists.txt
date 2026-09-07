@@ -11,6 +11,7 @@ add_library(kvmux_core STATIC
     src/control/control_queue.cpp
     src/control/hid_keyboard.cpp
     src/support/build_info.cpp
+    src/video/capture_sample.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
@@ -41,4 +42,8 @@ if(BUILD_TESTING)
     add_executable(kvmux_ch9329_control_test tests/ch9329_control_test.cpp)
     target_link_libraries(kvmux_ch9329_control_test PRIVATE kvmux::core)
     add_test(NAME ch9329_control COMMAND kvmux_ch9329_control_test)
+
+    add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
+    target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
+    add_test(NAME video_contract COMMAND kvmux_video_contract_test)
 endif()

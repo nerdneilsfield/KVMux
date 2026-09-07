@@ -1,0 +1,66 @@
+#pragma once
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
+
+namespace kvmux {
+
+inline constexpr std::size_t kMaxCompressedSampleBytes = 16U * 1024U * 1024U;
+inline constexpr std::size_t kMaxRawSampleBytes = 64U * 1024U * 1024U;
+inline constexpr std::size_t kInputPaddingBytes = 64U;
+inline constexpr std::uint32_t kMaxCaptureWidth = 1920U;
+inline constexpr std::uint32_t kMaxCaptureHeight = 1200U;
+
+enum class PixelFormat { yuy2, uyvy, nv12, bgra, rgba, unknown };
+enum class ColorRange { limited, full, unknown };
+enum class ColorMatrix { bt601, bt709, unknown };
+
+struct PlaneLayout {
+    std::size_t offset{};
+    std::ptrdiff_t stride{};
+    std::size_t row_bytes{};
+    std::size_t rows{};
+};
+
+struct RawPayload {
+    PixelFormat format{PixelFormat::unknown};
+    std::vector<PlaneLayout> planes;
+    std::vector<std::uint8_t> bytes;
+};
+
+struct MjpegPayload {
+    std::size_t payload_size{};
+    std::vector<std::uint8_t> bytes;
+};
+
+struct CaptureSample {
+    std::uint64_t generation{};
+    std::uint64_t sequence{};
+    std::chrono::steady_clock::time_point arrival{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+    ColorRange color_range{ColorRange::unknown};
+    ColorMatrix color_matrix{ColorMatrix::unknown};
+    std::optional<RawPayload> raw;
+    std::optional<MjpegPayload> mjpeg;
+
+    [[nodiscard]] static std::optional<CaptureSample> make_raw(
+        std::uint64_t generation, std::uint64_t sequence,
+        std::chrono::steady_clock::time_point arrival, std::uint32_t width,
+        std::uint32_t height, PixelFormat format,
+        std::span<const PlaneLayout> planes, std::span<const std::uint8_t> bytes);
+
+    [[nodiscard]] static std::optional<CaptureSample> make_mjpeg(
+        std::uint64_t generation, std::uint64_t sequence,
+        std::chrono::steady_clock::time_point arrival, std::uint32_t width,
+        std::uint32_t height, std::span<const std::uint8_t> bytes);
+};
+
+[[nodiscard]] bool valid_dimensions(std::uint32_t width,
+                                    std::uint32_t height) noexcept;
+
+}  // namespace kvmux
