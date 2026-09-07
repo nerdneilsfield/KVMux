@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(KVMux VERSION 0.1.0 LANGUAGES CXX)
+
+include(CTest)
+
+option(KVMUX_ENABLE_SANITIZERS "Enable the supported address and undefined behavior sanitizers" OFF)
+
+add_library(kvmux_core STATIC
+    src/support/build_info.cpp
+)
+add_library(kvmux::core ALIAS kvmux_core)
+target_compile_features(kvmux_core PUBLIC cxx_std_20)
+target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+if(MSVC)
+    target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(kvmux_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+endif()
+
+if(KVMUX_ENABLE_SANITIZERS)
+    if(MSVC)
+        message(FATAL_ERROR "KVMUX_ENABLE_SANITIZERS is not supported by the MSVC preset")
+    endif()
+    target_compile_options(kvmux_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(kvmux_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+endif()
+
+add_executable(kvmux src/app/main.cpp)
+target_link_libraries(kvmux PRIVATE kvmux::core)
+
+if(BUILD_TESTING)
+    add_executable(kvmux_build_info_test tests/build_info_test.cpp)
+    target_link_libraries(kvmux_build_info_test PRIVATE kvmux::core)
+    add_test(NAME build_info COMMAND kvmux_build_info_test)
+endif()
