@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(KVMux VERSION 0.1.0 LANGUAGES C CXX)
+if(APPLE)
+    project(KVMux VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+else()
+    project(KVMux VERSION 0.1.0 LANGUAGES C CXX)
+endif()
 
 include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -21,6 +25,31 @@ add_library(kvmux_core STATIC
     src/video/video_processor.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
+
+add_library(kvmux_capture STATIC)
+add_library(kvmux::capture ALIAS kvmux_capture)
+target_compile_features(kvmux_capture PUBLIC cxx_std_20)
+target_include_directories(kvmux_capture PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(kvmux_capture PUBLIC kvmux::core)
+if(WIN32)
+    target_sources(kvmux_capture PRIVATE src/video/capture/capture_media_foundation.cpp)
+    target_link_libraries(kvmux_capture PRIVATE mfplat mfreadwrite mfuuid ole32)
+elseif(APPLE)
+    target_sources(kvmux_capture PRIVATE src/video/capture/capture_avfoundation.mm)
+    target_compile_options(kvmux_capture PRIVATE -fobjc-arc)
+    target_link_libraries(kvmux_capture PRIVATE
+        "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(kvmux_capture PRIVATE src/video/capture/capture_v4l2.cpp)
+else()
+    message(FATAL_ERROR "KVMux capture supports Windows, Linux and macOS")
+endif()
+
+add_library(kvmux_renderer STATIC src/render/video_renderer.cpp)
+add_library(kvmux::renderer ALIAS kvmux_renderer)
+target_compile_features(kvmux_renderer PUBLIC cxx_std_20)
+target_include_directories(kvmux_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(kvmux_renderer PUBLIC kvmux::core kvmux::glad OpenGL::GL)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport)
@@ -40,7 +69,7 @@ if(KVMUX_ENABLE_SANITIZERS)
 endif()
 
 add_executable(kvmux src/app/main.cpp)
-target_link_libraries(kvmux PRIVATE kvmux::core kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
+target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
 
 if(BUILD_TESTING)
     add_executable(kvmux_build_info_test tests/build_info_test.cpp)

@@ -40,8 +40,12 @@ std::optional<CaptureSample> CaptureSample::make_raw(
     const std::uint32_t width, const std::uint32_t height,
     const PixelFormat format, const std::span<const PlaneLayout> planes,
     const std::span<const std::uint8_t> bytes) {
+    const std::size_t expected_planes = format == PixelFormat::nv12 ? 2U :
+        (format == PixelFormat::yuv420p || format == PixelFormat::yuv422p ||
+         format == PixelFormat::yuv444p ? 3U : 1U);
     if (!valid_dimensions(width, height) || format == PixelFormat::unknown ||
-        planes.empty() || bytes.empty() || bytes.size() > kMaxRawSampleBytes ||
+        format == PixelFormat::mjpeg || planes.size() != expected_planes ||
+        bytes.empty() || bytes.size() > kMaxRawSampleBytes ||
         !std::all_of(planes.begin(), planes.end(),
                      [size = bytes.size()](const auto& plane) {
                          return plane_fits(plane, size);

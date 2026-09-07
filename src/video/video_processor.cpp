@@ -24,8 +24,12 @@ AVPixelFormat av_format(const PixelFormat format) {
     case PixelFormat::yuy2: return AV_PIX_FMT_YUYV422;
     case PixelFormat::uyvy: return AV_PIX_FMT_UYVY422;
     case PixelFormat::nv12: return AV_PIX_FMT_NV12;
+    case PixelFormat::yuv420p: return AV_PIX_FMT_YUV420P;
+    case PixelFormat::yuv422p: return AV_PIX_FMT_YUV422P;
+    case PixelFormat::yuv444p: return AV_PIX_FMT_YUV444P;
     case PixelFormat::bgra: return AV_PIX_FMT_BGRA;
     case PixelFormat::rgba: return AV_PIX_FMT_RGBA;
+    case PixelFormat::mjpeg:
     case PixelFormat::unknown: return AV_PIX_FMT_NONE;
     }
     return AV_PIX_FMT_NONE;
@@ -38,9 +42,22 @@ std::string av_error(const int error) {
 }
 
 VideoFrame metadata(const CaptureSample& sample, AvFramePtr frame) {
+    ColorRange range = sample.color_range;
+    ColorMatrix matrix = sample.color_matrix;
+    if (range == ColorRange::unknown && frame) {
+        if (frame->color_range == AVCOL_RANGE_JPEG) range = ColorRange::full;
+        else if (frame->color_range == AVCOL_RANGE_MPEG) range = ColorRange::limited;
+    }
+    if (matrix == ColorMatrix::unknown && frame) {
+        if (frame->colorspace == AVCOL_SPC_BT709) matrix = ColorMatrix::bt709;
+        else if (frame->colorspace == AVCOL_SPC_SMPTE170M ||
+                 frame->colorspace == AVCOL_SPC_BT470BG) matrix = ColorMatrix::bt601;
+    }
     return {sample.generation, sample.sequence, sample.arrival,
-            std::chrono::steady_clock::now(), sample.color_range,
-            sample.color_matrix, std::move(frame)};
+            std::chrono::steady_clock::now(), sample.device_timestamp,
+            sample.device_time_base_numerator, sample.device_time_base_denominator,
+            sample.sample_aspect_ratio_numerator, sample.sample_aspect_ratio_denominator,
+            range, matrix, std::move(frame)};
 }
 
 }  // namespace
@@ -62,7 +79,9 @@ std::optional<VideoFrame> VideoProcessor::process(const CaptureSample& sample) {
 std::optional<VideoFrame> VideoProcessor::process_raw(const CaptureSample& sample) {
     const auto& raw = *sample.raw;
     const auto format = av_format(raw.format);
-    const int expected_planes = raw.format == PixelFormat::nv12 ? 2 : 1;
+    const int expected_planes = raw.format == PixelFormat::nv12 ? 2 :
+        (raw.format == PixelFormat::yuv420p || raw.format == PixelFormat::yuv422p ||
+         raw.format == PixelFormat::yuv444p ? 3 : 1);
     if (format == AV_PIX_FMT_NONE || raw.planes.size() != static_cast<std::size_t>(expected_planes)) {
         fail("unsupported raw pixel layout");
         return std::nullopt;
@@ -122,14 +141,19 @@ std::optional<VideoFrame> VideoProcessor::process_mjpeg(const CaptureSample& sam
     AVPacket packet{};
     packet.data = const_cast<std::uint8_t*>(jpeg.bytes.data());
     packet.size = static_cast<int>(jpeg.payload_size);
-    if (const int result = avcodec_send_packet(decoder_, &packet); result < 0) {
-        fail("MJPEG packet rejected: " + av_error(result));
-        return std::nullopt;
-    }
-
     auto frame = own(av_frame_alloc());
     if (!frame) {
         fail("could not allocate decoded AVFrame");
+        return std::nullopt;
+    }
+    int sent = avcodec_send_packet(decoder_, &packet);
+    if (sent == AVERROR(EAGAIN)) {
+        const int drained = avcodec_receive_frame(decoder_, frame.get());
+        if (drained >= 0) av_frame_unref(frame.get());
+        sent = avcodec_send_packet(decoder_, &packet);
+    }
+    if (sent < 0) {
+        fail("MJPEG packet rejected: " + av_error(sent));
         return std::nullopt;
     }
     const int result = avcodec_receive_frame(decoder_, frame.get());

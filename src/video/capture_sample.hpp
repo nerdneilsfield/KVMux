@@ -15,7 +15,7 @@ inline constexpr std::size_t kInputPaddingBytes = 64U;
 inline constexpr std::uint32_t kMaxCaptureWidth = 1920U;
 inline constexpr std::uint32_t kMaxCaptureHeight = 1200U;
 
-enum class PixelFormat { yuy2, uyvy, nv12, bgra, rgba, unknown };
+enum class PixelFormat { yuy2, uyvy, nv12, yuv420p, yuv422p, yuv444p, bgra, rgba, mjpeg, unknown };
 enum class ColorRange { limited, full, unknown };
 enum class ColorMatrix { bt601, bt709, unknown };
 
@@ -43,6 +43,11 @@ struct CaptureSample {
     std::chrono::steady_clock::time_point arrival{};
     std::uint32_t width{};
     std::uint32_t height{};
+    std::optional<std::int64_t> device_timestamp;
+    std::int32_t device_time_base_numerator{};
+    std::int32_t device_time_base_denominator{1};
+    std::uint32_t sample_aspect_ratio_numerator{1};
+    std::uint32_t sample_aspect_ratio_denominator{1};
     ColorRange color_range{ColorRange::unknown};
     ColorMatrix color_matrix{ColorMatrix::unknown};
     std::optional<RawPayload> raw;
