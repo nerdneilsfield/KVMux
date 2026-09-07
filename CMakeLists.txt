@@ -1,10 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(KVMux VERSION 0.1.0 LANGUAGES CXX)
+project(KVMux VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(FFmpeg REQUIRED)
+find_package(OpenGL REQUIRED)
+add_subdirectory(third_party)
 
 option(KVMUX_ENABLE_SANITIZERS "Enable the supported address and undefined behavior sanitizers" OFF)
 
@@ -36,7 +38,7 @@ if(KVMUX_ENABLE_SANITIZERS)
 endif()
 
 add_executable(kvmux src/app/main.cpp)
-target_link_libraries(kvmux PRIVATE kvmux::core)
+target_link_libraries(kvmux PRIVATE kvmux::core kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
 
 if(BUILD_TESTING)
     add_executable(kvmux_build_info_test tests/build_info_test.cpp)
