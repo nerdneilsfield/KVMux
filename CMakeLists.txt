@@ -7,6 +7,9 @@ include(CTest)
 option(KVMUX_ENABLE_SANITIZERS "Enable the supported address and undefined behavior sanitizers" OFF)
 
 add_library(kvmux_core STATIC
+    src/control/ch9329_protocol.cpp
+    src/control/control_queue.cpp
+    src/control/hid_keyboard.cpp
     src/support/build_info.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
@@ -34,4 +37,8 @@ if(BUILD_TESTING)
     add_executable(kvmux_build_info_test tests/build_info_test.cpp)
     target_link_libraries(kvmux_build_info_test PRIVATE kvmux::core)
     add_test(NAME build_info COMMAND kvmux_build_info_test)
+
+    add_executable(kvmux_ch9329_control_test tests/ch9329_control_test.cpp)
+    target_link_libraries(kvmux_ch9329_control_test PRIVATE kvmux::core)
+    add_test(NAME ch9329_control COMMAND kvmux_ch9329_control_test)
 endif()
