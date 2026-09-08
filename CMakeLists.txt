@@ -20,7 +20,10 @@ add_library(kvmux_core STATIC
     src/control/hid_keyboard.cpp
     src/control/serial_transport.cpp
     src/control/serial_worker.cpp
+    src/input/input_router.cpp
     src/support/build_info.cpp
+    src/support/config.cpp
+    src/support/diagnostics.cpp
     src/video/capture_sample.cpp
     src/video/video_processor.cpp
     src/video/video_pipeline.cpp
@@ -39,7 +42,7 @@ elseif(APPLE)
     target_sources(kvmux_capture PRIVATE src/video/capture/capture_avfoundation.mm)
     target_compile_options(kvmux_capture PRIVATE -fobjc-arc)
     target_link_libraries(kvmux_capture PRIVATE
-        "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+        "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo" "-framework Foundation")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(kvmux_capture PRIVATE src/video/capture/capture_v4l2.cpp)
 else()
@@ -53,7 +56,7 @@ target_include_directories(kvmux_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/sr
 target_link_libraries(kvmux_renderer PUBLIC kvmux::core kvmux::glad OpenGL::GL)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport)
+target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
 
 if(MSVC)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
@@ -73,7 +76,7 @@ if(KVMUX_ENABLE_SANITIZERS)
     target_link_options(kvmux_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
 endif()
 
-add_executable(kvmux src/app/main.cpp)
+add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp)
 target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
 
 if(BUILD_TESTING)
@@ -88,6 +91,10 @@ if(BUILD_TESTING)
     add_executable(kvmux_serial_worker_test tests/serial_worker_test.cpp)
     target_link_libraries(kvmux_serial_worker_test PRIVATE kvmux::core)
     add_test(NAME serial_worker COMMAND kvmux_serial_worker_test)
+
+    add_executable(kvmux_input_router_test tests/input_router_test.cpp)
+    target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
+    add_test(NAME input_router COMMAND kvmux_input_router_test)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
