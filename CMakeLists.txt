@@ -77,6 +77,11 @@ if(KVMUX_ENABLE_SANITIZERS)
 endif()
 
 add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp)
+if(APPLE)
+    configure_file(packaging/macos/Info.plist.in "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
+    set_target_properties(kvmux PROPERTIES MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
+endif()
 target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
 
 if(BUILD_TESTING)
@@ -101,3 +106,24 @@ if(BUILD_TESTING)
     add_test(NAME video_contract COMMAND kvmux_video_contract_test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
 endif()
+
+include(GNUInstallDirs)
+if(APPLE)
+    set_target_properties(kvmux PROPERTIES INSTALL_RPATH "@executable_path/../Frameworks")
+    install(TARGETS kvmux RUNTIME_DEPENDENCY_SET kvmux_runtime BUNDLE DESTINATION .)
+    install(RUNTIME_DEPENDENCY_SET kvmux_runtime
+        DESTINATION "kvmux.app/Contents/Frameworks"
+        PRE_EXCLUDE_REGEXES "/System/Library/.*" "/usr/lib/.*")
+    install(FILES $<TARGET_FILE:SDL3::SDL3> DESTINATION "kvmux.app/Contents/Frameworks")
+    install(CODE [[
+        include(BundleUtilities)
+        fixup_bundle("${CMAKE_INSTALL_PREFIX}/kvmux.app/Contents/MacOS/kvmux" "" "${CMAKE_INSTALL_PREFIX}/kvmux.app/Contents/Frameworks")
+        execute_process(
+            COMMAND codesign --force --deep --sign - "${CMAKE_INSTALL_PREFIX}/kvmux.app"
+            COMMAND_ERROR_IS_FATAL ANY
+        )
+    ]])
+else()
+    install(TARGETS kvmux RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+install(FILES third_party/INVENTORY.md DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux")
