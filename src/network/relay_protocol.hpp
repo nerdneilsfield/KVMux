@@ -4,6 +4,7 @@
 #include "control/control_sink.hpp"
 #include "network/tcp_socket.hpp"
 #include "video/capture_sample.hpp"
+#include "video/codec/video_codec.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -12,10 +13,10 @@
 
 namespace kvmux::relay {
 
-inline constexpr std::uint16_t kProtocolVersion = 1;
+inline constexpr std::uint16_t kProtocolVersion = 2;
 inline constexpr std::size_t kMaxPacketBytes = kMaxCompressedSampleBytes + 128U;
 
-enum class PacketType : std::uint8_t { hello = 1, video_mjpeg = 2, control = 3, heartbeat = 4, status = 5, release = 6, mouse_mode = 7 };
+enum class PacketType : std::uint8_t { hello = 1, video_mjpeg = 2, control = 3, heartbeat = 4, status = 5, release = 6, mouse_mode = 7, video_hevc = 8, keyframe_request = 9 };
 
 struct Packet {
     PacketType type{};
@@ -34,6 +35,23 @@ struct Packet {
 [[nodiscard]] std::vector<std::uint8_t> encode_mjpeg(const CaptureSample& sample);
 [[nodiscard]] std::optional<CaptureSample> decode_mjpeg(std::span<const std::uint8_t> bytes,
                                                          std::uint64_t generation);
+
+// HEVC payloads contain one complete Annex B access unit, not individual NALs.
+// encoded_sequence tracks the ordered reference chain; capture_sequence may skip.
+// Big-endian payload: generation/u64, encoded_sequence/u64, capture_sequence/u64,
+// pts_ns/i64, width/u32, height/u32, SAR numerator/u32 and denominator/u32,
+// H.273 range/space/primaries/transfer (one byte each), IDR/u8, reserved/u8=0,
+// Annex B byte length/u32, then bytes (at most 16 MiB). Arrival is receiver-local.
+[[nodiscard]] std::vector<std::uint8_t> encode_hevc(const EncodedAccessUnit&);
+[[nodiscard]] std::optional<EncodedAccessUnit> decode_hevc(std::span<const std::uint8_t>);
+
+// Server sends Hello on control; client echoes it on video. Codec must match.
+struct Hello { std::uint64_t session{}; VideoCodec codec{VideoCodec::mjpeg}; };
+struct KeyframeRequest { std::uint64_t session{}, generation{}; };
+[[nodiscard]] std::vector<std::uint8_t> encode_hello(const Hello&);
+[[nodiscard]] std::optional<Hello> decode_hello(std::span<const std::uint8_t>);
+[[nodiscard]] std::vector<std::uint8_t> encode_keyframe_request(const KeyframeRequest&);
+[[nodiscard]] std::optional<KeyframeRequest> decode_keyframe_request(std::span<const std::uint8_t>);
 
 // Session payloads are big-endian. IDs are pairing tokens, not authentication.
 struct SessionControl { std::uint64_t session{}; ControlEvent event; };
