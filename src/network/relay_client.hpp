@@ -5,6 +5,13 @@
 
 namespace kvmux::relay {
 struct ClientOptions { std::string host{"127.0.0.1"}; std::uint16_t control_port{17000}, video_port{17001}; };
+// Per-client lifetime totals for complete relay packets, including the 12-byte
+// protocol header. Excludes TCP/IP overhead, retransmissions and partial packets.
+// stop()/start() preserve totals; a new client starts at zero. An in-flight
+// packet may finish after stop(), which does not wait for network workers.
+struct TrafficSnapshot {
+    std::uint64_t video_received_bytes{}, control_received_bytes{}, control_sent_bytes{};
+};
 class RelayClient {
 public:
     explicit RelayClient(ClientOptions options);
@@ -19,6 +26,7 @@ public:
     SubmitResult submit(ControlEvent event);
     ControlSnapshot control_snapshot() const;
     CaptureSnapshot capture_snapshot() const;
+    TrafficSnapshot traffic_snapshot() const;
     std::optional<CaptureSample> take_sample();
 private:
     struct Impl;

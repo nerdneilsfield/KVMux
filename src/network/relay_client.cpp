@@ -18,6 +18,7 @@ struct RelayClient::Impl {
     std::thread control_worker, video_worker;
     ControlSnapshot control;
     CaptureSnapshot capture;
+    TrafficSnapshot traffic;
     std::optional<CaptureSample> latest;
     std::deque<ControlEvent> events;
     std::optional<MouseMode> mode;
@@ -49,6 +50,7 @@ struct RelayClient::Impl {
         std::uint64_t sequence = 0;
         while (!stopped) {
             auto packet = receive_packet(*socket, 600ms);
+            if (packet) { std::lock_guard lock(mutex); traffic.video_received_bytes += 12U + packet->payload.size(); }
             if (!packet || packet->type != PacketType::video_mjpeg) {
                 spdlog::debug("Relay client: video ended: {}", !packet ? "receive failed, invalid packet, or timeout (600ms)" : "unexpected packet type");
                 break;
@@ -77,6 +79,7 @@ struct RelayClient::Impl {
         auto socket = tcp::connect(options.host, options.control_port, 500ms, error);
         if (!socket) { fail("Control connection failed: " + error); return; }
         auto hello = receive_packet(*socket, 500ms);
+        if (hello) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + hello->payload.size(); }
         if (!hello) { fail("Control handshake read failed or timed out"); return; }
         auto token = hello && hello->type == PacketType::hello ? decode_session(hello->payload) : std::nullopt;
         if (!token || !*token || stopped) { fail("Invalid relay handshake"); return; }
@@ -84,6 +87,7 @@ struct RelayClient::Impl {
         { std::lock_guard lock(mutex); session = *token; }
         video_worker = std::thread([this, token = *token] { video_loop(token); });
         auto initial = receive_packet(*socket, 350ms);
+        if (initial) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + initial->payload.size(); }
         if (!initial) { fail("Initial control status read failed or timed out"); return; }
         if (initial->type != PacketType::status) { fail("Unexpected initial control packet"); return; }
         auto initial_status = decode_status(initial->payload);
@@ -126,7 +130,9 @@ struct RelayClient::Impl {
                 std::this_thread::sleep_for(2ms); continue;
             }
             if (!send_packet(*socket, type, payload, 50ms)) { failure = "Control send failed or timed out"; break; }
+            { std::lock_guard lock(mutex); traffic.control_sent_bytes += 12U + payload.size(); }
             auto packet = receive_packet(*socket, 350ms);
+            if (packet) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + packet->payload.size(); }
             if (!packet) { failure = "Control status read failed or timed out"; break; }
             if (packet->type != PacketType::status) { failure = "Unexpected control packet"; break; }
             auto status = decode_status(packet->payload);
@@ -223,6 +229,7 @@ ControlSnapshot RelayClient::control_snapshot() const {
     return result;
 }
 CaptureSnapshot RelayClient::capture_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->capture; }
+TrafficSnapshot RelayClient::traffic_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->traffic; }
 std::optional<CaptureSample> RelayClient::take_sample() {
     std::lock_guard lock(impl_->mutex);
     auto sample = std::exchange(impl_->latest, std::nullopt);

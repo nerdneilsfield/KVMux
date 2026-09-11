@@ -132,6 +132,7 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
     auto videos = tcp::Listener::bind("127.0.0.1", 0, error);
     require(controls && videos, "startup listeners");
     std::atomic<bool> done{}, active_seen{};
+    std::atomic<std::uint64_t> control_received_bytes{}, control_sent_bytes{};
     std::jthread server([&] {
         auto socket = controls->accept(2s);
         if (!socket) return;
@@ -140,14 +141,17 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
         status.control.target_usb_ready = status.control.release_confirmed = true;
         if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
             !send_packet(*socket, PacketType::status, encode_status(status))) return;
+        control_sent_bytes = 12U + encode_session(42).size() + 12U + encode_status(status).size();
         while (!done) {
             auto packet = receive_packet(*socket, 400ms);
             if (!packet) break;
+            control_received_bytes += 12U + packet->payload.size();
             if (packet->type == PacketType::heartbeat) {
                 const auto heartbeat = decode_heartbeat(packet->payload);
                 if (heartbeat && heartbeat->gui_active) active_seen = true;
             }
             if (!send_packet(*socket, PacketType::status, encode_status(status))) break;
+            control_sent_bytes += 12U + encode_status(status).size();
         }
     });
     std::jthread video([&] {
@@ -161,6 +165,9 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
         }
     });
     RelayClient client({"127.0.0.1", *controls->local_port(), *videos->local_port()});
+    const auto empty = client.traffic_snapshot();
+    require(empty.video_received_bytes == 0 && empty.control_received_bytes == 0 && empty.control_sent_bytes == 0,
+        "new client traffic starts at zero");
     const auto started = std::chrono::steady_clock::now();
     client.start(); // No GUI progress before the handshake, as in the real GUI.
     client.active(true);
@@ -176,4 +183,20 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
     require(std::chrono::steady_clock::now() - started >= 250ms, "startup gets the existing bounded grace");
     require(!active_seen, "startup grace never grants an active lease");
     client.stop(); done = true;
+    server.join(); video.join();
+    const auto traffic = client.traffic_snapshot();
+    const auto sample = CaptureSample::make_mjpeg(1, 1, std::chrono::steady_clock::now(), 16, 16, jpeg);
+    require(sample.has_value(), "traffic sample");
+    const auto video_packet_bytes = 12U + encode_mjpeg(*sample).size();
+    require(traffic.video_received_bytes > 0 && traffic.video_received_bytes % video_packet_bytes == 0,
+        "video traffic counts complete packets including headers");
+    require(traffic.control_sent_bytes > 0 && traffic.control_sent_bytes == control_received_bytes,
+        "control sent traffic matches peer received packets");
+    require(traffic.control_received_bytes == control_sent_bytes,
+        "control received traffic includes handshake and status headers");
+    client.stop();
+    const auto stopped = client.traffic_snapshot();
+    require(stopped.video_received_bytes == traffic.video_received_bytes &&
+        stopped.control_received_bytes == traffic.control_received_bytes && stopped.control_sent_bytes == traffic.control_sent_bytes,
+        "stop preserves cumulative traffic");
 }
