@@ -18,7 +18,7 @@ HEVC codec, dimensions, nanosecond PTS, capture sequence, generation, arrival,
 and IDR flag. Encoded sequence starts at1 on configure and survives reset. Parameter sets accompany IDRs. Shared contracts are in new
 `src/video/codec/video_codec.hpp`. All calls have one owner thread; submit/poll
 are bounded and nonblocking. `again` means unaccepted input or absent output.
-No accepted compressed frame is dropped. Latest-value dropping is legal only
+Accepted dependent compressed frames are not silently dropped: congestion or gaps trigger IDR resynchronization. Latest-value dropping is legal only
 before encoding and after ordered decoding. Lifecycle calls can block.
 Explicit backend selection fails clearly when unavailable. Per the later user
 request, automatic selection tries hardware first and falls back to CPU encoding
@@ -38,7 +38,7 @@ VideoToolbox, not native encoder, capture latency, or application streaming.
 | A1 | Bounded owned native encoder, metadata, dynamic IDR | T1 | Build standalone native test on jetson-hy; 60 synthetic AUs, monotonic matching PTS/sequence, requested IDR plus parameter sets, no camera/HID |
 | A2 | Hardware decode and explicit CPU frames | T2 | Decode T1 stream on Mac; 60 frames, no B frames, retained CPU frames and matching metadata |
 | A3 | Unsupported backend fails clearly | T1/T2/T3 | Explicit unavailable backend produces named error, never software fallback |
-| A4 | HEVC ordered relay and recovery | T3 | Transport AU framing preserves metadata; stale progress/gap recovery starts new generation with IDR rather than dropping dependent AUs |
+| A4 | HEVC ordered relay and recovery | T3 | Transport AU framing preserves metadata; gap recovery resets decoder references and waits for an IDR; reconnect starts a new session generation |
 | A5 | MJPEG unchanged, selectable HEVC UI | T4 | Existing tests and MJPEG run pass; UI chooses supported backend, actual synthetic relay decodes |
 
 ## Execution
@@ -77,12 +77,12 @@ for independent decoder check. No capture/camera/HID or running app touched.
 This proves finite synthetic codec operation, not real capture latency.
 
 ### T2: Mac hardware decoder
-Status: implemented; standalone software and VideoToolbox decode/reset passed. Depends on: T1 contract. Acceptance: A2, A3.
+Status: done; standalone software and VideoToolbox decode/reset passed. Depends on: T1 contract. Acceptance: A2, A3.
 Create common-contract VideoToolbox backend. Details readiness-gated on finalized
 header and owned test AU output. Parent assigns files and exact native test.
 
 ### T3: Codec selection and ordered relay
-Status: in_progress. Depends on: T1/T2 contracts. Acceptance: A3, A4.
+Status: done. Depends on: T1/T2 contracts. Acceptance: A3, A4.
 Server worker owns raw processing, NV12 conversion and encoder submit/poll. CLI
 selects mjpeg (default) or hevc, auto/jetson encoder and bitrate in bits/s. HEVC
 requires supported native/delivered raw capture, even dimensions; explicit modes
@@ -98,7 +98,7 @@ server transport and recovery where deterministic. No production fake capture.
 Build discovery remains parent-owned and platform-specific.
 
 ### T4: UI and application acceptance
-Status: integration verification. Depends on: T3. Acceptance: A5.
+Status: done. Depends on: T3. Acceptance: A5.
 Parent defines exact UI/config entry points after working relay contract. Preserve
 MJPEG and existing safety release behavior. No unverified real latency claims.
 
@@ -155,4 +155,24 @@ Evidence is summarized in docs/acceptance.md; temporary detailed probe report is
 /tmp/kvmux-hevc-e2e-report.md. Apple VideoToolbox output is confirmed, session
 hardware-use property unverified. Real capture-card operation, long-duration
 stability and native Windows hardware are not inferred from synthetic evidence.
-Formal Jetson repository build/update is still finishing; no remote source edits.
+Formal Jetson repository update and backend-ON Release build passed; no remote source edits.
+
+## Completion audit
+
+- A1: Native NVIDIA encoder, owned input/output, PTS, forced IDR and reset passed.
+- A2: VideoToolbox output/frame-context and explicit CPU transfer passed; Apple
+  session hardware-use property remains unverified and is displayed as such.
+- A3: AUTO/ON/OFF build checks and explicit-backend failure passed; later-requested
+  Auto CPU fallback passed locally and on Jetson with hardware backends disabled.
+- A4: Protocol bounds, ordered decode, injected sequence-gap/keyframe recovery and
+  reconnect passed. Actual LAN synthetic two-session 120+120 frames passed.
+- A5: Latest full macos-debug CTest passed 16/16; Mac Release and final Jetson
+  backend-ON Release build passed. Existing MJPEG and input-safety tests passed.
+
+All scoped implementation and software/synthetic verification work is complete.
+The final Jetson checkout was fast-forwarded to b3e9661 using a Git bundle of
+already-pushed commits after GitHub fetch timed out. The final incremental build,
+CLI help and clean worktree check passed. Running user processes were not replaced.
+No claim is made for physical capture latency, sustained 1080p60 CPU performance,
+zero-copy, native Windows hardware or resolution of the older reported green-screen
+case. Mouse smoothing was discussed but is not part of this HEVC implementation.
