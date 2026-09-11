@@ -11,6 +11,7 @@ using namespace kvmux::relay;
 using namespace std::chrono_literals;
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void integrated_test(const std::vector<std::uint8_t>& jpeg);
+void startup_grace_test(const std::vector<std::uint8_t>& jpeg);
 int main(int argc, char** argv) {
     require(argc == 2, "JPEG fixture required");
     std::ifstream input(argv[1], std::ios::binary);
@@ -88,9 +89,11 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(5ms);
     require(sink.snapshot().state == ControlConnectionState::disconnected && !sink.snapshot().release_confirmed,
         "network thread cannot renew stopped GUI lease");
+    require(sink.snapshot().error == "GUI heartbeat expired", "GUI expiry diagnostic");
     source.stop(); pipeline.stop(); done = true;
     server.join(); video.join();
     integrated_test(jpeg);
+    startup_grace_test(jpeg);
 }
 
 void integrated_test(const std::vector<std::uint8_t>& jpeg) {
@@ -121,4 +124,56 @@ void integrated_test(const std::vector<std::uint8_t>& jpeg) {
     require(!sink.snapshot().release_confirmed, "actual release fenced");
     require(pump([&] {return sink.snapshot().epoch > epoch && sink.snapshot().release_confirmed;}), "actual release confirmed new epoch");
     source.stop(); pipeline.stop(); server.stop(); hardware.disconnect();
+}
+
+void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
+    std::string error;
+    auto controls = tcp::Listener::bind("127.0.0.1", 0, error);
+    auto videos = tcp::Listener::bind("127.0.0.1", 0, error);
+    require(controls && videos, "startup listeners");
+    std::atomic<bool> done{}, active_seen{};
+    std::jthread server([&] {
+        auto socket = controls->accept(2s);
+        if (!socket) return;
+        Status status; status.session = 42; status.control.epoch = 1;
+        status.control.state = ControlConnectionState::ready;
+        status.control.target_usb_ready = status.control.release_confirmed = true;
+        if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
+            !send_packet(*socket, PacketType::status, encode_status(status))) return;
+        while (!done) {
+            auto packet = receive_packet(*socket, 400ms);
+            if (!packet) break;
+            if (packet->type == PacketType::heartbeat) {
+                const auto heartbeat = decode_heartbeat(packet->payload);
+                if (heartbeat && heartbeat->gui_active) active_seen = true;
+            }
+            if (!send_packet(*socket, PacketType::status, encode_status(status))) break;
+        }
+    });
+    std::jthread video([&] {
+        auto socket = videos->accept(2s);
+        if (!socket || !receive_packet(*socket, 500ms)) return;
+        std::uint64_t sequence{};
+        while (!done) {
+            auto sample = CaptureSample::make_mjpeg(1, ++sequence, std::chrono::steady_clock::now(), 16, 16, jpeg);
+            if (!sample || !send_packet(*socket, PacketType::video_mjpeg, encode_mjpeg(*sample))) break;
+            std::this_thread::sleep_for(10ms);
+        }
+    });
+    RelayClient client({"127.0.0.1", *controls->local_port(), *videos->local_port()});
+    const auto started = std::chrono::steady_clock::now();
+    client.start(); // No GUI progress before the handshake, as in the real GUI.
+    client.active(true);
+    client.video_presented(1);
+    const auto deadline = started + 2s;
+    while (client.control_snapshot().state == ControlConnectionState::opening &&
+           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    require(client.control_snapshot().state == ControlConnectionState::ready, "handshake survives before first GUI tick");
+    require(client.submit({1,1,{},KeyEdge{4,true}}) == SubmitResult::not_ready, "startup grace cannot authorize input");
+    while (client.control_snapshot().state != ControlConnectionState::disconnected &&
+           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    require(client.control_snapshot().error == "GUI heartbeat expired", "startup grace expires without real GUI progress");
+    require(std::chrono::steady_clock::now() - started >= 250ms, "startup gets the existing bounded grace");
+    require(!active_seen, "startup grace never grants an active lease");
+    client.stop(); done = true;
 }

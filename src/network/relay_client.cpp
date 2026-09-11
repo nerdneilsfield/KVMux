@@ -21,7 +21,7 @@ struct RelayClient::Impl {
     std::deque<ControlEvent> events;
     std::optional<MouseMode> mode;
     std::uint64_t session{}, min_epoch{}, last_sequence{}, video_sequence{};
-    bool release_pending{}, active{};
+    bool release_pending{}, active{}, gui_seen{};
     Clock::time_point progress{}, consumed{}, status_at{};
 
     void fail(std::string error) {
@@ -64,20 +64,23 @@ struct RelayClient::Impl {
         auto socket = tcp::connect(options.host, options.control_port, 500ms, error);
         if (!socket) { fail("Control connection failed: " + error); return; }
         auto hello = receive_packet(*socket, 500ms);
+        if (!hello) { fail("Control handshake read failed or timed out"); return; }
         auto token = hello && hello->type == PacketType::hello ? decode_session(hello->payload) : std::nullopt;
         if (!token || !*token || stopped) { fail("Invalid relay handshake"); return; }
         { std::lock_guard lock(mutex); session = *token; }
         video_worker = std::thread([this, token = *token] { video_loop(token); });
         auto initial = receive_packet(*socket, 350ms);
-        if (!initial || initial->type != PacketType::status) { fail("Missing initial status"); return; }
+        if (!initial) { fail("Initial control status read failed or timed out"); return; }
+        if (initial->type != PacketType::status) { fail("Unexpected initial control packet"); return; }
         auto initial_status = decode_status(initial->payload);
         if (!initial_status || initial_status->session != *token) { fail("Invalid initial status"); return; }
         { std::lock_guard lock(mutex); control = initial_status->control; status_at = Clock::now(); }
         auto last_progress = Clock::time_point{};
         auto heartbeat_at = Clock::time_point{};
         bool last_active = false;
+        std::string failure;
         while (!stopped) {
-            { std::lock_guard lock(mutex); if (Clock::now() - progress >= 250ms) break; }
+            { std::lock_guard lock(mutex); if (Clock::now() - progress >= 250ms) { failure = "GUI heartbeat expired"; break; } }
             PacketType type = PacketType::heartbeat;
             std::vector<std::uint8_t> payload;
             {
@@ -91,7 +94,7 @@ struct RelayClient::Impl {
                     min_epoch = control.epoch + 1; control.release_confirmed = false;
                     control.state = ControlConnectionState::clearing; mode.reset();
                 } else if ((progress != last_progress || active != last_active) && now - progress < 250ms && (now - heartbeat_at >= 50ms || active != last_active) && (active || events.empty())) {
-                    payload = encode_heartbeat({session, control.epoch, active,
+                    payload = encode_heartbeat({session, control.epoch, active && gui_seen,
                         consumed != Clock::time_point{} && now - consumed < 500ms, video_sequence});
                     last_progress = progress; heartbeat_at = now; last_active = active;
                 } else if (!events.empty()) {
@@ -104,20 +107,21 @@ struct RelayClient::Impl {
             if (payload.empty()) {
                 bool expired;
                 { std::lock_guard lock(mutex); expired = Clock::now() - progress >= 250ms; }
-                if (expired) break;
+                if (expired) { failure = "GUI heartbeat expired"; break; }
                 std::this_thread::sleep_for(2ms); continue;
             }
-            if (!send_packet(*socket, type, payload, 50ms)) break;
+            if (!send_packet(*socket, type, payload, 50ms)) { failure = "Control send failed or timed out"; break; }
             auto packet = receive_packet(*socket, 350ms);
-            if (!packet || packet->type != PacketType::status) break;
+            if (!packet) { failure = "Control status read failed or timed out"; break; }
+            if (packet->type != PacketType::status) { failure = "Unexpected control packet"; break; }
             auto status = decode_status(packet->payload);
-            if (!status || status->session != *token) break;
+            if (!status || status->session != *token) { failure = "Invalid control status or session"; break; }
             std::lock_guard lock(mutex);
             if (status->control.epoch < control.epoch || status->control.epoch < min_epoch) continue;
             control = std::move(status->control);
             status_at = Clock::now();
         }
-        if (!stopped) fail("Control connection lost");
+        if (!stopped) fail(std::move(failure));
     }
 };
 RelayClient::RelayClient(ClientOptions options) : impl_(std::make_unique<Impl>(std::move(options))) {}
@@ -137,7 +141,10 @@ void RelayClient::start() {
         const auto generation = p.capture.generation + 1;
         p.capture = {}; p.capture.generation = generation; p.capture.state = CaptureState::starting;
         p.latest.reset(); p.events.clear(); p.session = p.min_epoch = p.last_sequence = p.video_sequence = 0;
-        p.release_pending = p.active = false; p.consumed = {}; p.status_at = {};
+        p.release_pending = p.active = p.gui_seen = false; p.consumed = {}; p.status_at = {};
+        // Allow the first GUI tick to follow the asynchronous network handshake.
+        // This startup grace is not authorization to forward input.
+        p.progress = Clock::now();
         p.stopped = false;
     }
     p.control_worker = std::thread([&p] { p.control_loop(); });
@@ -175,11 +182,11 @@ void RelayClient::video_presented(std::uint64_t sequence) noexcept {
     std::lock_guard lock(impl_->mutex);
     if (sequence > impl_->video_sequence) { impl_->video_sequence = sequence; impl_->consumed = Clock::now(); }
 }
-void RelayClient::gui_progress() noexcept { std::lock_guard lock(impl_->mutex); impl_->progress = Clock::now(); }
+void RelayClient::gui_progress() noexcept { std::lock_guard lock(impl_->mutex); impl_->progress = Clock::now(); impl_->gui_seen = true; }
 SubmitResult RelayClient::submit(ControlEvent event) {
     std::lock_guard lock(impl_->mutex);
     auto& p = *impl_;
-    if (p.stopped || p.control.state != ControlConnectionState::ready || !p.control.target_usb_ready || !p.control.release_confirmed ||
+    if (p.stopped || !p.gui_seen || p.control.state != ControlConnectionState::ready || !p.control.target_usb_ready || !p.control.release_confirmed ||
         event.epoch != p.control.epoch || event.epoch < p.min_epoch || event.sequence <= p.last_sequence ||
         Clock::now() - p.status_at >= 250ms || Clock::now() - p.progress >= 250ms ||
         p.consumed == Clock::time_point{} || Clock::now() - p.consumed >= 500ms) return SubmitResult::not_ready;

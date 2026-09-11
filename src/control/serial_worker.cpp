@@ -183,7 +183,12 @@ struct Ch9329ControlSink::Impl {
                 value.chip_version = reply.data[0];
                 value.target_usb_ready = usb_ready;
                 value.keyboard_leds = reply.data[2];
-                value.state = usb_ready ? ControlConnectionState::clearing : ControlConnectionState::monitoring;
+                // A routine successful probe must not revoke an active relay lease
+                // through a transient clearing snapshot between mutex acquisitions.
+                value.state = !usb_ready ? ControlConnectionState::monitoring :
+                    (configuration_validated && !handshake_needs_clear ?
+                        ControlConnectionState::ready : ControlConnectionState::clearing);
+                if (usb_ready && configuration_validated && !handshake_needs_clear) queue.set_ready(true);
             });
             if (!usb_ready) {
                 std::lock_guard lock(mutex);
@@ -196,10 +201,6 @@ struct Ch9329ControlSink::Impl {
             } else if (handshake_needs_clear) {
                 handshake_needs_clear = false;
                 begin_clear(now, true);
-            } else {
-                std::lock_guard lock(mutex);
-                queue.set_ready(true);
-                status.state = ControlConnectionState::ready;
             }
         } else if (purpose == Purpose::config) {
             const bool valid = keyboard_and_mouse_mode(reply.data[0]) && protocol_mode(reply.data[1]);
