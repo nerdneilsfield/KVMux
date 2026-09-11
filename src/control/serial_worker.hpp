@@ -31,11 +31,11 @@ public:
     Ch9329ControlSink(const Ch9329ControlSink&) = delete;
     Ch9329ControlSink& operator=(const Ch9329ControlSink&) = delete;
 
-    void connect(std::string port, int baud_rate, std::uint8_t address = 0);
-    void disconnect() noexcept;
-    void set_mouse_mode(MouseMode mode);
-    void set_control_active(bool active) noexcept;
-    void update_ui_heartbeat() noexcept;
+    void connect(std::string port, int baud_rate, std::uint8_t address = 0) override;
+    void disconnect() noexcept override;
+    void set_mouse_mode(MouseMode mode) override;
+    void set_control_active(bool active) noexcept override;
+    void update_ui_heartbeat() noexcept override;
 
     [[nodiscard]] SubmitResult submit(ControlEvent event) override;
     void release_all() noexcept override;

@@ -49,7 +49,7 @@ public:
 
     KvmSession();
     KvmSession(std::unique_ptr<CaptureSource> capture,
-               std::unique_ptr<Ch9329ControlSink> control);
+               std::unique_ptr<ControlSink> control);
     ~KvmSession();
     KvmSession(const KvmSession&) = delete;
     KvmSession& operator=(const KvmSession&) = delete;
@@ -92,7 +92,7 @@ private:
     [[nodiscard]] bool preview_only() const noexcept;
 
     std::unique_ptr<CaptureSource> capture_;
-    std::unique_ptr<Ch9329ControlSink> control_;
+    std::unique_ptr<ControlSink> control_;
     VideoPipeline video_;
     InputRouter input_;
 

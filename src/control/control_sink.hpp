@@ -44,6 +44,12 @@ struct ControlSnapshot {
 class ControlSink {
 public:
     virtual ~ControlSink() = default;
+    virtual void connect(std::string, int, std::uint8_t = 0) {}
+    virtual void disconnect() noexcept {}
+    virtual void set_mouse_mode(MouseMode) {}
+    virtual void set_control_active(bool) noexcept {}
+    virtual void update_ui_heartbeat() noexcept {}
+    virtual void video_presented(std::uint64_t) noexcept {}
     [[nodiscard]] virtual SubmitResult submit(ControlEvent event) = 0;
     virtual void release_all() noexcept = 0;
     [[nodiscard]] virtual ControlSnapshot snapshot() const = 0;

@@ -17,7 +17,7 @@ KvmSession::KvmSession()
     : KvmSession(create_platform_capture_source(), std::make_unique<Ch9329ControlSink>()) {}
 
 KvmSession::KvmSession(std::unique_ptr<CaptureSource> capture,
-                       std::unique_ptr<Ch9329ControlSink> control)
+                       std::unique_ptr<ControlSink> control)
     : capture_(std::move(capture)), control_(std::move(control)),
       video_(*capture_), input_(*control_),
       capture_worker_([this] { capture_loop(); }) {}
@@ -116,7 +116,7 @@ bool KvmSession::disconnect_control() {
 
 void KvmSession::set_host_key(std::uint16_t usage) noexcept { input_.set_host_key(usage); }
 void KvmSession::set_relative_gain(double gain) noexcept { input_.set_relative_gain(gain); }
-bool KvmSession::send_special(SpecialKeys keys) { return input_.send_special(keys); }
+bool KvmSession::send_special(SpecialKeys keys) { return video_fresh_ && input_.send_special(keys); }
 
 bool KvmSession::set_mouse_mode(MouseMode mode) {
     if (!preview_only()) return false;
@@ -127,7 +127,10 @@ bool KvmSession::set_mouse_mode(MouseMode mode) {
 }
 
 void KvmSession::set_video_rect(Rect rect) noexcept { input_.set_video_rect(rect); }
-void KvmSession::handle_input(const InputEvent& event) { input_.handle(event); }
+void KvmSession::handle_input(const InputEvent& event) {
+    control_->set_control_active(input_.captured() || input_.special_active());
+    input_.handle(event);
+}
 
 void KvmSession::request_release() noexcept {
     input_.release();
@@ -194,14 +197,20 @@ void KvmSession::tick(Clock::time_point now) {
                            (timed_out ? SessionVideoState::stale : SessionVideoState::connecting);
         }
     }
-    input_.set_video_fresh(fresh);
+    const auto decoded = video_.snapshot();
+    input_.set_video_fresh(fresh && decoded.processed_frames > 0 &&
+        decoded.latest_arrival != Clock::time_point{} && now - decoded.latest_arrival < kStaleAfter);
     if (release) request_release();
-    control_->set_control_active(input_.captured());
+    control_->set_control_active(input_.captured() || input_.special_active());
+    input_.clear_fault();
     input_.tick(now);
+    control_->set_control_active(input_.captured() || input_.special_active());
 }
 
 std::optional<VideoFrame> KvmSession::take_latest_frame() {
-    return video_.take_latest_frame();
+    auto frame = video_.take_latest_frame();
+    if (frame) control_->video_presented(frame->sequence);
+    return frame;
 }
 
 KvmSessionSnapshot KvmSession::snapshot() const {

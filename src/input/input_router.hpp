@@ -54,6 +54,8 @@ public:
     [[nodiscard]] MouseMode mouse_mode() const noexcept { return mouse_mode_; }
     [[nodiscard]] bool captured() const noexcept { return state_ == InputState::captured; }
 
+    [[nodiscard]] bool special_active() const noexcept { return !special_steps_.empty(); }
+
     void set_video_rect(Rect rect) noexcept { video_rect_ = rect; }
     void set_video_fresh(bool fresh) noexcept { video_fresh_ = fresh; }
     void set_host_key(std::uint16_t usage) noexcept;

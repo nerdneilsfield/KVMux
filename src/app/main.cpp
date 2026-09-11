@@ -1,4 +1,5 @@
 #include "app/kvm_session.hpp"
+#include "network/relay_client.hpp"
 #include "render/video_renderer.hpp"
 #include "support/config.hpp"
 #include "support/diagnostics.hpp"
@@ -96,10 +97,20 @@ int main() {
     ImGui::GetStyle().FramePadding = {8.F, 6.F};
     ImGui_ImplSDL3_InitForOpenGL(window, context); ImGui_ImplOpenGL3_Init("#version 150");
 
-    KvmSession session; (void)session.set_mouse_mode(config.mouse_mode); session.set_host_key(config.host_scancode); session.set_relative_gain(config.sensitivity);
+    auto session = std::make_unique<KvmSession>(); (void)session->set_mouse_mode(config.mouse_mode); session->set_host_key(config.host_scancode); session->set_relative_gain(config.sensitivity);
+    bool remote = false;
+    char remote_host[64] = "127.0.0.1";
+    int control_port = 17000, video_port = 17001;
+    std::vector<std::future<void>> retired_sessions;
+    auto retire_session = [&] {
+        auto old = std::move(session);
+        retired_sessions.push_back(std::async(std::launch::async, [old = std::move(old)]() mutable {
+            old->shutdown(); old.reset();
+        }));
+    };
     VideoRenderer renderer; Diagnostics diagnostics;
     std::vector<DeviceInfo> devices; std::vector<CaptureMode> modes; std::vector<SerialPortInfo> ports;
-    std::future<std::vector<DeviceInfo>> devices_future = session.enumerate_capture_devices();
+    std::future<std::vector<DeviceInfo>> devices_future = session->enumerate_capture_devices();
     std::optional<std::future<std::vector<CaptureMode>>> modes_future;
     int selected_device = -1, selected_mode = -1, selected_port = -1;
     bool fullscreen{}, diagnostics_open{}, running = true;
@@ -107,22 +118,25 @@ int main() {
     std::optional<VideoFrame> current_frame;
 
     while (running) {
+        std::erase_if(retired_sessions, [](auto& future) {
+            return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+        });
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
-            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session.focus_lost();
-            if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session.minimized();
-            if (event.type == SDL_EVENT_MOUSE_MOTION && config.mouse_mode == MouseMode::relative) session.handle_input({InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
-            else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL) session.handle_input(to_input(event));
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
+            if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session->minimized();
+            if (event.type == SDL_EVENT_MOUSE_MOTION && config.mouse_mode == MouseMode::relative) session->handle_input({InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
+            else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL) session->handle_input(to_input(event));
         }
         if (devices_future.valid() && devices_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) devices = devices_future.get();
         if (modes_future && modes_future->wait_for(std::chrono::seconds(0)) == std::future_status::ready) { modes = modes_future->get(); selected_mode = modes.empty() ? -1 : 0; modes_future.reset(); }
         if (std::chrono::steady_clock::now() >= next_serial_scan) { ports = enumerate_serial_ports(); next_serial_scan = std::chrono::steady_clock::now() + std::chrono::seconds(1); }
-        session.tick();
-        if (auto newest = session.take_latest_frame()) { current_frame = std::move(newest); diagnostics.record_decode(current_frame->decoded); }
+        session->tick();
+        if (auto newest = session->take_latest_frame()) { current_frame = std::move(newest); diagnostics.record_decode(current_frame->decoded); }
         if (current_frame && renderer.upload(*current_frame, config.color_override)) { diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
-        const auto snapshot = session.snapshot();
+        const auto snapshot = session->snapshot();
         diagnostics.set_mailbox_overwrites(snapshot.capture.overwritten_samples, snapshot.video.overwritten_frames);
         diagnostics.record_ack_rtt(snapshot.control.last_ack_rtt);
         diagnostics.set_pixel_path(renderer.snapshot().pixel_path); if (!renderer.snapshot().error.empty()) diagnostics.set_recent_error(renderer.snapshot().error);
@@ -146,6 +160,46 @@ int main() {
         }
         const bool controls_enabled = !captured;
         ImGui::BeginDisabled(!controls_enabled);
+        const bool retiring = !retired_sessions.empty();
+        if (retiring) ImGui::TextUnformatted("Stopping previous session...");
+        ImGui::BeginDisabled(retiring);
+        bool requested_remote = remote;
+        if (ImGui::RadioButton("Local", !remote)) requested_remote = false;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
+        if (requested_remote != remote && !retiring) {
+            retire_session(); remote = requested_remote;
+            session = std::make_unique<KvmSession>();
+            devices.clear(); modes.clear(); selected_device = selected_mode = -1;
+            modes_future.reset(); devices_future = session->enumerate_capture_devices();
+            current_frame.reset(); renderer.destroy();
+            (void)session->set_mouse_mode(config.mouse_mode);
+            session->set_host_key(config.host_scancode);
+        }
+        if (remote) {
+            ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
+            ImGui::InputInt("Control port", &control_port);
+            ImGui::InputInt("Video port", &video_port);
+            if (ImGui::Button("Connect relay") && retired_sessions.empty() && control_port > 0 && control_port <= 65535 && video_port > 0 && video_port <= 65535) {
+                retire_session();
+                devices_future = {}; modes_future.reset();
+                devices.clear(); modes.clear(); selected_device = selected_mode = -1;
+                auto client = std::make_shared<relay::RelayClient>(relay::ClientOptions{
+                    remote_host, static_cast<std::uint16_t>(control_port), static_cast<std::uint16_t>(video_port)});
+                auto capture = std::make_unique<relay::NetworkCaptureSource>(client);
+                const auto device = capture->enumerate_devices().front();
+                const auto mode = capture->enumerate_modes(device.stable_id).front();
+                session = std::make_unique<KvmSession>(std::move(capture), std::make_unique<relay::NetworkControlSink>(client));
+                session->set_host_key(config.host_scancode);
+                (void)session->set_mouse_mode(config.mouse_mode);
+                (void)session->select_capture(device, mode);
+                current_frame.reset(); renderer.destroy();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Disconnect relay")) { session->release_control(); (void)session->stop_capture(); (void)session->disconnect_control(); }
+        }
+        ImGui::EndDisabled();
+        if (!remote) {
         if (ImGui::BeginTable("connections", 4, ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("setting", ImGuiTableColumnFlags_WidthFixed, 120.F);
             ImGui::TableSetupColumn("choice", ImGuiTableColumnFlags_WidthStretch, 2.F);
@@ -158,7 +212,7 @@ int main() {
                 for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
                     if (ImGui::Selectable(devices[i].display_name.c_str(), i == selected_device)) {
                         selected_device = i; modes.clear(); selected_mode = -1;
-                        modes_future = session.enumerate_capture_modes(devices[i].stable_id);
+                        modes_future = session->enumerate_capture_modes(devices[i].stable_id);
                     }
                 }
                 ImGui::EndCombo();
@@ -184,25 +238,26 @@ int main() {
             ImGui::EndTable();
         }
         if (ImGui::Button("Start preview") && selected_device >= 0 && selected_mode >= 0)
-            (void)session.select_capture(devices[selected_device], modes[selected_mode]);
+            (void)session->select_capture(devices[selected_device], modes[selected_mode]);
         ImGui::SameLine();
         if (ImGui::Button("Connect") && selected_port >= 0)
-            (void)session.connect_control(ports[selected_port].name, config.serial_baud_rate, config.serial_address);
-        ImGui::SameLine(); if (ImGui::Button("Disconnect")) (void)session.disconnect_control();
+            (void)session->connect_control(ports[selected_port].name, config.serial_baud_rate, config.serial_address);
+        ImGui::SameLine(); if (ImGui::Button("Disconnect")) (void)session->disconnect_control();
+        }
         ImGui::SameLine();
         if (ImGui::RadioButton("Absolute", config.mouse_mode == MouseMode::absolute)) {
-            config.mouse_mode = MouseMode::absolute; (void)session.set_mouse_mode(config.mouse_mode);
+            config.mouse_mode = MouseMode::absolute; (void)session->set_mouse_mode(config.mouse_mode);
         }
         ImGui::SameLine();
         if (ImGui::RadioButton("Relative", config.mouse_mode == MouseMode::relative)) {
-            config.mouse_mode = MouseMode::relative; (void)session.set_mouse_mode(config.mouse_mode);
+            config.mouse_mode = MouseMode::relative; (void)session->set_mouse_mode(config.mouse_mode);
         }
         ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
         float sensitivity = static_cast<float>(config.sensitivity);
         if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.1F, 4.F)) config.sensitivity = sensitivity;
-        session.set_relative_gain(config.sensitivity);
-        ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session.send_special(SpecialKeys::control_alt_delete);
-        ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session.send_special(SpecialKeys::alt_tab);
+        session->set_relative_gain(config.sensitivity);
+        ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session->send_special(SpecialKeys::control_alt_delete);
+        ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session->send_special(SpecialKeys::alt_tab);
         ImGui::SameLine(); ImGui::Checkbox("VSync", &config.vsync);
         ImGui::SameLine(); ImGui::SetNextItemWidth(145.F);
         const char* color_names[] = {"Color: automatic", "Color: BT.601 limited", "Color: BT.601 full", "Color: BT.709 limited", "Color: BT.709 full"};
@@ -218,7 +273,7 @@ int main() {
         int host = config.host_scancode == 231 ? 1 : 0;
         if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 228 : 231;
 #endif
-        session.set_host_key(config.host_scancode);
+        session->set_host_key(config.host_scancode);
         ImGui::EndDisabled();
         SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
         if (captured) ImGui::TextUnformatted("Control captured. Host key releases control.");
@@ -230,12 +285,12 @@ int main() {
         ImGui::InvisibleButton("##video_surface", video_size);
         if (renderer.texture_id() && renderer.width() > 0) {
             const auto fit = fit_video_rect({start.x, start.y, video_size.x, video_size.y}, renderer.width(), renderer.height());
-            session.set_video_rect(fit);
+            session->set_video_rect(fit);
             ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(renderer.texture_id()),
                 {static_cast<float>(fit.x), static_cast<float>(fit.y)},
                 {static_cast<float>(fit.x + fit.width), static_cast<float>(fit.y + fit.height)}, {0, 1}, {1, 0});
         } else {
-            session.set_video_rect({});
+            session->set_video_rect({});
         }
         if (!snapshot.video_fresh) {
             const ImVec2 warning_pos{start.x + 16.F, start.y + 16.F};
@@ -253,6 +308,6 @@ int main() {
         if (diagnostics_open) { const auto d = diagnostics.snapshot(); ImGui::Begin("Diagnostics", &diagnostics_open); ImGui::Text("Capture %.1f fps  Decode %.1f fps  Present %.1f fps", d.capture_fps, d.decode_fps, d.unique_present_fps); ImGui::Text("Sample/frame overwrites: %llu / %llu", static_cast<unsigned long long>(d.sample_mailbox_overwrites), static_cast<unsigned long long>(d.frame_mailbox_overwrites)); ImGui::Text("ACK %.2f ms  timeouts %llu", d.ack_rtt.latest_ms, static_cast<unsigned long long>(d.timeouts)); ImGui::Text("Pixel path: %s", d.pixel_path.c_str()); ImGui::TextWrapped("%s", d.recent_error.c_str()); ImGui::End(); }
         ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(.05F,.05F,.06F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
     }
-    session.shutdown(); if (pref) { int w{}, h{}; SDL_GetWindowSize(window, &w, &h); config.window.width = w; config.window.height = h; try { save_config(*pref, config); } catch (...) {} }
+    session->shutdown(); if (pref) { int w{}, h{}; SDL_GetWindowSize(window, &w, &h); config.window.width = w; config.window.height = h; try { save_config(*pref, config); } catch (...) {} }
     renderer.destroy(); ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL3_Shutdown(); ImGui::DestroyContext(); SDL_GL_DestroyContext(context); SDL_DestroyWindow(window); SDL_Quit(); return 0;
 }
