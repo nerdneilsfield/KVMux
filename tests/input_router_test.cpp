@@ -1,4 +1,6 @@
 #include "input/input_router.hpp"
+#include "control/ch9329_protocol.hpp"
+#include "control/hid_keyboard.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -81,6 +83,46 @@ int main() {
         require(sink.events.size() == 2 && std::get<KeyEdge>(sink.events[0].payload).pressed &&
                     !std::get<KeyEdge>(sink.events[1].payload).pressed,
                 "new press after isolation keeps quick edges");
+    }
+
+    {
+        FakeSink sink;
+        // Target Caps Lock LED is feedback, not a request to press Caps Lock.
+        sink.snapshot_value.keyboard_leds = 0x02;
+        InputRouter router(sink);
+        router.set_video_rect({0, 0, 200, 200});
+        router.set_video_fresh(true);
+        router.handle({InputKey{0x39, true, false}});
+        capture(router, sink);
+        router.handle({InputKey{0x39, true, true}});
+        router.handle({InputKey{0x39, false, false}});
+        require(sink.events.empty(), "pre-held Caps Lock and activation send no keyboard input");
+        router.handle({InputKey{0xe1, true, false}});
+        router.handle({InputKey{0x04, true, false}});
+        HidKeyboardState keyboard;
+        for (const auto& event : sink.events) {
+            const auto edge = std::get<KeyEdge>(event.payload);
+            require(edge.usage != 0x39, "Shift and A do not synthesize Caps Lock");
+            require(keyboard.press(edge.usage), "keyboard edge admitted");
+        }
+        auto report = ch9329::keyboard_report(0, keyboard.modifiers(), keyboard.keys());
+        require(report.data == std::vector<std::uint8_t>{0x02, 0, 0x04, 0, 0, 0, 0, 0},
+                "Shift is modifier bit, not Caps Lock usage");
+        keyboard.clear();
+        report = ch9329::keyboard_report(0, keyboard.modifiers(), keyboard.keys());
+        require(report.data == std::vector<std::uint8_t>(8, 0),
+                "clear report releases modifiers and keys without toggling Caps Lock");
+        require(keyboard.press(0x39), "Caps Lock is an ordinary HID usage");
+        report = ch9329::keyboard_report(0, keyboard.modifiers(), keyboard.keys());
+        require(report.data == std::vector<std::uint8_t>{0, 0, 0x39, 0, 0, 0, 0, 0},
+                "Caps Lock occupies a key slot, not the modifier or reserved byte");
+        router.handle({InputKey{0x39, true, false}});
+        router.handle({InputKey{0x39, false, false}});
+        require(sink.events.size() == 4 &&
+                    std::get<KeyEdge>(sink.events[2].payload).usage == 0x39 &&
+                    std::get<KeyEdge>(sink.events[2].payload).pressed &&
+                    !std::get<KeyEdge>(sink.events[3].payload).pressed,
+                "only a fresh Caps Lock press forwards its edges");
     }
 
     {

@@ -203,6 +203,12 @@ struct Ch9329ControlSink::Impl {
             const bool usb_ready = reply.data[1] == 1U;
             spdlog::debug("CH9329 GET_INFO: response_length={} chip_version=0x{:02x} usb_status={} usb_ready={}",
                           reply.data.size(), reply.data[0], reply.data[1], usb_ready);
+            if (!last_keyboard_leds || *last_keyboard_leds != reply.data[2]) {
+                spdlog::debug("CH9329 target keyboard LEDs: bits=0x{:02x} caps_lock={} num_lock={} scroll_lock={}",
+                              reply.data[2], (reply.data[2] & 2U) != 0,
+                              (reply.data[2] & 1U) != 0, (reply.data[2] & 4U) != 0);
+                last_keyboard_leds = reply.data[2];
+            }
             update_snapshot([&](auto& value) {
                 value.chip_version = reply.data[0];
                 value.target_usb_ready = usb_ready;
@@ -423,6 +429,7 @@ struct Ch9329ControlSink::Impl {
     std::condition_variable wake;
     ControlQueue queue;
     ControlSnapshot status;
+    std::optional<std::uint8_t> last_keyboard_leds;
     std::thread worker;
     ch9329::Parser parser;
     HidKeyboardState keyboard;
