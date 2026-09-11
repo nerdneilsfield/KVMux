@@ -56,6 +56,33 @@ int main() {
         FakeSink sink;
         InputRouter router(sink);
         router.set_video_rect({0, 0, 200, 200});
+        const auto click = [&] {
+            router.handle({InputButton{InputMouseButton::left, true, 50, 50}});
+            router.handle({InputButton{InputMouseButton::left, false, 50, 50}});
+            router.tick();
+            require(router.state() == InputState::preview && sink.events.empty(),
+                    "unavailable control/video cannot arm or defer activation");
+        };
+        click(); // Stale video, including a texture retained after capture failure.
+        router.set_video_fresh(true);
+        sink.snapshot_value.state = ControlConnectionState::disconnected;
+        click();
+        sink.snapshot_value.state = ControlConnectionState::ready;
+        sink.snapshot_value.target_usb_ready = false;
+        click();
+        sink.snapshot_value.target_usb_ready = true;
+        sink.snapshot_value.release_confirmed = false;
+        click();
+        sink.snapshot_value.release_confirmed = true;
+        router.tick();
+        require(router.state() == InputState::preview, "recovery needs a fresh click");
+        capture(router, sink);
+    }
+
+    {
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_rect({0, 0, 200, 200});
         router.set_video_fresh(true);
         capture(router, sink);
 

@@ -131,8 +131,8 @@ void InputRouter::handle_relative(const InputRelativeMotion& motion) {
 void InputRouter::handle_button(const InputButton& button) {
     const auto number = static_cast<std::uint8_t>(button.button);
     const auto bit = static_cast<std::uint8_t>(1U << (number - 1U));
-    if (state_ == InputState::preview && button.pressed &&
-        video_rect_.contains(button.x, button.y)) {
+    if (state_ == InputState::preview && button.pressed && video_fresh_ &&
+        sink_ready_released() && video_rect_.contains(button.x, button.y)) {
         state_ = InputState::arming;
         activation_button_ = number;
         activation_released_ = false;
