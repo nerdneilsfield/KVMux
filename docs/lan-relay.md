@@ -431,3 +431,36 @@ rebuild the relay to use this change; updating only the GUI is not sufficient.
 The user subsequently reported green video after reconnecting without exiting
 the updated GUI. The earlier texture allocation fix therefore does not establish
 that this real-device scenario is resolved. It remains under investigation.
+
+### Status bar and diagnostics
+
+The connection settings can be collapsed without hiding the video or status bar.
+Open **Diagnostics** for the decoded resolution, capture mode, pixel path and
+latency details. The GUI cannot discover the Windows desktop resolution from
+an MJPEG stream; the displayed resolution belongs to the decoded video.
+
+| Label | Meaning |
+| --- | --- |
+| Resolution | Width and height of the latest decoded frame, not the target desktop. |
+| `D/P` | Decoded frames and unique presented frames per second. |
+| `V rx` | Received video protocol bytes per second, in KiB/s. |
+| `C io` | Received plus sent control protocol bytes per second, in KiB/s. |
+| `Video`, `Control`, `Input` | Capture, control connection and input-capture states. |
+| `P(x,y)` | Captured pointer position relative to the displayed video's top-left corner, in logical pixels. This excludes the GUI's outer black bars. |
+| `HID(x,y)` | Most recent absolute coordinates accepted by the control queue, in the CH9329 range 0–4095. |
+| `d(dx,dy)` | Most recent accepted relative movement report. If movement was split into reports, this is the last report, not their sum. |
+
+Bandwidth is sampled about once per second. It includes the 12-byte relay packet
+header for complete packets, but excludes TCP/IP headers, retransmissions and
+incomplete packets. `--` means unavailable, including local capture or the first
+sampling interval. Reconnecting resets the displayed rate baseline.
+
+Accepted coordinates are not device acknowledgements. Pointer values clear on
+release, stale video, a fault or a mouse-mode change. The displayed video position
+and the last accepted report can differ when no new report has been submitted.
+Do not interpret that difference alone as a target-side positioning error.
+
+A complete desktop image scaled from 1920×1080 to a smaller video frame should
+still map proportionally. Black bars embedded by the capture device, cropping or
+a different target multi-monitor mapping require separate diagnosis; transmission
+resolution alone does not identify those conditions.
