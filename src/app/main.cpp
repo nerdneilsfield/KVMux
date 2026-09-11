@@ -378,8 +378,8 @@ int main(int argc, char** argv) {
         const auto d = diagnostics.snapshot();
         char rates[64];
         if (video_bytes_per_second && control_bytes_per_second)
-            std::snprintf(rates, sizeof(rates), "V:%.2f C:%.2fK/s",
-                *video_bytes_per_second / 1024.0, *control_bytes_per_second / 1024.0);
+            std::snprintf(rates, sizeof(rates), "V:%.2fM/s C:%.2fK/s",
+                *video_bytes_per_second / (1024.0 * 1024.0), *control_bytes_per_second / 1024.0);
         else std::snprintf(rates, sizeof(rates), "V:-- C:--");
         // Layout may have cleared event-time diagnostics after the earlier session snapshot.
         const auto pointer_snapshot = session->snapshot().pointer;

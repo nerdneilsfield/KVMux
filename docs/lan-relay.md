@@ -443,8 +443,8 @@ an MJPEG stream; the displayed resolution belongs to the decoded video.
 | --- | --- |
 | Resolution | Width and height of the latest decoded frame, not the target desktop. |
 | `D/P` | Decoded frames and unique presented frames per second. |
-| `V rx` | Received video protocol bytes per second, in KiB/s. |
-| `C io` | Received plus sent control protocol bytes per second, in KiB/s. |
+| `V` | Received video protocol bytes per second, in MiB/s (shown as `M/s`). |
+| `C` | Received plus sent control protocol bytes per second, in KiB/s (shown as `K/s`). |
 | `Video`, `Control`, `Input` | Capture, control connection and input-capture states. |
 | `P(x,y)` | Captured pointer position relative to the displayed video's top-left corner, in logical pixels. This excludes the GUI's outer black bars. |
 | `HID(x,y)` | Most recent absolute coordinates accepted by the control queue, in the CH9329 range 0–4095. |
@@ -482,7 +482,8 @@ not every possible reason for delayed network traffic.
 The status bar uses one line. `LAN` identifies remote mode; the status dot is
 green when video is fresh and control is ready, and amber otherwise. Hover for
 separate video/control states. The FPS pair is decode/present. `V` and `C`
-are video receive and control bidirectional rates in KiB/s (shown as `K/s`).
+are video receive in MiB/s (`M/s`) and control bidirectional in KiB/s (`K/s`).
+These are byte rates, not bit rates; 1 MiB/s is 1,048,576 bytes/s.
 `P` is video-local position, `H` is the accepted absolute HID coordinate, and
 `d` is accepted relative movement. Text scales to the available width without
 wrapping; full details remain in Diagnostics and the reference above.
