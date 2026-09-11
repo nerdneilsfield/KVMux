@@ -100,6 +100,20 @@ int main(int argc, char** argv) {
     require(decoded && decoded->frame->width == 16 && decoded->frame->height == 16 &&
                 decoded->sequence == 23,
             "complete MJPEG image decodes to an owned AVFrame");
+    require(decoded->frame->color_range == AVCOL_RANGE_JPEG &&
+                decoded->color_range == ColorRange::full,
+            "MJPEG full-range metadata reaches the renderer without limited-range conversion");
+
+    for (const auto format : {AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ444P}) {
+        AVFrame legacy{};
+        legacy.format = format;
+        legacy.color_range = AVCOL_RANGE_UNSPECIFIED;
+        require(frame_color_range(legacy) == ColorRange::full,
+                "legacy JPEG planar formats imply full range without metadata");
+        legacy.color_range = AVCOL_RANGE_MPEG;
+        require(frame_color_range(legacy) == ColorRange::limited,
+                "explicit range metadata takes precedence over legacy format inference");
+    }
 
     return EXIT_SUCCESS;
 }

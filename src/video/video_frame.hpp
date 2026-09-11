@@ -14,6 +14,18 @@ namespace kvmux {
 
 using AvFramePtr = std::shared_ptr<AVFrame>;
 
+[[nodiscard]] inline ColorRange frame_color_range(const AVFrame& frame) noexcept {
+    if (frame.color_range == AVCOL_RANGE_JPEG) return ColorRange::full;
+    if (frame.color_range == AVCOL_RANGE_MPEG) return ColorRange::limited;
+    // Legacy JPEG pixel formats encode full range even without separate metadata.
+    switch (static_cast<AVPixelFormat>(frame.format)) {
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUVJ444P: return ColorRange::full;
+    default: return ColorRange::unknown;
+    }
+}
+
 struct VideoFrame {
     std::uint64_t generation{};
     std::uint64_t sequence{};

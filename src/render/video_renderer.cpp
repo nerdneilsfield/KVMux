@@ -18,6 +18,7 @@ constexpr char kVertexShader[] = R"GLSL(#version 150
 out vec2 uv;
 void main() {
     vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    // Preserve source row order: row zero stays at texture v=0, including in the FBO.
     uv = p;
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }
@@ -85,7 +86,9 @@ unsigned int compile(unsigned int type, const char* source, std::string& error) 
 ColorRange effective_range(const VideoFrame& frame, ColorOverride value) {
     if (value == ColorOverride::bt601_full || value == ColorOverride::bt709_full) return ColorRange::full;
     if (value == ColorOverride::bt601_limited || value == ColorOverride::bt709_limited) return ColorRange::limited;
-    return frame.color_range == ColorRange::unknown ? ColorRange::limited : frame.color_range;
+    auto range = frame.color_range;
+    if (range == ColorRange::unknown && frame.frame) range = frame_color_range(*frame.frame);
+    return range == ColorRange::unknown ? ColorRange::limited : range;
 }
 
 ColorMatrix effective_matrix(const VideoFrame& frame, ColorOverride value) {
@@ -201,8 +204,11 @@ bool VideoRenderer::upload(const VideoFrame& input, ColorOverride color_override
     case AV_PIX_FMT_YUYV422: kind = 0; snapshot_.pixel_path = "GPU YUY2"; break;
     case AV_PIX_FMT_UYVY422: kind = 1; snapshot_.pixel_path = "GPU UYVY"; break;
     case AV_PIX_FMT_NV12: kind = 2; snapshot_.pixel_path = "GPU NV12"; break;
+    case AV_PIX_FMT_YUVJ420P:  // Same planes; full range comes from frame metadata.
     case AV_PIX_FMT_YUV420P: kind = 3; snapshot_.pixel_path = "GPU YUV420P"; break;
+    case AV_PIX_FMT_YUVJ422P:  // Same planes; full range comes from frame metadata.
     case AV_PIX_FMT_YUV422P: kind = 4; snapshot_.pixel_path = "GPU YUV422P"; break;
+    case AV_PIX_FMT_YUVJ444P:  // Same planes; full range comes from frame metadata.
     case AV_PIX_FMT_YUV444P: kind = 5; snapshot_.pixel_path = "GPU YUV444P"; break;
     case AV_PIX_FMT_BGRA: kind = 6; snapshot_.pixel_path = "GPU BGRA"; break;
     case AV_PIX_FMT_RGBA: kind = 7; snapshot_.pixel_path = "GPU RGBA"; break;

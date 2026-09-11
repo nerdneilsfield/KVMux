@@ -45,8 +45,7 @@ VideoFrame metadata(const CaptureSample& sample, AvFramePtr frame) {
     ColorRange range = sample.color_range;
     ColorMatrix matrix = sample.color_matrix;
     if (range == ColorRange::unknown && frame) {
-        if (frame->color_range == AVCOL_RANGE_JPEG) range = ColorRange::full;
-        else if (frame->color_range == AVCOL_RANGE_MPEG) range = ColorRange::limited;
+        range = frame_color_range(*frame);
     }
     if (matrix == ColorMatrix::unknown && frame) {
         if (frame->colorspace == AVCOL_SPC_BT709) matrix = ColorMatrix::bt709;

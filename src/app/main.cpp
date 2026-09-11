@@ -288,7 +288,7 @@ int main() {
             session->set_video_rect(fit);
             ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(renderer.texture_id()),
                 {static_cast<float>(fit.x), static_cast<float>(fit.y)},
-                {static_cast<float>(fit.x + fit.width), static_cast<float>(fit.y + fit.height)}, {0, 1}, {1, 0});
+                {static_cast<float>(fit.x + fit.width), static_cast<float>(fit.y + fit.height)}, {0, 0}, {1, 1});
         } else {
             session->set_video_rect({});
         }
