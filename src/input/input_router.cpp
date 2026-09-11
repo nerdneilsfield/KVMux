@@ -37,6 +37,14 @@ bool supported_usb_keyboard_usage(const std::uint16_t usage) noexcept {
 InputRouter::InputRouter(ControlSink& sink, const std::uint16_t host_usage)
     : sink_(sink), host_usage_(host_usage) {}
 
+void InputRouter::set_video_rect(const Rect rect) noexcept {
+    if (rect.x != video_rect_.x || rect.y != video_rect_.y ||
+        rect.width != video_rect_.width || rect.height != video_rect_.height) {
+        pointer_ = {};
+    }
+    video_rect_ = rect;
+}
+
 void InputRouter::set_host_key(const std::uint16_t usage) noexcept {
     if (state_ == InputState::preview && supported_usb_keyboard_usage(usage)) {
         host_usage_ = usage;
@@ -95,6 +103,7 @@ void InputRouter::handle(const InputEvent& event) {
         if constexpr (std::is_same_v<T, InputPointerMotion> ||
                       std::is_same_v<T, InputButton> || std::is_same_v<T, InputWheel>) {
             if (captured() && video_fresh_ && video_rect_.width > 0 && video_rect_.height > 0) {
+                pointer_.video_rect = video_rect_;
                 pointer_.video_local = {value.x - video_rect_.x, value.y - video_rect_.y};
             }
         }

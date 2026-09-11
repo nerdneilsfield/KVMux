@@ -381,19 +381,21 @@ int main(int argc, char** argv) {
             std::snprintf(rates, sizeof(rates), "V:%.2f C:%.2fK/s",
                 *video_bytes_per_second / 1024.0, *control_bytes_per_second / 1024.0);
         else std::snprintf(rates, sizeof(rates), "V:-- C:--");
+        // Layout may have cleared event-time diagnostics after the earlier session snapshot.
+        const auto pointer_snapshot = session->snapshot().pointer;
         char pointer[96];
-        if (snapshot.pointer.video_local)
+        if (pointer_snapshot.video_local)
             std::snprintf(pointer, sizeof(pointer), "P:%.0f,%.0f",
-                snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
+                pointer_snapshot.video_local->first, pointer_snapshot.video_local->second);
         else std::snprintf(pointer, sizeof(pointer), "P:--");
         char submitted[64];
-        if (snapshot.pointer.submitted_absolute)
+        if (pointer_snapshot.submitted_absolute)
             std::snprintf(submitted, sizeof(submitted), "H:%u,%u",
-                static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
-                static_cast<unsigned>(snapshot.pointer.submitted_absolute->second));
-        else if (snapshot.pointer.submitted_relative)
+                static_cast<unsigned>(pointer_snapshot.submitted_absolute->first),
+                static_cast<unsigned>(pointer_snapshot.submitted_absolute->second));
+        else if (pointer_snapshot.submitted_relative)
             std::snprintf(submitted, sizeof(submitted), "d:%d,%d",
-                snapshot.pointer.submitted_relative->first, snapshot.pointer.submitted_relative->second);
+                pointer_snapshot.submitted_relative->first, pointer_snapshot.submitted_relative->second);
         else std::snprintf(submitted, sizeof(submitted), "H:--");
         char line[320];
         std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s",
@@ -424,6 +426,22 @@ int main(int argc, char** argv) {
             const auto d = diagnostics.snapshot();
             ImGui::Begin("Diagnostics", &diagnostics_open);
             ImGui::Text("Decoded video resolution: %s", resolution.c_str());
+            int logical_width{}, logical_height{}, pixel_width{}, pixel_height{};
+            SDL_GetWindowSize(window, &logical_width, &logical_height);
+            SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
+            ImGui::Text("Window logical: %dx%d  Framebuffer: %dx%d",
+                logical_width, logical_height, pixel_width, pixel_height);
+            if (pointer_snapshot.video_rect && pointer_snapshot.video_local) {
+                const auto& rect = *pointer_snapshot.video_rect;
+                const auto [x, y] = *pointer_snapshot.video_local;
+                ImGui::Text("Event video rect: x=%.2f y=%.2f w=%.2f h=%.2f",
+                    rect.x, rect.y, rect.width, rect.height);
+                ImGui::Text("Event window: %.2f,%.2f  Video local: %.2f,%.2f",
+                    x + rect.x, y + rect.y, x, y);
+            } else {
+                ImGui::TextUnformatted("Event geometry: -- (move pointer while captured)");
+            }
+            ImGui::Text("Submitted (queue accepted, not ACK): %s", submitted);
             ImGui::TextWrapped("Capture mode: %s", d.capture_mode.c_str());
             ImGui::Text("Decode %.1f fps  Present %.1f fps", d.decode_fps, d.unique_present_fps);
             ImGui::Text("Sample/frame overwrites: %llu / %llu", static_cast<unsigned long long>(d.sample_mailbox_overwrites), static_cast<unsigned long long>(d.frame_mailbox_overwrites));

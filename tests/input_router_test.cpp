@@ -268,6 +268,27 @@ int main() {
         require(pointer.video_local == std::pair{50.0, 50.0} &&
                     pointer.submitted_absolute == std::pair<std::uint16_t, std::uint16_t>{1024, 2048},
                 "diagnostics show video-local units and accepted HID coordinates");
+        require(pointer.video_rect && pointer.video_rect->x == 20 &&
+                    pointer.video_rect->y == 30 && pointer.video_rect->width == 200 &&
+                    pointer.video_rect->height == 100,
+                "diagnostics retain event-time mapping rectangle");
+        router.set_video_rect({20, 30, 200, 100});
+        require(router.pointer_snapshot().submitted_absolute == pointer.submitted_absolute,
+                "unchanged layout preserves pointer diagnostics");
+        const auto event_count = sink.events.size();
+        for (const auto rect : {Rect{21, 30, 200, 100}, Rect{21, 31, 200, 100},
+                                Rect{21, 31, 201, 100}, Rect{21, 31, 201, 101}, Rect{}}) {
+            router.set_video_rect(rect);
+            const auto cleared = router.pointer_snapshot();
+            require(!cleared.video_rect && !cleared.video_local &&
+                        !cleared.submitted_absolute && !cleared.submitted_relative,
+                    "changed mapping origin or extent clears stale diagnostics");
+            require(router.captured(), "layout change does not release capture");
+            if (rect.width > 0) router.handle({InputPointerMotion{70, 80}});
+        }
+        require(sink.events.size() == event_count + 4,
+                "layout changes do not send control events");
+        router.set_video_rect({20, 30, 200, 100});
         router.handle({InputButton{InputMouseButton::left, true, 120, 55}});
         require(router.pointer_snapshot().submitted_absolute ==
                     std::pair<std::uint16_t, std::uint16_t>{2048, 1024},

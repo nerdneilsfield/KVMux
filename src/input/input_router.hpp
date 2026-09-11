@@ -47,6 +47,7 @@ struct Rect {
 
 // UI-thread diagnostics. Submission means queue acceptance, not a device ACK.
 struct InputPointerSnapshot {
+    std::optional<Rect> video_rect; // Event-time rectangle in logical window units.
     std::optional<std::pair<double, double>> video_local; // Logical window units.
     std::optional<std::pair<std::uint16_t, std::uint16_t>> submitted_absolute; // 0..4095.
     std::optional<std::pair<int, int>> submitted_relative; // Last report delta.
@@ -66,7 +67,7 @@ public:
 
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
     // logical window coordinates, not GL framebuffer pixels).
-    void set_video_rect(Rect rect) noexcept { video_rect_ = rect; }
+    void set_video_rect(Rect rect) noexcept;
     void set_video_fresh(bool fresh) noexcept {
         video_fresh_ = fresh;
         if (!fresh) { pointer_ = {}; }
