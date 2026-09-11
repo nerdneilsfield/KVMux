@@ -8,6 +8,7 @@ endif()
 
 include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(CodecBackends)
 find_package(FFmpeg REQUIRED)
 option(KVMUX_BUILD_GUI "Build the desktop GUI and its display dependencies" ON)
 if(KVMUX_BUILD_GUI)
@@ -32,11 +33,24 @@ add_library(kvmux_core STATIC
     src/support/build_info.cpp
     src/support/config.cpp
     src/support/diagnostics.cpp
+    src/video/codec/codec_factory.cpp
+    src/video/codec/ffmpeg_decoder.cpp
     src/video/capture_sample.cpp
     src/video/video_processor.cpp
     src/video/video_pipeline.cpp
 )
 add_library(kvmux::core ALIAS kvmux_core)
+target_compile_definitions(kvmux_core PRIVATE
+    KVMUX_HAS_JETSON_ENCODER=${KVMUX_HAS_JETSON_ENCODER}
+    KVMUX_HAS_VIDEOTOOLBOX=${KVMUX_HAS_VIDEOTOOLBOX})
+if(KVMUX_HAS_JETSON_ENCODER)
+    target_sources(kvmux_core PRIVATE src/video/codec/jetson_encoder.cpp)
+    target_link_libraries(kvmux_core PRIVATE PkgConfig::KVMUX_GSTREAMER)
+endif()
+if(KVMUX_HAS_VIDEOTOOLBOX)
+    target_link_libraries(kvmux_core PRIVATE
+        "${KVMUX_VIDEOTOOLBOX_FRAMEWORK}" "${KVMUX_COREFOUNDATION_FRAMEWORK}")
+endif()
 
 add_library(kvmux_capture STATIC)
 add_library(kvmux::capture ALIAS kvmux_capture)
@@ -108,6 +122,17 @@ if(KVMUX_BUILD_GUI)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(kvmux_ffmpeg_decoder_test tests/ffmpeg_decoder_test.cpp)
+    target_link_libraries(kvmux_ffmpeg_decoder_test PRIVATE kvmux::core)
+    add_test(NAME ffmpeg_decoder COMMAND kvmux_ffmpeg_decoder_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/hevc_1080p60.h265")
+
+    if(KVMUX_HAS_JETSON_ENCODER)
+        # Manual hardware qualification only; not part of ordinary CTest runs.
+        add_executable(kvmux_jetson_encoder_test tests/jetson_encoder_test.cpp)
+        target_link_libraries(kvmux_jetson_encoder_test PRIVATE kvmux::core)
+    endif()
+
     if(APPLE AND KVMUX_BUILD_GUI)
         add_executable(kvmux_video_renderer_test tests/video_renderer_macos_test.cpp src/app/kvm_session.cpp)
         target_link_libraries(kvmux_video_renderer_test PRIVATE kvmux::renderer kvmux::imgui kvmux::capture)
@@ -157,7 +182,8 @@ if(BUILD_TESTING)
     add_executable(kvmux_relay_client_test tests/relay_client_test.cpp src/app/kvm_session.cpp)
     target_link_libraries(kvmux_relay_client_test PRIVATE kvmux::core)
     add_test(NAME relay_client COMMAND kvmux_relay_client_test
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/hevc_1080p60.h265")
     set_tests_properties(relay_client PROPERTIES TIMEOUT 15)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)

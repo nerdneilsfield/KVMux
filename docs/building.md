@@ -27,6 +27,45 @@ supported versions, feature configuration, runtime packaging, and license
 obligations must be recorded when introduced. A release must ship the notices
 and source/build-offer information required by each dependency.
 
+## HEVC codec backends
+
+FFmpeg remains required on every platform. Its software HEVC decoder is always
+compiled, but callers must select it explicitly. Automatic decoder selection uses
+VideoToolbox; it does not silently fall back to software.
+
+| CMake cache option | Default | AUTO behavior |
+| --- | --- | --- |
+| `KVMUX_JETSON_ENCODER` | `AUTO` | On Linux, compile when pkg-config finds GStreamer core and app development packages; otherwise disable. |
+| `KVMUX_VIDEOTOOLBOX` | `AUTO` | On Apple platforms, compile when VideoToolbox and CoreFoundation frameworks are found; otherwise disable. |
+
+Both options accept only `AUTO`, `ON`, or `OFF`. `OFF` skips backend dependency
+discovery. `ON` requires the supported platform and development dependencies and
+fails configure with an error if they are missing. Jetson encoding requires Linux;
+VideoToolbox decoding requires Apple frameworks. No separate preset is needed:
+
+```sh
+cmake --preset linux-debug-headless -DKVMUX_JETSON_ENCODER=ON
+cmake --preset macos-debug -DKVMUX_VIDEOTOOLBOX=OFF
+```
+
+Configure checks compile dependencies only. It does not inspect device nodes,
+probe hardware, or run GStreamer plugins. A normal Linux host with GStreamer core
+and app headers can compile the Jetson backend without NVIDIA runtime plugins.
+Creating or configuring the encoder on that host then fails with a runtime error.
+A Jetson deployment needs the NVIDIA conversion and HEVC encoder plugins provided
+by its JetPack installation, plus the GStreamer runtime. Hardware backend support
+must be verified on the deployed hardware; a successful build is not hardware
+acceptance.
+
+Software fixture decoding runs in CTest as `ffmpeg_decoder`. Hardware checks are
+manual and are not required by ordinary CI. On a Jetson build with tests enabled,
+run `build/linux-debug-headless/kvmux_jetson_encoder_test output.h265` to exercise
+the encoder. On a VideoToolbox-enabled macOS build, run:
+
+```sh
+build/macos-debug/kvmux_ffmpeg_decoder_test tests/data/hevc_1080p60.h265 videotoolbox
+```
+
 ## Preset names
 
 Use `<platform>-<configuration>`, optionally followed by `-headless`:
