@@ -17,8 +17,13 @@ int main(int argc, char** argv) try {
     std::string error;
     auto encoder = create_jetson_encoder(error);
     require(bool(encoder), error);
-    CodecConfig config{1920,1080,60,1,8'000'000,600,7};
-    auto result=encoder->configure(config); require(result.ok(), result.message);
+    CodecConfig config{1920,1080,60000,1001,8'000'000,600,7};
+    auto invalid_rate = config;
+    invalid_rate.fps_numerator = 241001;
+    invalid_rate.fps_denominator = 1000;
+    auto result = encoder->configure(invalid_rate);
+    require(result.status == CodecStatus::invalid_input, "accepted frame rate above 240fps");
+    result=encoder->configure(config); require(result.ok(), result.message);
     require(!encoder->diagnostic().hardware_active,"hardware claimed before output");
     AVFrame* raw=av_frame_alloc(); require(raw, "alloc frame");
     AvFramePtr frame(raw, [](AVFrame* p){av_frame_free(&p);});
