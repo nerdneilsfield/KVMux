@@ -56,3 +56,19 @@ not a substitute for the UVC capture-card acceptance target.
   sustained performance and Windows relay hardware remain unverified.
 
 See [user-facing relay troubleshooting](lan-relay.md) for recovery steps.
+
+## Subsequent user control check and renderer regression
+
+The user reported successful control after restarting the updated applications.
+The supplied Mac log shows Captured at 00:12:23.329 and release confirmed followed
+by Preview at 00:12:41.496, with capture still Streaming. Jetson logs show normal
+GET_INFO responses and USB-ready state. This establishes a reported successful
+short hardware control session, not long-duration stability or a complete input
+matrix. Earlier TCP send failures remain unexplained.
+
+The reconnect green-screen defect was reproduced with real offscreen OpenGL:
+the old renderer failed 28 of 60 uploads; the corrected renderer passed all 60,
+including ImGui interleaving and texture reallocation cases. The macos-debug
+build and 11/11 CTests passed. Real GUI reconnect still needs user confirmation.
+The Windows Caps Lock initial-state question remains unresolved; the user
+confirmed macOS Caps Lock input-source switching is enabled.
