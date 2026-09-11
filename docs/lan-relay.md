@@ -24,7 +24,41 @@ The executable is `build/linux-debug-headless/kvmux-relay` on Linux and
 `build/windows-debug-headless/kvmux-relay.exe` on Windows. On Windows, run the build from an
 MSVC developer shell, replace the preset with `windows-debug-headless`, and make the FFmpeg runtime DLLs available on PATH.
 
-## Select capture and serial devices
+## Start with automatic selection
+
+With one capture device and one known CH340/CH341/CH343 USB serial adapter:
+
+```sh
+build/linux-debug-headless/kvmux-relay --serve
+```
+
+The relay prints the selected device ID, mode index, dimensions, exact rational
+frame rate, native/delivered formats, serial port and baud rate before opening
+these devices. The default baud rate is 57600; use `--baud` to match your CH9329.
+
+Automatic capture selection requires exactly one enumerated device. Multiple
+devices produce an error listing candidates; choose one with `--device`.
+Automatic mode selection requires both native and delivered MJPEG. It prefers
+1080p60, 720p60, 1080p30, then 720p30. The 60/30 groups include 59.94/29.97
+(including 60000/1001 and 30000/1001); the original rational rate is preserved.
+Other usable MJPEG modes sort by descending pixel area, width, height, then
+frame rate. Within a preferred group the higher frame rate wins. Exact ties
+use the first enumerated index. Modes outside the capture dimension limits or
+with invalid frame rates are not usable. Raw modes are never selected.
+
+Automatic serial selection uses libserialport USB VID/PID metadata, not port
+names. Supported adapter IDs are `1a86:7523`, `1a86:5523` and `1a86:55d3`. Exactly one match is required. Multiple matches produce an error
+listing candidates. Board UARTs, other USB serial adapters and unknown WCH IDs
+are not candidates; select them explicitly with `--serial` if appropriate.
+A matching host adapter **does not prove CH9329 identity**, the correct baud
+rate or a successful handshake. Enumeration does not open candidate ports;
+the existing control worker performs the handshake after selection.
+
+`--device`, `--mode-index` and `--serial` each override their automatic choice.
+An invalid explicit choice fails; it never falls back to a different device,
+mode or port. Device/port open failures also do not trigger a fallback.
+
+## Inspect devices or select explicitly
 
 On Linux:
 
@@ -43,7 +77,7 @@ refer to the current enumeration. This first relay implementation does not
 encode raw YUY2, UYVY, NV12 or BGRA. Selecting such a mode produces an error;
 it does not silently change the requested mode.
 
-## Start the relay
+## Start with explicit choices
 
 Linux example (replace the device, mode index and serial port):
 

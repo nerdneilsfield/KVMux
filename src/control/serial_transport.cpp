@@ -71,7 +71,15 @@ std::vector<SerialPortInfo> enumerate_serial_ports() {
     for (std::size_t index = 0; raw[index]; ++index) {
         const char* name = sp_get_port_name(raw[index]);
         const char* description = sp_get_port_description(raw[index]);
-        result.push_back({name ? name : "", description ? description : ""});
+        SerialPortInfo info{name ? name : "", description ? description : "", {}, {}};
+        int vid{}, pid{};
+        if (sp_get_port_transport(raw[index]) == SP_TRANSPORT_USB &&
+            sp_get_port_usb_vid_pid(raw[index], &vid, &pid) == SP_OK &&
+            vid >= 0 && vid <= 65535 && pid >= 0 && pid <= 65535) {
+            info.usb_vendor_id = static_cast<std::uint16_t>(vid);
+            info.usb_product_id = static_cast<std::uint16_t>(pid);
+        }
+        result.push_back(std::move(info));
     }
     return result;
 }

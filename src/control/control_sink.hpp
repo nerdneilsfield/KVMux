@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,8 @@ enum class MouseMode { absolute, relative };
 struct SerialPortInfo {
     std::string name;
     std::string description;
+    std::optional<std::uint16_t> usb_vendor_id;
+    std::optional<std::uint16_t> usb_product_id;
 };
 
 struct ControlSnapshot {

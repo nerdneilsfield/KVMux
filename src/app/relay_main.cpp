@@ -1,6 +1,7 @@
 #include "control/control_sink.hpp"
 #include "control/serial_worker.hpp"
 #include "network/relay_server.hpp"
+#include "network/relay_selection.hpp"
 #include <charconv>
 #include <csignal>
 #include <thread>
@@ -23,38 +24,53 @@ void print_help(std::ostream& out) {
            "  --list-modes DEVICE    List native modes for a capture stable ID\n"
            "  --list-serial          List serial port names and descriptions\n\n"
            "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
-           "Serve: --serve --device ID --mode-index N --serial PORT [--baud 57600]\n"
+           "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 57600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
-           "Native MJPEG only. Unauthenticated LAN TCP: trusted networks only.\n";
+           "Omitted device: require one capture device. Omitted serial: require one USB\n"
+           "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
+           "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including 59.94/29.97),\n"
+           "then descending pixel area, width, height and fps; ties use first index.\n"
+           "Explicit choices never fall back. Native and delivered MJPEG only.\n"
+           "Unauthenticated LAN TCP: trusted networks only.\n";
 }
 
 volatile std::sig_atomic_t interrupted=0;
 void interrupt(int) { interrupted=1; }
 int serve(int argc,char** argv) {
     kvmux::relay::ServerOptions options;
-    std::string device,serial; int mode=-1,baud=57600;
+    std::optional<std::string> device_request,serial_request;
+    std::optional<std::size_t> mode_request; int baud=57600;
     for(int i=2;i<argc;i+=2) {
         if(i+1>=argc)throw std::runtime_error("Missing option value");
         const std::string_view key=argv[i],value=argv[i+1];
-        if(key=="--device")device=value;
-        else if(key=="--serial")serial=value;
+        if(key=="--device")device_request=value;
+        else if(key=="--serial")serial_request=value;
         else if(key=="--bind")options.bind_address=value;
         else {
             int number{};const auto result=std::from_chars(value.data(),value.data()+value.size(),number);
             if(result.ec!=std::errc{}||result.ptr!=value.data()+value.size()||number<0)throw std::runtime_error("Invalid numeric option");
-            if(key=="--mode-index")mode=number;
+            if(key=="--mode-index")mode_request=static_cast<std::size_t>(number);
             else if(key=="--baud"&&number>0)baud=number;
             else if(key=="--control-port"&&number>0&&number<=65535)options.control_port=static_cast<std::uint16_t>(number);
             else if(key=="--video-port"&&number>0&&number<=65535)options.video_port=static_cast<std::uint16_t>(number);
             else throw std::runtime_error("Unknown or invalid serve option");
         }
     }
-    if(device.empty()||serial.empty()||mode<0)throw std::runtime_error("--serve requires --device, --mode-index and --serial");
-    auto capture=kvmux::create_platform_capture_source();auto modes=capture->enumerate_modes(device);
-    if(static_cast<std::size_t>(mode)>=modes.size())throw std::runtime_error("Capture mode index out of range");
-    const auto& selected=modes[static_cast<std::size_t>(mode)];
-    if(selected.device_format!=kvmux::PixelFormat::mjpeg||selected.delivered_format!=kvmux::PixelFormat::mjpeg)
-        throw std::runtime_error("LAN relay requires native MJPEG; raw-only capture modes are unsupported");
+    auto capture=kvmux::create_platform_capture_source();
+    const auto device=kvmux::relay::select_device(capture->enumerate_devices(),device_request);
+    const auto modes=capture->enumerate_modes(device);
+    const auto mode=kvmux::relay::select_mode(modes,mode_request);
+    const auto serial=kvmux::relay::select_serial(
+        serial_request ? std::vector<kvmux::SerialPortInfo>{} : kvmux::enumerate_serial_ports(),serial_request);
+    const auto& selected=modes[mode];
+    std::cout << "Selected device=" << std::quoted(device) << " mode-index=" << mode
+              << " size=" << selected.width << 'x' << selected.height
+              << " fps=" << selected.frame_rate.numerator << '/' << selected.frame_rate.denominator
+              << " native-format=MJPEG (" << selected.device_format_name << ") delivered-format=MJPEG"
+              << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
+    if (!serial_request)
+        std::cout << "USB adapter VID/PID match only; CH9329 handshake not yet verified.\n";
+    std::cout.flush();
     capture->start(selected);
     if(capture->snapshot().state==kvmux::CaptureState::fault)throw std::runtime_error(capture->snapshot().error);
     kvmux::Ch9329ControlSink sink;sink.connect(serial,baud);

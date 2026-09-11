@@ -24,6 +24,7 @@ add_library(kvmux_core STATIC
     src/control/serial_transport.cpp
     src/control/serial_worker.cpp
     src/input/input_router.cpp
+    src/network/relay_selection.cpp
     src/network/relay_server.cpp
     src/network/relay_client.cpp
     src/network/relay_protocol.cpp
@@ -107,6 +108,10 @@ if(KVMUX_BUILD_GUI)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(kvmux_relay_selection_test tests/relay_selection_test.cpp)
+    target_link_libraries(kvmux_relay_selection_test PRIVATE kvmux::core)
+    add_test(NAME relay_selection COMMAND kvmux_relay_selection_test)
+
     add_executable(kvmux_build_info_test tests/build_info_test.cpp)
     target_link_libraries(kvmux_build_info_test PRIVATE kvmux::core)
     add_test(NAME build_info COMMAND kvmux_build_info_test)
