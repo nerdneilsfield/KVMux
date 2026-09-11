@@ -507,3 +507,21 @@ These are byte rates, not bit rates; 1 MiB/s is 1,048,576 bytes/s.
 wrapping; full details remain in Diagnostics and the reference above.
 FPS uses one decimal place, bandwidth two, and displayed pointer coordinates
 are rounded to whole logical pixels. HID coordinates are integers.
+
+### Background Preview
+
+Pausing GUI progress no longer closes an otherwise healthy relay session solely
+because the GUI is inactive. The client sends inactive transport heartbeats.
+The 250 ms input freshness limit still applies: a stalled captured GUI loses
+input authority, queued input is cleared and release is requested. Returning to
+the window does not restore the old capture; click again to take control.
+Network, video and status failures can still end the session.
+
+### Jetson hardware encoding investigation
+
+A synthetic test on the Orin NX with L4T R36.4.7 successfully encoded 60 I420
+1920×1080 frames through `nvvidconv`, NVMM NV12 and `nvv4l2h265enc`, with no
+B-frames and a configured bitrate of 12,000,000 bits/s. The NVIDIA encoder
+reported H.265 Profile 1 and reached EOS. This confirms that hardware encoding
+works for that test; raw-to-H.265 relay transport and Mac hardware decoding
+are not yet implemented or validated end to end.
