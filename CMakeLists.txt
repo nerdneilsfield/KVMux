@@ -109,9 +109,11 @@ endif()
 
 if(BUILD_TESTING)
     if(APPLE AND KVMUX_BUILD_GUI)
-        add_executable(kvmux_video_renderer_test tests/video_renderer_macos_test.cpp)
-        target_link_libraries(kvmux_video_renderer_test PRIVATE kvmux::renderer kvmux::imgui)
-        add_test(NAME video_renderer COMMAND kvmux_video_renderer_test)
+        add_executable(kvmux_video_renderer_test tests/video_renderer_macos_test.cpp src/app/kvm_session.cpp)
+        target_link_libraries(kvmux_video_renderer_test PRIVATE kvmux::renderer kvmux::imgui kvmux::capture)
+        add_test(NAME video_renderer COMMAND kvmux_video_renderer_test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+        set_tests_properties(video_renderer PROPERTIES TIMEOUT 30)
     endif()
 
     add_executable(kvmux_relay_selection_test tests/relay_selection_test.cpp)
