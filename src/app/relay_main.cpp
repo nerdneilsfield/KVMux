@@ -1,4 +1,7 @@
 #include "control/control_sink.hpp"
+#include "support/diagnostics.hpp"
+#include <spdlog/spdlog.h>
+#include <vector>
 #include "control/serial_worker.hpp"
 #include "network/relay_server.hpp"
 #include "network/relay_selection.hpp"
@@ -18,13 +21,14 @@ namespace {
 
 void print_help(std::ostream& out) {
     out << "KVMux headless relay device tools\n"
-           "Usage: kvmux-relay COMMAND\n\n"
+           "Usage: kvmux-relay [--debug] COMMAND\n\n"
+           "  --debug                Write diagnostic logs to stderr (time, thread, level)\n"
            "  --help                 Show this help\n"
            "  --list-devices         List capture device stable IDs and names\n"
            "  --list-modes DEVICE    List native modes for a capture stable ID\n"
            "  --list-serial          List serial port names and descriptions\n\n"
            "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
-           "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 57600]\n"
+           "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
@@ -39,7 +43,7 @@ void interrupt(int) { interrupted=1; }
 int serve(int argc,char** argv) {
     kvmux::relay::ServerOptions options;
     std::optional<std::string> device_request,serial_request;
-    std::optional<std::size_t> mode_request; int baud=57600;
+    std::optional<std::size_t> mode_request; int baud=9600;
     for(int i=2;i<argc;i+=2) {
         if(i+1>=argc)throw std::runtime_error("Missing option value");
         const std::string_view key=argv[i],value=argv[i+1];
@@ -78,7 +82,19 @@ int serve(int argc,char** argv) {
     if(!server.start(options,error))throw std::runtime_error(error);
     std::signal(SIGINT,interrupt);std::signal(SIGTERM,interrupt);
     std::cout<<"Listening on "<<options.bind_address<<":"<<server.control_port()<<" (control), "<<server.video_port()<<" (video). Trusted LAN only.\n";
-    while(!interrupted)std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::string last_status;
+    while(!interrupted) {
+        if (spdlog::should_log(spdlog::level::debug)) {
+            const auto capture_status = capture->snapshot();
+            const auto control_status = sink.snapshot();
+            const auto status = "capture-state=" + std::to_string(static_cast<int>(capture_status.state)) +
+                " error=" + capture_status.error + " control-state=" +
+                std::to_string(static_cast<int>(control_status.state)) + " error=" + control_status.error;
+            if (status != last_status) { spdlog::debug("Relay {}", status); last_status = status; }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    spdlog::debug("Relay stopping: termination signal");
     server.stop();capture->stop();sink.disconnect();return 0;
 }
 int run(int argc, char** argv) {
@@ -142,7 +158,14 @@ int run(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
-        return run(argc, argv);
+        bool debug = false;
+        std::vector<char*> arguments{argv[0]};
+        for (int i = 1; i < argc; ++i) {
+            if (std::string_view(argv[i]) == "--debug") debug = true;
+            else arguments.push_back(argv[i]);
+        }
+        kvmux::configure_console_logging(debug);
+        return run(static_cast<int>(arguments.size()), arguments.data());
     } catch (const std::exception& error) {
         std::cerr << "kvmux-relay: " << error.what() << '\n';
         return 1;

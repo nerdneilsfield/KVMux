@@ -24,7 +24,7 @@ struct Config {
     std::string capture_stable_id;
     CaptureMode capture_mode;
     std::string serial_port;
-    int serial_baud_rate{57600};
+    int serial_baud_rate{9600};
     std::uint8_t serial_address{};
     MouseMode mouse_mode{MouseMode::absolute};
 #if defined(__APPLE__)

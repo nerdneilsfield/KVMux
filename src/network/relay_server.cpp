@@ -1,6 +1,7 @@
 #include "network/relay_server.hpp"
 #include "network/relay_protocol.hpp"
 #include <atomic>
+#include <spdlog/spdlog.h>
 #include "input/input_router.hpp"
 #include <cmath>
 #include <thread>
@@ -29,8 +30,9 @@ struct RelayServer::Impl {
     Impl(CaptureSource& c,Ch9329ControlSink& s):capture(c),sink(s){}
     void session(tcp::Socket control) {
         const auto id=++next_session;
+        spdlog::debug("Relay server: control connected, session={}",id);
         sink.set_control_active(false); sink.release_all();
-        if(!send_packet(control,PacketType::hello,encode_session(id)))return;
+        if(!send_packet(control,PacketType::hello,encode_session(id))){spdlog::debug("Relay server session={}: handshake send failed or timed out",id);return;}
         std::atomic<bool> done{false},paired{false}; std::atomic<std::uint64_t> sent_sequence{0};
         std::thread video([&] {
             std::optional<tcp::Socket> socket;
@@ -42,7 +44,8 @@ struct RelayServer::Impl {
                     socket=std::move(candidate);break;
                 }
             }
-            if(!socket){done=true;sink.release_all();return;}
+            if(!socket){spdlog::debug("Relay server session={}: video pairing ended: {}",id,stopping ? "server stopping" : done ? "control channel ended" : "pairing timeout (2s)");done=true;sink.release_all();return;}
+            spdlog::debug("Relay server session={}: video channel paired",id);
             paired=true;
             auto last=Clock::now();
             std::optional<std::uint64_t> generation;
@@ -51,13 +54,13 @@ struct RelayServer::Impl {
                 if(auto extra=video_listener->accept(1ms))extra->close();
                 auto sample=capture.take_latest_sample();
                 if(sample) {
-                    if(!sample->mjpeg||(generation&&*generation!=sample->generation)||Clock::now()-sample->arrival>500ms){done=true;break;}
+                    if(!sample->mjpeg||(generation&&*generation!=sample->generation)||Clock::now()-sample->arrival>500ms){spdlog::debug("Relay server session={}: video ended: {}",id,!sample->mjpeg ? "sample is not MJPEG" : (generation&&*generation!=sample->generation) ? "capture generation changed" : "sample older than 500ms");done=true;break;}
                     generation=sample->generation;
                     auto bytes=encode_mjpeg(*sample);
-                    if(bytes.empty()||!send_packet(*socket,PacketType::video_mjpeg,bytes,100ms)){done=true;break;}
+                    if(bytes.empty()||!send_packet(*socket,PacketType::video_mjpeg,bytes,100ms)){spdlog::debug("Relay server session={}: video ended: {}",id,bytes.empty() ? "MJPEG encoding failed" : "video send failed or timed out (100ms)");done=true;break;}
                     sent_sequence=sample->sequence;last=Clock::now();
                 } else {
-                    if(Clock::now()-last>500ms){done=true;break;}
+                    if(Clock::now()-last>500ms){spdlog::debug("Relay server session={}: no video sample for 500ms",id);done=true;break;}
                     std::this_thread::sleep_for(2ms);
                 }
             }
@@ -68,13 +71,13 @@ struct RelayServer::Impl {
         auto consumed_at=Clock::now();
         while(!done&&!stopping) {
             if(auto extra=control_listener->accept(1ms))extra->close();
-            if(!send_packet(control,PacketType::status,encode_status({id,sink.snapshot()})))break;
+            if(!send_packet(control,PacketType::status,encode_status({id,sink.snapshot()}))){spdlog::debug("Relay server session={}: status send failed or timed out",id);break;}
             const auto left=std::chrono::duration_cast<std::chrono::milliseconds>(heartbeat+250ms-Clock::now());
-            if(left<=0ms)break;
+            if(left<=0ms){spdlog::debug("Relay server session={}: heartbeat expired (250ms)",id);break;}
             auto packet=receive_packet(control,left);
-            if(!packet||done||stopping)break;
+            if(!packet||done||stopping){spdlog::debug("Relay server session={}: control loop ended: {}",id,stopping ? "server stopping" : done ? "video channel ended" : "control receive failed, invalid packet, or heartbeat timeout");break;}
             if(packet->type==PacketType::heartbeat) {
-                auto value=decode_heartbeat(packet->payload); if(!value||value->session!=id)break;
+                auto value=decode_heartbeat(packet->payload); if(!value||value->session!=id){spdlog::debug("Relay server session={}: invalid heartbeat or session mismatch",id);break;}
                 heartbeat=Clock::now();
                 if(value->video_sequence>consumed_sequence) {
                     consumed_sequence=value->video_sequence;consumed_at=Clock::now();
@@ -84,26 +87,28 @@ struct RelayServer::Impl {
                     value->video_sequence<=sent_sequence&&Clock::now()-consumed_at<=500ms&&value->epoch==snapshot.epoch&&
                     snapshot.state==ControlConnectionState::ready&&snapshot.target_usb_ready&&snapshot.release_confirmed;
                 sink.update_ui_heartbeat();
+                if(active!=allow)spdlog::debug("Relay server session={}: control authorization {}",id,allow ? "enabled" : "disabled by heartbeat safety checks");
                 if(active&&!allow)sink.release_all();
                 active=allow;sink.set_control_active(active);
             } else if(packet->type==PacketType::release) {
-                if(decode_session(packet->payload)!=id)break;
+                if(decode_session(packet->payload)!=id){spdlog::debug("Relay server session={}: invalid release session",id);break;}
                 active=false;sink.set_control_active(false);sink.release_all();
             } else if(packet->type==PacketType::mouse_mode) {
-                auto value=decode_mouse_mode(packet->payload);if(!value||value->session!=id)break;
+                auto value=decode_mouse_mode(packet->payload);if(!value||value->session!=id){spdlog::debug("Relay server session={}: invalid mouse mode or session mismatch",id);break;}
                 active=false;sink.set_control_active(false);sink.release_all();sink.set_mouse_mode(value->mode);
             } else if(packet->type==PacketType::control) {
                 auto value=decode_session_control(packet->payload);
-                if(!value||value->session!=id||!valid_event(value->event))break;
+                if(!value||value->session!=id||!valid_event(value->event)){spdlog::debug("Relay server session={}: invalid control event or session mismatch",id);break;}
                 if(active&&value->event.epoch==sink.snapshot().epoch&&value->event.sequence>sequence) {
                     sequence=value->event.sequence;
                     auto result=sink.submit(value->event);
-                    if(result==SubmitResult::overloaded)break;
+                    if(result==SubmitResult::overloaded){spdlog::debug("Relay server session={}: control queue overloaded",id);break;}
                 }
-            } else break;
+            } else {spdlog::debug("Relay server session={}: unexpected control packet type",id);break;}
         }
         done=true;sink.set_control_active(false);sink.release_all();control.close();
         video.join();
+        spdlog::debug("Relay server session={}: disconnected",id);
     }
     void run() {
         while(!stopping) {
@@ -119,12 +124,14 @@ bool RelayServer::start(const ServerOptions& options,std::string& error) {
         error="LAN relay requires native MJPEG; raw-only capture modes are unsupported";return false;
     }
     impl_->control_listener=tcp::Listener::bind(options.bind_address,options.control_port,error);
-    if(!impl_->control_listener)return false;
+    if(!impl_->control_listener){spdlog::debug("Relay server: control bind failed: {}",error);return false;}
     impl_->video_listener=tcp::Listener::bind(options.bind_address,options.video_port,error);
-    if(!impl_->video_listener){impl_->control_listener.reset();return false;}
+    if(!impl_->video_listener){spdlog::debug("Relay server: video bind failed: {}",error);impl_->control_listener.reset();return false;}
+    spdlog::debug("Relay server: listening on {}, control port={}, video port={}",options.bind_address,control_port(),video_port());
     impl_->stopping=false;impl_->worker=std::thread([this]{impl_->run();});return true;
 }
 void RelayServer::stop() noexcept {
+    if(impl_->worker.joinable())spdlog::debug("Relay server: stop requested");
     impl_->stopping=true;
     impl_->sink.set_control_active(false);impl_->sink.release_all();
     if(impl_->worker.joinable())impl_->worker.join();

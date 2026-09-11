@@ -24,6 +24,31 @@ The executable is `build/linux-debug-headless/kvmux-relay` on Linux and
 `build/windows-debug-headless/kvmux-relay.exe` on Windows. On Windows, run the build from an
 MSVC developer shell, replace the preset with `windows-debug-headless`, and make the FFmpeg runtime DLLs available on PATH.
 
+## Debug logs
+
+Both executables accept `--debug`. By default, diagnostic logging writes only
+warnings and errors to stderr. Debug logs include timestamps, thread IDs and
+levels. Relay command results still go to stdout.
+
+```sh
+build/linux-debug-headless/kvmux-relay --debug --serve --baud 9600 2>relay-debug.log
+build/macos-debug/kvmux.app/Contents/MacOS/kvmux --debug 2>gui-debug.log
+```
+
+The relay and new GUI configurations default to 9600 baud. The CH9329 datasheet
+(page 1) specifies this factory rate; the serial protocol document (page 11)
+lists configuration field (4) as `0x00002580` (9600). Saved GUI baud settings
+are preserved. If the chip was reconfigured, select its actual baud rate.
+
+The relay accepts `--debug` before or after its command, including `--help`
+and the device-list commands. Run `kvmux --debug --help` to check GUI options
+without opening a window. Unknown GUI arguments fail with exit code 2.
+
+Logs show serial open settings and errors, CH9329 handshake commands and ACKs,
+response lengths, USB readiness, and capture, control and network state changes.
+They do not contain HID input payloads, individual key events or raw byte dumps.
+Capture state is observed outside native capture callbacks.
+
 ## Start with automatic selection
 
 With one capture device and one known CH340/CH341/CH343 USB serial adapter:
@@ -34,7 +59,7 @@ build/linux-debug-headless/kvmux-relay --serve
 
 The relay prints the selected device ID, mode index, dimensions, exact rational
 frame rate, native/delivered formats, serial port and baud rate before opening
-these devices. The default baud rate is 57600; use `--baud` to match your CH9329.
+these devices. The default baud rate is 9600; use `--baud` to match your CH9329.
 
 Automatic capture selection requires exactly one enumerated device. Multiple
 devices produce an error listing candidates; choose one with `--device`.
@@ -82,13 +107,13 @@ it does not silently change the requested mode.
 Linux example (replace the device, mode index and serial port):
 
 ```sh
-build/linux-debug-headless/kvmux-relay --serve --device "/dev/video0" --mode-index 0 --serial "/dev/ttyUSB0" --baud 57600
+build/linux-debug-headless/kvmux-relay --serve --device "/dev/video0" --mode-index 0 --serial "/dev/ttyUSB0" --baud 9600
 ```
 
 Windows example:
 
 ```powershell
-build/windows-debug-headless/kvmux-relay.exe --serve --device "DEVICE_ID" --mode-index 0 --serial "COM3" --baud 57600
+build/windows-debug-headless/kvmux-relay.exe --serve --device "DEVICE_ID" --mode-index 0 --serial "COM3" --baud 9600
 ```
 
 The defaults are `0.0.0.0:17000` for control and `0.0.0.0:17001` for video.

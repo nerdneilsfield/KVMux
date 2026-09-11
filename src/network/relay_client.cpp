@@ -1,6 +1,7 @@
 #include "network/relay_client.hpp"
 #include "network/relay_protocol.hpp"
 #include <atomic>
+#include <spdlog/spdlog.h>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -25,6 +26,7 @@ struct RelayClient::Impl {
     Clock::time_point progress{}, consumed{}, status_at{};
 
     void fail(std::string error) {
+        spdlog::debug("Relay client: disconnected: {}", error);
         stopped = true;
         std::lock_guard lock(mutex);
         control.state = ControlConnectionState::disconnected;
@@ -37,20 +39,30 @@ struct RelayClient::Impl {
     }
     void video_loop(std::uint64_t token) {
         std::string error;
+        spdlog::debug("Relay client: connecting video to {}:{}", options.host, options.video_port);
         auto socket = tcp::connect(options.host, options.video_port, 500ms, error);
         if (!socket || !send_packet(*socket, PacketType::hello, encode_session(token))) {
+            spdlog::debug("Relay client: video setup failed: {}", socket ? "pairing hello send failed or timed out" : error);
             fail("Video connection failed: " + error); return;
         }
+        spdlog::debug("Relay client: video connected, pairing hello sent, session={}", token);
         std::uint64_t sequence = 0;
         while (!stopped) {
             auto packet = receive_packet(*socket, 600ms);
-            if (!packet || packet->type != PacketType::video_mjpeg) break;
+            if (!packet || packet->type != PacketType::video_mjpeg) {
+                spdlog::debug("Relay client: video ended: {}", !packet ? "receive failed, invalid packet, or timeout (600ms)" : "unexpected packet type");
+                break;
+            }
             auto sample = decode_mjpeg(packet->payload, capture_snapshot_generation());
-            if (!sample || sample->sequence <= sequence) break;
+            if (!sample || sample->sequence <= sequence) {
+                spdlog::debug("Relay client: video ended: {}", !sample ? "invalid MJPEG sample" : "non-increasing video sequence");
+                break;
+            }
             sequence = sample->sequence;
             std::lock_guard lock(mutex);
             if (stopped) return;
             if (latest) ++capture.overwritten_samples;
+            if (capture.state != CaptureState::streaming) spdlog::debug("Relay client: video streaming, session={}", token);
             capture.state = CaptureState::streaming;
             capture.actual_mode = {"relay", sample->width, sample->height, {0,1}, PixelFormat::mjpeg, PixelFormat::mjpeg, "MJPEG"};
             ++capture.received_samples;
@@ -61,12 +73,14 @@ struct RelayClient::Impl {
     std::uint64_t capture_snapshot_generation() { std::lock_guard lock(mutex); return capture.generation; }
     void control_loop() {
         std::string error;
+        spdlog::debug("Relay client: connecting control to {}:{}", options.host, options.control_port);
         auto socket = tcp::connect(options.host, options.control_port, 500ms, error);
         if (!socket) { fail("Control connection failed: " + error); return; }
         auto hello = receive_packet(*socket, 500ms);
         if (!hello) { fail("Control handshake read failed or timed out"); return; }
         auto token = hello && hello->type == PacketType::hello ? decode_session(hello->payload) : std::nullopt;
         if (!token || !*token || stopped) { fail("Invalid relay handshake"); return; }
+        spdlog::debug("Relay client: control handshake complete, session={}", *token);
         { std::lock_guard lock(mutex); session = *token; }
         video_worker = std::thread([this, token = *token] { video_loop(token); });
         auto initial = receive_packet(*socket, 350ms);
@@ -75,6 +89,7 @@ struct RelayClient::Impl {
         auto initial_status = decode_status(initial->payload);
         if (!initial_status || initial_status->session != *token) { fail("Invalid initial status"); return; }
         { std::lock_guard lock(mutex); control = initial_status->control; status_at = Clock::now(); }
+        spdlog::debug("Relay client: initial control state={}, epoch={}", static_cast<int>(initial_status->control.state), initial_status->control.epoch);
         auto last_progress = Clock::time_point{};
         auto heartbeat_at = Clock::time_point{};
         bool last_active = false;
@@ -118,6 +133,11 @@ struct RelayClient::Impl {
             if (!status || status->session != *token) { failure = "Invalid control status or session"; break; }
             std::lock_guard lock(mutex);
             if (status->control.epoch < control.epoch || status->control.epoch < min_epoch) continue;
+            if (control.state != status->control.state || control.epoch != status->control.epoch ||
+                control.target_usb_ready != status->control.target_usb_ready || control.release_confirmed != status->control.release_confirmed)
+                spdlog::debug("Relay client: control state {} -> {}, epoch={}, USB ready={}, release confirmed={}",
+                    static_cast<int>(control.state), static_cast<int>(status->control.state), status->control.epoch,
+                    status->control.target_usb_ready, status->control.release_confirmed);
             control = std::move(status->control);
             status_at = Clock::now();
         }
@@ -150,6 +170,7 @@ void RelayClient::start() {
     p.control_worker = std::thread([&p] { p.control_loop(); });
 }
 void RelayClient::stop() noexcept {
+    if (!impl_->stopped) spdlog::debug("Relay client: stop requested");
     impl_->stopped = true;
     std::lock_guard lock(impl_->mutex);
     impl_->events.clear(); impl_->latest.reset(); impl_->active = false;

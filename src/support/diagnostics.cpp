@@ -10,6 +10,7 @@
 
 #include <spdlog/logger.h>
 #include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/stdout_sinks.h>
 #include <spdlog/spdlog.h>
 
 namespace kvmux {
@@ -191,6 +192,15 @@ DiagnosticsSnapshot Diagnostics::snapshot() const {
     result.pixel_path = impl_->pixel_path;
     result.recent_error = impl_->recent_error;
     return result;
+}
+
+void configure_console_logging(bool debug) {
+    auto sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
+    auto logger = std::make_shared<spdlog::logger>("kvmux", std::move(sink));
+    logger->set_level(debug ? spdlog::level::debug : spdlog::level::warn);
+    logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [thread %t] [%l] %v");
+    logger->flush_on(spdlog::level::debug);
+    spdlog::set_default_logger(std::move(logger));
 }
 
 std::shared_ptr<spdlog::logger> initialize_logging(const std::string& log_file) {

@@ -78,6 +78,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Configures stderr logging before worker threads start. Debug is opt-in.
+void configure_console_logging(bool debug);
+
 // Initializes the process default logger for low-frequency state changes and
 // aggregate diagnostics. The active log and rotated files are capped at
 // 10 MiB each, with three rotated files retained. Metric hot paths do not log.

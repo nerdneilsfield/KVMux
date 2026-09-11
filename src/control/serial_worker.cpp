@@ -3,6 +3,8 @@
 #include "control/ch9329_protocol.hpp"
 #include "control/hid_keyboard.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -63,6 +65,7 @@ struct Ch9329ControlSink::Impl {
     }
 
     void fail(std::string message, bool reconnect) {
+        spdlog::debug("CH9329 failure: reason={} reconnect={}", message, reconnect);
         io.close();
         open = false;
         transaction.reset();
@@ -87,6 +90,11 @@ struct Ch9329ControlSink::Impl {
         Transaction next{std::move(frame), purpose, {}, 0, {}, false};
         next.bytes = ch9329::encode(next.frame);
         next.started = now;
+        if (purpose == Purpose::info || purpose == Purpose::config) {
+            spdlog::debug("CH9329 {} request: address=0x{:02x} command=0x{:02x}",
+                          purpose == Purpose::info ? "GET_INFO" : "GET_CONFIG",
+                          next.frame.address, next.frame.command);
+        }
         transaction = std::move(next);
     }
 
@@ -149,6 +157,18 @@ struct Ch9329ControlSink::Impl {
     bool accept_ack(const ch9329::Frame& reply, Clock::time_point now) {
         if (!transaction || reply.address != address) { return false; }
         const auto request = transaction->frame.command;
+        const bool diagnostic = transaction->purpose == Purpose::info || transaction->purpose == Purpose::config;
+        const bool error_ack = reply.command == static_cast<std::uint8_t>(request | 0xc0U);
+        if (diagnostic || error_ack) {
+            spdlog::debug("CH9329 ACK: request=0x{:02x} reply=0x{:02x} type={} response_length={}",
+                          request, reply.command, error_ack ? "error" :
+                          reply.command == static_cast<std::uint8_t>(request | 0x80U) ? "normal" : "unexpected",
+                          reply.data.size());
+        }
+        if (error_ack) {
+            spdlog::debug("CH9329 error ACK: command=0x{:02x} status={}", request,
+                          reply.data.empty() ? -1 : static_cast<int>(reply.data.front()));
+        }
         if (reply.command == static_cast<std::uint8_t>(request | 0xc0U)) {
             fail("CH9329 returned error status " +
                  std::to_string(reply.data.empty() ? -1 : reply.data.front()), true);
@@ -168,6 +188,8 @@ struct Ch9329ControlSink::Impl {
                 return true;
             }
         } else if (reply.data.size() != 1U || reply.data.front() != 0U) {
+            spdlog::debug("CH9329 HID ACK failed: command=0x{:02x} response_length={} status={}",
+                          request, reply.data.size(), reply.data.empty() ? -1 : static_cast<int>(reply.data.front()));
             fail("CH9329 HID command failed", true);
             return true;
         }
@@ -179,6 +201,8 @@ struct Ch9329ControlSink::Impl {
 
         if (purpose == Purpose::info) {
             const bool usb_ready = reply.data[1] == 1U;
+            spdlog::debug("CH9329 GET_INFO: response_length={} chip_version=0x{:02x} usb_status={} usb_ready={}",
+                          reply.data.size(), reply.data[0], reply.data[1], usb_ready);
             update_snapshot([&](auto& value) {
                 value.chip_version = reply.data[0];
                 value.target_usb_ready = usb_ready;
@@ -204,6 +228,8 @@ struct Ch9329ControlSink::Impl {
             }
         } else if (purpose == Purpose::config) {
             const bool valid = keyboard_and_mouse_mode(reply.data[0]) && protocol_mode(reply.data[1]);
+            spdlog::debug("CH9329 GET_CONFIG: response_length={} chip_mode=0x{:02x} protocol_mode=0x{:02x} valid={}",
+                          reply.data.size(), reply.data[0], reply.data[1], valid);
             if (!valid) {
                 fail("CH9329 must expose keyboard+mouse in binary protocol mode", false);
             } else {
@@ -291,7 +317,9 @@ struct Ch9329ControlSink::Impl {
         }
         if (!open) {
             if (now < reconnect_at) { return; }
+            spdlog::debug("CH9329 opening: path={} baud={} address=0x{:02x}", selected_port, selected_baud, address);
             if (!io.open(selected_port, selected_baud)) {
+                spdlog::debug("CH9329 open failed: path={} baud={}", selected_port, selected_baud);
                 reconnect_at = now + kReconnectInterval;
                 update_snapshot([](auto& value) {
                     value.state = ControlConnectionState::reconnecting;
@@ -327,9 +355,17 @@ struct Ch9329ControlSink::Impl {
             }
             const auto elapsed = now - transaction->started;
             if (elapsed >= kHardTimeout) {
+                spdlog::debug("CH9329 transaction timeout: command=0x{:02x} elapsed_ms={} written={} total={}",
+                              transaction->frame.command,
+                              std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(),
+                              transaction->written, transaction->bytes.size());
                 update_snapshot([](auto& value) { ++value.timeout_count; });
                 fail("CH9329 transaction timed out; release is unconfirmed", true);
             } else if (elapsed >= kStallTimeout && !transaction->stalled) {
+                spdlog::debug("CH9329 transaction stalled: command=0x{:02x} elapsed_ms={} written={} total={}",
+                              transaction->frame.command,
+                              std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(),
+                              transaction->written, transaction->bytes.size());
                 transaction->stalled = true;
                 std::lock_guard lock(mutex);
                 queue.request_release();

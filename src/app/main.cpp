@@ -16,6 +16,9 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <iostream>
+#include <string_view>
+#include <spdlog/spdlog.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -75,8 +78,27 @@ InputEvent to_input(const SDL_Event& event) {
 }
 }
 
-int main() {
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) return 1;
+int main(int argc, char** argv) {
+    bool debug = false, help = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument = argv[i];
+        if (argument == "--debug") debug = true;
+        else if (argument == "--help") help = true;
+        else {
+            std::cerr << "kvmux: Unknown argument: " << argument << "\nUsage: kvmux [--debug] [--help]\n";
+            return 2;
+        }
+    }
+    configure_console_logging(debug);
+    if (help) {
+        std::cout << "Usage: kvmux [--debug] [--help]\n"
+                     "  --debug  Write diagnostic logs to stderr (time, thread, level)\n"
+                     "  --help   Show this help without starting the GUI\n";
+        return 0;
+    }
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+        spdlog::error("SDL initialization failed: {}", SDL_GetError()); return 1;
+    }
     auto pref = preference_file();
     Config config = pref ? load_config(*pref) : Config{};
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
@@ -116,6 +138,7 @@ int main() {
     bool fullscreen{}, diagnostics_open{}, running = true;
     auto next_serial_scan = std::chrono::steady_clock::now();
     std::optional<VideoFrame> current_frame;
+    std::string last_status;
 
     while (running) {
         std::erase_if(retired_sessions, [](auto& future) {
@@ -137,6 +160,13 @@ int main() {
         if (auto newest = session->take_latest_frame()) { current_frame = std::move(newest); diagnostics.record_decode(current_frame->decoded); }
         if (current_frame && renderer.upload(*current_frame, config.color_override)) { diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
         const auto snapshot = session->snapshot();
+        if (debug) {
+            const auto status = std::string("capture=") + capture_state(snapshot.capture.state) +
+                " error=" + snapshot.capture.error + " control=" + control_state(snapshot.control.state) +
+                " error=" + snapshot.control.error + " input=" + input_state(snapshot.input_state) +
+                " session-error=" + snapshot.session_error;
+            if (status != last_status) { spdlog::debug("Session {}", status); last_status = status; }
+        }
         diagnostics.set_mailbox_overwrites(snapshot.capture.overwritten_samples, snapshot.video.overwritten_frames);
         diagnostics.record_ack_rtt(snapshot.control.last_ack_rtt);
         diagnostics.set_pixel_path(renderer.snapshot().pixel_path); if (!renderer.snapshot().error.empty()) diagnostics.set_recent_error(renderer.snapshot().error);
