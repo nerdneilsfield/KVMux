@@ -348,7 +348,7 @@ int main(int argc, char** argv) {
         if (captured) ImGui::TextUnformatted("Control captured. Host key releases control.");
         ImGui::Separator();
         const ImVec2 available = ImGui::GetContentRegionAvail();
-        const float status_height = ImGui::GetTextLineHeightWithSpacing() * 4.F;
+        const float status_height = ImGui::GetTextLineHeightWithSpacing() * 3.F;
         const ImVec2 status_pos{ImGui::GetCursorScreenPos().x,
             ImGui::GetCursorScreenPos().y + available.y - status_height};
         // ImGui and SDL pointer coordinates are logical pixels. Use this same fitted
@@ -375,39 +375,32 @@ int main(int argc, char** argv) {
         ImGui::BeginChild("Status", {available.x, status_height}, ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         const auto d = diagnostics.snapshot();
-        ImGui::Text("Video: %s  |  Decode: %.1f fps  |  Present: %.1f fps",
-            resolution.c_str(), d.decode_fps, d.unique_present_fps);
+        ImGui::Text("%s | D/P %.1f/%.1f fps", resolution.c_str(), d.decode_fps, d.unique_present_fps);
+        ImGui::SameLine();
         if (video_bytes_per_second && control_bytes_per_second)
-            ImGui::Text("Video in: %.1f KiB/s  |  Control in+out: %.1f KiB/s",
+            ImGui::Text("| V rx %.1f KiB/s | C io %.1f KiB/s",
                 *video_bytes_per_second / 1024.0, *control_bytes_per_second / 1024.0);
-        else ImGui::TextUnformatted("Video in: --  |  Control in+out: --");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            "Relay protocol bytes, including 12-byte packet headers.\n"
-            "Video: received. Control: received + sent. Updated every second.\n"
-            "Excludes TCP/IP headers, retransmissions and incomplete packets.\n"
-            "Unavailable for local capture, while disconnected, or before the first interval.");
-        ImGui::Text("%s | Capture: %s | %s: %s | USB: %s | Input: %s",
-            remote ? "Remote" : "Local", capture_state(snapshot.capture.state), remote ? "Relay" : "Serial",
-            control_state(snapshot.control.state), snapshot.control.target_usb_ready ? "ready" : "not ready",
-            input_state(snapshot.input_state));
-        if (ImGui::IsItemHovered() && (!snapshot.capture.error.empty() || !snapshot.control.error.empty() || !snapshot.session_error.empty()))
-            ImGui::SetTooltip("Capture: %s\nControl: %s\nSession: %s", snapshot.capture.error.c_str(),
+        else ImGui::TextUnformatted("| V rx -- | C io --");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("V: video received. C: control received + sent. Relay bytes/s.");
+        ImGui::Text("%s | Video %s | Control %s | Input %s",
+            remote ? "Remote" : "Local", capture_state(snapshot.capture.state),
+            control_state(snapshot.control.state), input_state(snapshot.input_state));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("USB: %s\nCapture: %s\nControl: %s\nSession: %s",
+                snapshot.control.target_usb_ready ? "ready" : "not ready", snapshot.capture.error.c_str(),
                 snapshot.control.error.c_str(), snapshot.session_error.c_str());
         if (snapshot.pointer.video_local)
-            ImGui::Text("Pointer in video: (%.1f, %.1f) logical px", snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
-        else ImGui::TextUnformatted("Pointer in video: --");
+            ImGui::Text("P(%.1f, %.1f)", snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
+        else ImGui::TextUnformatted("P(--)");
         ImGui::SameLine();
         if (snapshot.pointer.submitted_absolute)
-            ImGui::Text("| Submitted HID: (%u, %u) / 4095", static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
+            ImGui::Text("-> HID(%u, %u)", static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
                 static_cast<unsigned>(snapshot.pointer.submitted_absolute->second));
         else if (snapshot.pointer.submitted_relative)
-            ImGui::Text("| Submitted delta: (%d, %d)", snapshot.pointer.submitted_relative->first,
+            ImGui::Text("-> d(%d, %d)", snapshot.pointer.submitted_relative->first,
                 snapshot.pointer.submitted_relative->second);
-        else ImGui::TextUnformatted("| Submitted: --");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-            "Pointer position is relative to the displayed video in logical pixels.\n"
-            "Submitted coordinates were accepted by the control queue, not acknowledged by the device.\n"
-            "HID coordinates use 0..4095; relative mode shows the last submitted movement delta.");
+        else ImGui::TextUnformatted("-> --");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("P: video-local logical pixels. HID: 0..4095. d: relative delta. Submitted, not ACKed.");
         ImGui::EndChild();
         ImGui::End();
         ImGui::PopStyleVar(2);
