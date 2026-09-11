@@ -24,6 +24,16 @@ Rect fit_video_rect(const Rect area, const int video_width,
             area.y + (area.height - height) / 2.0, width, height};
 }
 
+Rect target_input_rect(const Rect display, const TargetAspect aspect) noexcept {
+    switch (aspect) {
+    case TargetAspect::full_frame: return display;
+    case TargetAspect::ratio_16_9: return fit_video_rect(display, 16, 9);
+    case TargetAspect::ratio_16_10: return fit_video_rect(display, 16, 10);
+    case TargetAspect::ratio_4_3: return fit_video_rect(display, 4, 3);
+    }
+    return display;
+}
+
 bool supported_usb_keyboard_usage(const std::uint16_t usage) noexcept {
     // SDL's keyboard page mappings used by the first version: ordinary keys,
     // locking keys, navigation/keypad keys, F13-F24, and eight modifiers.

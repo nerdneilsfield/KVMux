@@ -327,6 +327,13 @@ int main(int argc, char** argv) {
             session->set_relative_gain(config.sensitivity);
             ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session->send_special(SpecialKeys::control_alt_delete);
             ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session->send_special(SpecialKeys::alt_tab);
+            ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
+            ImGui::SetNextItemWidth(150.F);
+            const char* aspect_names[] = {"Full frame", "16:9", "16:10", "4:3"};
+            int aspect = static_cast<int>(config.target_aspect);
+            if (ImGui::Combo("Target aspect", &aspect, aspect_names, 4))
+                config.target_aspect = static_cast<TargetAspect>(aspect);
+            ImGui::EndDisabled();
             ImGui::Checkbox("VSync", &config.vsync);
             ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
             const char* color_names[] = {"Color: automatic", "Color: BT.601 limited", "Color: BT.601 full", "Color: BT.709 limited", "Color: BT.709 full"};
@@ -352,15 +359,15 @@ int main(int argc, char** argv) {
         const float status_height = ImGui::GetTextLineHeightWithSpacing();
         const ImVec2 status_pos{ImGui::GetCursorScreenPos().x,
             ImGui::GetCursorScreenPos().y + available.y - status_height};
-        // ImGui and SDL pointer coordinates are logical pixels. Use this same fitted
-        // rectangle for drawing and input; only glViewport uses framebuffer pixels.
+        // ImGui and SDL use logical pixels; only glViewport uses framebuffer pixels.
+        // Keep the display fit unchanged and map input inside the target desktop.
         const ImVec2 video_size{available.x, std::max(1.F, available.y - status_height - ImGui::GetStyle().ItemSpacing.y)};
         const ImVec2 start = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##video_surface", video_size);
         ImGui::GetWindowDrawList()->AddRectFilled(start, {start.x + video_size.x, start.y + video_size.y}, IM_COL32(0, 0, 0, 255));
         if (renderer.texture_id() && renderer.width() > 0) {
             const auto fit = fit_video_rect({start.x, start.y, video_size.x, video_size.y}, renderer.width(), renderer.height());
-            session->set_video_rect(fit);
+            session->set_video_rect(target_input_rect(fit, config.target_aspect));
             ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(renderer.texture_id()),
                 {static_cast<float>(fit.x), static_cast<float>(fit.y)},
                 {static_cast<float>(fit.x + fit.width), static_cast<float>(fit.y + fit.height)}, {0, 0}, {1, 1});
@@ -434,9 +441,9 @@ int main(int argc, char** argv) {
             if (pointer_snapshot.video_rect && pointer_snapshot.video_local) {
                 const auto& rect = *pointer_snapshot.video_rect;
                 const auto [x, y] = *pointer_snapshot.video_local;
-                ImGui::Text("Event video rect: x=%.2f y=%.2f w=%.2f h=%.2f",
+                ImGui::Text("Event active rect: x=%.2f y=%.2f w=%.2f h=%.2f",
                     rect.x, rect.y, rect.width, rect.height);
-                ImGui::Text("Event window: %.2f,%.2f  Video local: %.2f,%.2f",
+                ImGui::Text("Event window: %.2f,%.2f  Desktop local: %.2f,%.2f",
                     x + rect.x, y + rect.y, x, y);
             } else {
                 ImGui::TextUnformatted("Event geometry: -- (move pointer while captured)");

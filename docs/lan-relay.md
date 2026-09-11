@@ -446,7 +446,7 @@ an MJPEG stream; the displayed resolution belongs to the decoded video.
 | `V` | Received video protocol bytes per second, in MiB/s (shown as `M/s`). |
 | `C` | Received plus sent control protocol bytes per second, in KiB/s (shown as `K/s`). |
 | `Video`, `Control`, `Input` | Capture, control connection and input-capture states. |
-| `P(x,y)` | Captured pointer position relative to the displayed video's top-left corner, in logical pixels. This excludes the GUI's outer black bars. |
+| `P(x,y)` | Captured pointer position relative to the active desktop's top-left corner, in logical pixels. This excludes the GUI's outer black bars and any embedded bars excluded by Target aspect. |
 | `HID(x,y)` | Most recent absolute coordinates accepted by the control queue, in the CH9329 range 0–4095. |
 | `d(dx,dy)` | Most recent accepted relative movement report. If movement was split into reports, this is the last report, not their sum. |
 
@@ -460,10 +460,28 @@ release, stale video, a fault or a mouse-mode change. The displayed video positi
 and the last accepted report can differ when no new report has been submitted.
 Do not interpret that difference alone as a target-side positioning error.
 
-A complete desktop image scaled from 1920×1080 to a smaller video frame should
-still map proportionally. Black bars embedded by the capture device, cropping or
-a different target multi-monitor mapping require separate diagnosis; transmission
-resolution alone does not identify those conditions.
+### Target desktop aspect ratio
+
+If the capture contains a centered desktop with embedded black bars, release
+control with the Host key, then choose **Connections → Target aspect** to match
+the target desktop: **16:9**, **16:10** or **4:3**. **Full frame** is the default
+and maps the entire captured image, as before. The setting is saved locally and
+can only change in Preview; it applies to local and relay video.
+
+For a 2880×1800 Windows desktop fitted into a 1920×1080 capture, select **16:10**.
+The active desktop is 1728×1080 with a 96-pixel bar on each side of the capture.
+KVMux fits that desktop region inside the rendered capture rectangle, using the
+actual decoded dimensions and current window layout. Absolute input maps the
+active region to the full HID range. Clicking an excluded bar does not activate
+control; releasing a drag in a bar still sends button-up at the desktop edge.
+The image itself is not cropped, stretched or moved.
+
+`P(x,y)` and the Diagnostics **Event active rect** refer to this active region,
+not the full captured image. Relative movement sensitivity is unchanged.
+This setting assumes a centered, aspect-fitted desktop. It does not correct
+cropping, off-center padding or target multi-monitor mapping. Transmission
+resolution alone cannot identify the desktop aspect ratio. The geometry is
+covered by software tests; alignment on the reported hardware remains unverified.
 
 ### Control heartbeat blocked by status replies
 

@@ -132,6 +132,10 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_serial_worker_test PRIVATE kvmux::core)
     add_test(NAME serial_worker COMMAND kvmux_serial_worker_test)
 
+    add_executable(kvmux_config_test tests/config_test.cpp)
+    target_link_libraries(kvmux_config_test PRIVATE kvmux::core)
+    add_test(NAME config COMMAND kvmux_config_test)
+
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)

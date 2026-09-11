@@ -1,6 +1,7 @@
 #pragma once
 
 #include "control/control_sink.hpp"
+#include "input/input_router.hpp"
 #include "render/video_renderer.hpp"
 #include "video/capture/capture_source.hpp"
 
@@ -27,6 +28,7 @@ struct Config {
     int serial_baud_rate{9600};
     std::uint8_t serial_address{};
     MouseMode mouse_mode{MouseMode::absolute};
+    TargetAspect target_aspect{TargetAspect::full_frame};
 #if defined(__APPLE__)
     std::uint16_t host_scancode{231};  // SDL_SCANCODE_RGUI
 #else

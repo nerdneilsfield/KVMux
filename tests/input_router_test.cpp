@@ -153,6 +153,49 @@ int main() {
     }
 
     {
+        const Rect display{0, 0, 1920, 1080};
+        const auto full = target_input_rect(display, TargetAspect::full_frame);
+        const auto wide = target_input_rect(display, TargetAspect::ratio_16_9);
+        const auto desktop = target_input_rect(display, TargetAspect::ratio_16_10);
+        const auto classic = target_input_rect(display, TargetAspect::ratio_4_3);
+        require(full.x == 0 && full.y == 0 && full.width == 1920 && full.height == 1080 &&
+                    wide.x == 0 && wide.width == 1920, "full frame and matching aspect unchanged");
+        require(desktop.x == 96 && desktop.y == 0 && desktop.width == 1728 &&
+                    desktop.height == 1080, "16:10 desktop excludes embedded side bars");
+        require(classic.x == 240 && classic.width == 1440 && classic.height == 1080,
+                "4:3 desktop centered inside capture");
+        const auto alternate = target_input_rect(
+            fit_video_rect({20, 40, 800, 800}, 640, 480), TargetAspect::ratio_16_9);
+        require(alternate.x == 20 && alternate.y == 215 && alternate.width == 800 &&
+                    alternate.height == 450, "alternate capture and offset layout use actual display fit");
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_rect(desktop);
+        router.set_video_fresh(true);
+        router.handle({InputButton{InputMouseButton::left, true, 50, 540}});
+        require(router.state() == InputState::preview, "embedded bar cannot activate control");
+        capture(router, sink, 960, 540);
+        router.handle({InputPointerMotion{960, 540}});
+        require(router.pointer_snapshot().submitted_absolute == std::pair<std::uint16_t, std::uint16_t>{2048, 2048},
+                "target center maps to HID center");
+        require(router.pointer_snapshot().video_local == std::pair<double, double>{864, 540},
+                "pointer local origin is active desktop");
+        router.handle({InputPointerMotion{96, 0}});
+        router.handle({InputPointerMotion{1824, 1080}});
+        const auto first = std::get<AbsoluteMotion>(sink.events[1].payload);
+        const auto last = std::get<AbsoluteMotion>(sink.events[2].payload);
+        require(first.x == 0 && first.y == 0 && last.x == 1 && last.y == 1,
+                "active desktop edges map to full HID range");
+        router.handle({InputButton{InputMouseButton::left, true, 960, 540}});
+        router.handle({InputButton{InputMouseButton::left, false, 1900, 540}});
+        const auto release = std::get<ButtonEdge>(sink.events.back().payload);
+        require(!release.pressed && release.x == 1, "drag release in embedded bar clamps to edge");
+        router.release();
+        router.set_video_rect(full);
+        require(!router.pointer_snapshot().video_local, "aspect change clears old event geometry");
+    }
+
+    {
         const auto wide = fit_video_rect({0, 0, 1000, 1000}, 1920, 1080);
         const auto classic = fit_video_rect({0, 0, 1200, 600}, 640, 480);
         const auto ultra = fit_video_rect({0, 0, 1600, 600}, 2560, 1080);

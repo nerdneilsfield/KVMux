@@ -64,6 +64,24 @@ MouseMode parse_mouse_mode(const std::string& value) {
     throw std::runtime_error("invalid mouse mode");
 }
 
+std::string_view target_aspect_name(TargetAspect aspect) {
+    switch (aspect) {
+    case TargetAspect::full_frame: return "full_frame";
+    case TargetAspect::ratio_16_9: return "16:9";
+    case TargetAspect::ratio_16_10: return "16:10";
+    case TargetAspect::ratio_4_3: return "4:3";
+    }
+    return "full_frame";
+}
+
+TargetAspect parse_target_aspect(const std::string& value) {
+    if (value == "full_frame") return TargetAspect::full_frame;
+    if (value == "16:9") return TargetAspect::ratio_16_9;
+    if (value == "16:10") return TargetAspect::ratio_16_10;
+    if (value == "4:3") return TargetAspect::ratio_4_3;
+    throw std::runtime_error("invalid target aspect");
+}
+
 std::string_view color_override_name(ColorOverride value) {
     switch (value) {
     case ColorOverride::automatic: return "automatic";
@@ -139,6 +157,7 @@ Config parse_config(const json& root) {
     result.serial_address = static_cast<std::uint8_t>(address);
 
     result.mouse_mode = parse_mouse_mode(control.at("mouse_mode").get<std::string>());
+    result.target_aspect = parse_target_aspect(control.value("target_aspect", std::string("full_frame")));
     result.host_scancode = control.at("host_scancode").get<std::uint16_t>();
     result.sensitivity = control.at("sensitivity").get<double>();
     result.vsync = control.at("vsync").get<bool>();
@@ -183,6 +202,7 @@ json serialize_config(const Config& config) {
         }},
         {"control", {
             {"mouse_mode", mouse_mode_name(config.mouse_mode)},
+            {"target_aspect", target_aspect_name(config.target_aspect)},
             {"host_scancode", config.host_scancode},
             {"sensitivity", config.sensitivity},
             {"vsync", config.vsync},

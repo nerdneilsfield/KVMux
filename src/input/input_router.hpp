@@ -15,6 +15,7 @@ namespace kvmux {
 enum class InputState { preview, arming, captured, releasing, fault };
 enum class InputMouseButton : std::uint8_t { left = 1, right = 2, middle = 3 };
 enum class SpecialKeys { control_alt_delete, alt_tab, host_key };
+enum class TargetAspect { full_frame, ratio_16_9, ratio_16_10, ratio_4_3 };
 
 struct InputKey {
     std::uint16_t usb_usage{};
@@ -43,11 +44,13 @@ struct Rect {
 };
 
 [[nodiscard]] Rect fit_video_rect(Rect area, int video_width, int video_height) noexcept;
+// Centered target desktop inside the rendered capture; does not alter rendering.
+[[nodiscard]] Rect target_input_rect(Rect display, TargetAspect aspect) noexcept;
 [[nodiscard]] bool supported_usb_keyboard_usage(std::uint16_t usage) noexcept;
 
 // UI-thread diagnostics. Submission means queue acceptance, not a device ACK.
 struct InputPointerSnapshot {
-    std::optional<Rect> video_rect; // Event-time rectangle in logical window units.
+    std::optional<Rect> video_rect; // Event-time active desktop rectangle in logical window units.
     std::optional<std::pair<double, double>> video_local; // Logical window units.
     std::optional<std::pair<std::uint16_t, std::uint16_t>> submitted_absolute; // 0..4095.
     std::optional<std::pair<int, int>> submitted_relative; // Last report delta.
@@ -65,6 +68,7 @@ public:
 
     [[nodiscard]] bool special_active() const noexcept { return !special_steps_.empty(); }
 
+    // Set the active desktop region, which may exclude bars inside the capture.
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
     // logical window coordinates, not GL framebuffer pixels).
     void set_video_rect(Rect rect) noexcept;
