@@ -22,6 +22,7 @@ add_library(kvmux_core STATIC
     src/control/serial_worker.cpp
     src/input/input_router.cpp
     src/network/relay_protocol.cpp
+    src/network/tcp_socket.cpp
     src/support/build_info.cpp
     src/support/config.cpp
     src/support/diagnostics.cpp
@@ -58,6 +59,10 @@ target_link_libraries(kvmux_renderer PUBLIC kvmux::core kvmux::glad OpenGL::GL)
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
+
+if(WIN32)
+    target_link_libraries(kvmux_core PRIVATE ws2_32)
+endif()
 
 if(MSVC)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
@@ -101,6 +106,11 @@ if(BUILD_TESTING)
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)
+
+    add_executable(kvmux_tcp_socket_test tests/tcp_socket_test.cpp)
+    target_link_libraries(kvmux_tcp_socket_test PRIVATE kvmux::core)
+    add_test(NAME tcp_socket COMMAND kvmux_tcp_socket_test)
+    set_tests_properties(tcp_socket PROPERTIES TIMEOUT 15)
 
     add_executable(kvmux_relay_protocol_test tests/relay_protocol_test.cpp)
     target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)
