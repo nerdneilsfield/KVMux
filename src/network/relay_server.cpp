@@ -15,6 +15,15 @@ namespace kvmux::relay {
 namespace {
 using namespace std::chrono_literals;
 using Clock=std::chrono::steady_clock;
+const char* backend_name(CodecBackend backend) {
+    switch(backend) {
+    case CodecBackend::automatic:return "auto";
+    case CodecBackend::jetson_gstreamer:return "jetson";
+    case CodecBackend::videotoolbox:return "videotoolbox";
+    case CodecBackend::ffmpeg_software:return "software";
+    }
+    return "unknown";
+}
 bool valid_event(const ControlEvent& e) {
     return std::visit([](const auto& p) {
         using T=std::decay_t<decltype(p)>;
@@ -48,8 +57,13 @@ struct RelayServer::Impl {
     std::unique_ptr<VideoEncoder> encoder(std::uint64_t generation,std::string& error) {
         auto result=encoder_factory(options.encoder_backend,error);
         if(result) {
-            auto configured=result->configure(config(generation));
+            const auto settings=config(generation);
+            auto configured=result->configure(settings);
             if(!configured.ok()){error=configured.message;result->shutdown();return {};}
+            const auto diagnostic=result->diagnostic();
+            spdlog::info("Relay HEVC encoder configured: backend={}, hardware_active={}, hardware_verified={}, size={}x{}, bitrate={} bits/s, detail={}",
+                backend_name(diagnostic.backend),diagnostic.hardware_active,diagnostic.hardware_verified,
+                settings.width,settings.height,settings.bitrate,diagnostic.detail);
         }
         return result;
     }
@@ -64,7 +78,7 @@ struct RelayServer::Impl {
         auto last=Clock::now();
         std::optional<std::uint64_t> capture_generation;
         std::uint64_t encoded_sequence{};
-        bool waiting_idr=true;
+        bool waiting_idr=true,reported_output=false;
         while(!done&&!stopping) {
             if(auto extra=video_listener->accept(1ms))extra->close();
             if(keyframe.exchange(false)) {
@@ -77,6 +91,12 @@ struct RelayServer::Impl {
                 const auto result=codec->poll(unit);
                 if(result.status==CodecStatus::again)break;
                 if(!result.ok())throw std::runtime_error(result.message);
+                if(!reported_output) {
+                    const auto diagnostic=codec->diagnostic();
+                    spdlog::info("Relay HEVC session={} first encoded output: backend={}, hardware_active={}, hardware_verified={}, detail={}",
+                        id,backend_name(diagnostic.backend),diagnostic.hardware_active,diagnostic.hardware_verified,diagnostic.detail);
+                    reported_output=true;
+                }
                 unit.encoded_sequence=++encoded_sequence;
                 if(unit.generation!=id)throw std::runtime_error("HEVC encoder generation mismatch");
                 if(Clock::now()-unit.arrival>500ms)throw std::runtime_error("HEVC encoded output stale for 500ms");
