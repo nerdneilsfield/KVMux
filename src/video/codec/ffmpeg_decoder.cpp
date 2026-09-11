@@ -207,7 +207,6 @@ public:
         }
         pending_.erase(it);
         frame->pts=meta.pts;
-        frame->time_base={1, 1'000'000'000};
         if (meta.range!=AVCOL_RANGE_UNSPECIFIED) frame->color_range=meta.range;
         if (meta.space!=AVCOL_SPC_UNSPECIFIED) frame->colorspace=meta.space;
         if (meta.primaries!=AVCOL_PRI_UNSPECIFIED) frame->color_primaries=meta.primaries;
