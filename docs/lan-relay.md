@@ -414,3 +414,20 @@ KVMux does not intentionally synchronize the Mac's lock state to Windows.
 ReleaseAll releases held keys; it does not turn off target Caps Lock. Compare
 the first target keyboard LED report before connecting the GUI with subsequent
 changes, rather than sending an extra Caps Lock toggle on every connection.
+
+### Video send deadline with zero bytes sent
+
+A debug line such as `reason=deadline ... bytes=0/114940 ... timeout_ms=100`
+means the current packet made no send progress within 100 ms. It does not by
+itself establish insufficient LAN bandwidth. Previously this ended both relay
+channels; the client then reported `peer closed` while reading control status.
+
+The relay now drops a completely unsent video packet on that deadline and takes
+the latest available frame. A partially sent packet cannot be dropped without
+breaking TCP framing, so partial-send deadlines and socket errors still close
+the session. Input freshness and release checks remain enabled. Update and
+rebuild the relay to use this change; updating only the GUI is not sufficient.
+
+The user subsequently reported green video after reconnecting without exiting
+the updated GUI. The earlier texture allocation fix therefore does not establish
+that this real-device scenario is resolved. It remains under investigation.
