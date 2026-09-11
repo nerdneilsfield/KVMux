@@ -35,6 +35,7 @@ add_library(kvmux_core STATIC
     src/support/diagnostics.cpp
     src/video/codec/codec_factory.cpp
     src/video/codec/ffmpeg_decoder.cpp
+    src/video/codec/ffmpeg_encoder.cpp
     src/video/capture_sample.cpp
     src/video/video_processor.cpp
     src/video/video_pipeline.cpp
@@ -122,6 +123,28 @@ if(KVMUX_BUILD_GUI)
 endif()
 
 if(BUILD_TESTING)
+    # Inject only backend factories to exercise deferred hardware startup failure.
+    add_executable(kvmux_codec_startup_fallback_test
+        tests/codec_startup_fallback_test.cpp src/video/codec/codec_factory.cpp)
+    target_compile_features(kvmux_codec_startup_fallback_test PRIVATE cxx_std_20)
+    target_include_directories(kvmux_codec_startup_fallback_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(kvmux_codec_startup_fallback_test PRIVATE FFmpeg::avutil)
+    target_compile_definitions(kvmux_codec_startup_fallback_test PRIVATE
+        KVMUX_HAS_JETSON_ENCODER=0 KVMUX_HAS_VIDEOTOOLBOX=1)
+    add_test(NAME codec_startup_fallback COMMAND kvmux_codec_startup_fallback_test)
+
+    add_executable(kvmux_codec_factory_test tests/codec_factory_test.cpp)
+    target_link_libraries(kvmux_codec_factory_test PRIVATE kvmux::core)
+    target_compile_definitions(kvmux_codec_factory_test PRIVATE
+        KVMUX_HAS_JETSON_ENCODER=${KVMUX_HAS_JETSON_ENCODER}
+        KVMUX_HAS_VIDEOTOOLBOX=${KVMUX_HAS_VIDEOTOOLBOX})
+    add_test(NAME codec_factory COMMAND kvmux_codec_factory_test)
+
+    add_executable(kvmux_ffmpeg_encoder_test tests/ffmpeg_encoder_test.cpp)
+    target_link_libraries(kvmux_ffmpeg_encoder_test PRIVATE kvmux::core)
+    add_test(NAME ffmpeg_encoder COMMAND kvmux_ffmpeg_encoder_test)
+    set_tests_properties(ffmpeg_encoder PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(kvmux_ffmpeg_decoder_test tests/ffmpeg_decoder_test.cpp)
     target_link_libraries(kvmux_ffmpeg_decoder_test PRIVATE kvmux::core)
     add_test(NAME ffmpeg_decoder COMMAND kvmux_ffmpeg_decoder_test

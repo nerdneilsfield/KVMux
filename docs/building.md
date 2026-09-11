@@ -29,13 +29,19 @@ and source/build-offer information required by each dependency.
 
 ## HEVC codec backends
 
-FFmpeg remains required on every platform. Its software HEVC decoder is always
-compiled, but callers must select it explicitly. Automatic decoder selection uses
-VideoToolbox; it does not silently fall back to software.
+FFmpeg remains required on every platform. Its software HEVC encoder and decoder
+wrappers are always compiled. CPU encoding requires the runtime FFmpeg build to
+provide `libx265`; no separate x265 development dependency is added by KVMux.
+Automatic selection tries hardware first, then CPU if backend creation or initial
+configuration fails, including a rejected first input before any input was accepted. Diagnostics report the selected backend and fallback reason.
+Explicit hardware selections remain strict and never fall back. A running codec
+is not replaced midstream; stream recovery must establish a new reference chain.
+A hardware error reported by polling after input was accepted also requires stream
+recovery, even if the decoder has not produced its first frame.
 
 | CMake cache option | Default | AUTO behavior |
 | --- | --- | --- |
-| `KVMUX_JETSON_ENCODER` | `AUTO` | On Linux, compile when pkg-config finds GStreamer core and app development packages; otherwise disable. |
+| `KVMUX_JETSON_ENCODER` | `AUTO` | On Linux, compile when pkg-config finds GStreamer core, app, and video development packages; otherwise disable. |
 | `KVMUX_VIDEOTOOLBOX` | `AUTO` | On Apple platforms, compile when VideoToolbox and CoreFoundation frameworks are found; otherwise disable. |
 
 Both options accept only `AUTO`, `ON`, or `OFF`. `OFF` skips backend dependency
@@ -49,15 +55,18 @@ cmake --preset macos-debug -DKVMUX_VIDEOTOOLBOX=OFF
 ```
 
 Configure checks compile dependencies only. It does not inspect device nodes,
-probe hardware, or run GStreamer plugins. A normal Linux host with GStreamer core
-and app headers can compile the Jetson backend without NVIDIA runtime plugins.
-Creating or configuring the encoder on that host then fails with a runtime error.
+probe hardware, or run GStreamer plugins. A normal Linux host with GStreamer core,
+app, and video headers can compile the Jetson backend without NVIDIA runtime plugins.
+An explicit Jetson encoder selection on that host fails with a runtime error.
+Automatic selection uses CPU encoding instead if FFmpeg provides `libx265`.
 A Jetson deployment needs the NVIDIA conversion and HEVC encoder plugins provided
 by its JetPack installation, plus the GStreamer runtime. Hardware backend support
 must be verified on the deployed hardware; a successful build is not hardware
 acceptance.
 
-Software fixture decoding runs in CTest as `ffmpeg_decoder`. Hardware checks are
+Software fixture decoding runs in CTest as `ffmpeg_decoder`. The `ffmpeg_encoder`
+round-trip test uses CPU encoding and skips when FFmpeg lacks `libx265`.
+`codec_factory` checks automatic selection and strict explicit requests. Hardware checks are
 manual and are not required by ordinary CI. On a Jetson build with tests enabled,
 run `build/linux-debug-headless/kvmux_jetson_encoder_test output.h265` to exercise
 the encoder. On a VideoToolbox-enabled macOS build, run:
