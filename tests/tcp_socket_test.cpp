@@ -3,6 +3,9 @@
 #include <array>
 #include <cassert>
 #include <thread>
+#include <sstream>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/ostream_sink.h>
 
 using namespace std::chrono_literals;
 using kvmux::tcp::Listener;
@@ -10,6 +13,11 @@ using kvmux::tcp::Socket;
 using Clock = std::chrono::steady_clock;
 
 int main() {
+    std::ostringstream diagnostics;
+    auto log_sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(diagnostics);
+    auto logger = std::make_shared<spdlog::logger>("tcp-test", log_sink);
+    logger->set_level(spdlog::level::debug);
+    spdlog::set_default_logger(logger);
     std::string error = "stale error";
     auto listener = Listener::bind("127.0.0.1", 0, error);
     assert(listener && error.empty());
@@ -36,6 +44,7 @@ int main() {
     const auto response = client->receive_exact(payload.size(), 2s);
     assert(response && *response == payload);
     echo.join();
+    assert(diagnostics.str().empty()); // Successful traffic does not log per frame.
 
     // A trickle must not restart receive_exact's total timeout per byte.
     std::jthread trickle([&](std::stop_token stop) {
@@ -49,6 +58,8 @@ int main() {
     assert(!client->receive_exact(20, 150ms));
     auto elapsed = Clock::now() - started;
     assert(elapsed >= 100ms && elapsed < 500ms);
+    assert(diagnostics.str().find("receive failed: reason=deadline error=0 bytes=") != std::string::npos);
+    diagnostics.str("");
     trickle.request_stop();
     trickle.join();
 
@@ -58,6 +69,10 @@ int main() {
     assert(!client->send_all(blocked_payload, 150ms));
     elapsed = Clock::now() - started;
     assert(elapsed >= 100ms && elapsed < 500ms);
+    assert(diagnostics.str().find("send failed: reason=deadline error=0 bytes=") != std::string::npos);
+    assert(diagnostics.str().find("/33554432 elapsed_us=") != std::string::npos);
+    assert(diagnostics.str().find("timeout_ms=150") != std::string::npos);
+    diagnostics.str("");
     client->close();
     server->close();
 
@@ -71,6 +86,7 @@ int main() {
     started = Clock::now();
     assert(!client->receive_exact(4, 1s));
     assert(Clock::now() - started < 500ms);
+    assert(diagnostics.str().find("receive failed: reason=peer closed error=0 bytes=3/4") != std::string::npos);
     // A closed peer must eventually reject writes without raising SIGPIPE.
     bool rejected = false;
     for (int i = 0; i < 10 && !rejected; ++i) rejected = !client->send_all(payload, 100ms);

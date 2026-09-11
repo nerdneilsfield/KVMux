@@ -57,7 +57,14 @@ struct RelayServer::Impl {
                     if(!sample->mjpeg||(generation&&*generation!=sample->generation)||Clock::now()-sample->arrival>500ms){spdlog::debug("Relay server session={}: video ended: {}",id,!sample->mjpeg ? "sample is not MJPEG" : (generation&&*generation!=sample->generation) ? "capture generation changed" : "sample older than 500ms");done=true;break;}
                     generation=sample->generation;
                     auto bytes=encode_mjpeg(*sample);
-                    if(bytes.empty()||!send_packet(*socket,PacketType::video_mjpeg,bytes,100ms)){spdlog::debug("Relay server session={}: video ended: {}",id,bytes.empty() ? "MJPEG encoding failed" : "video send failed or timed out (100ms)");done=true;break;}
+                    const auto send_started=Clock::now();
+                    if(bytes.empty()||!send_packet(*socket,PacketType::video_mjpeg,bytes,100ms)){
+                        spdlog::debug("Relay server session={}: video ended: {}, socket={}, sequence={}, payload_bytes={}, elapsed_us={}",
+                            id,bytes.empty() ? "MJPEG encoding failed" : "video send failed or timed out (100ms)",
+                            socket->native_handle(),sample->sequence,bytes.size(),
+                            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-send_started).count());
+                        done=true;break;
+                    }
                     sent_sequence=sample->sequence;last=Clock::now();
                 } else {
                     if(Clock::now()-last>500ms){spdlog::debug("Relay server session={}: no video sample for 500ms",id);done=true;break;}

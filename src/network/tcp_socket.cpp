@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <climits>
 #include <utility>
+#include <spdlog/spdlog.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -43,7 +44,8 @@ bool connect_pending(int error) { return error == EINPROGRESS || interrupted(err
 #endif
 NativeSocket native(std::intptr_t handle) { return static_cast<NativeSocket>(handle); }
 
-bool wait_for(NativeSocket socket, bool write, Clock::time_point deadline) {
+bool wait_for(NativeSocket socket, bool write, Clock::time_point deadline, int* failure_error = nullptr) {
+    if (failure_error) *failure_error = 0;
     while (true) {
         const auto now = Clock::now();
         if (now >= deadline) return false;
@@ -64,8 +66,23 @@ bool wait_for(NativeSocket socket, bool write, Clock::time_point deadline) {
 #endif
         // Let send/recv/SO_ERROR report disconnects as well as readiness.
         if (result > 0) return true;
-        if (result < 0 && !interrupted(last_error())) return false;
+        if (result < 0) {
+            const int error = last_error();
+            if (!interrupted(error)) {
+                if (failure_error) *failure_error = error;
+                return false;
+            }
+        }
     }
+}
+
+// One record per failed operation; never log payloads or each would-block retry.
+void log_io_failure(std::intptr_t socket, const char* operation, const char* reason,
+                    int error, std::size_t transferred, std::size_t requested,
+                    Clock::time_point started, std::chrono::milliseconds timeout) {
+    spdlog::debug("TCP socket={} {} failed: reason={} error={} bytes={}/{} elapsed_us={} timeout_ms={}",
+        socket, operation, reason, error, transferred, requested,
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count(), timeout.count());
 }
 
 bool set_nonblocking(NativeSocket socket) {
@@ -118,10 +135,15 @@ void Socket::close() noexcept {
 
 bool Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::milliseconds timeout) const {
     if (!valid()) return false;
-    const auto deadline = Clock::now() + timeout;
+    const auto started = Clock::now();
+    const auto deadline = started + timeout;
     std::size_t written{};
     while (written < bytes.size()) {
-        if (!wait_for(native(handle_), true, deadline)) return false;
+        int wait_error{};
+        if (!wait_for(native(handle_), true, deadline, &wait_error)) {
+            log_io_failure(handle_, "send", wait_error ? "wait error" : "deadline", wait_error, written, bytes.size(), started, timeout);
+            return false;
+        }
         const int size = static_cast<int>(std::min<std::size_t>(bytes.size() - written, INT_MAX));
 #ifdef _WIN32
         const int count = ::send(native(handle_), reinterpret_cast<const char*>(bytes.data() + written), size, 0);
@@ -137,9 +159,15 @@ bool Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::millisec
             written += static_cast<std::size_t>(count);
             continue;
         }
-        if (count == 0) return false;
+        if (count == 0) {
+            log_io_failure(handle_, "send", "zero write", 0, written, bytes.size(), started, timeout);
+            return false;
+        }
         const int error = last_error();
-        if (!interrupted(error) && !would_block(error)) return false;
+        if (!interrupted(error) && !would_block(error)) {
+            log_io_failure(handle_, "send", "socket error", error, written, bytes.size(), started, timeout);
+            return false;
+        }
     }
     return true;
 }
@@ -147,11 +175,16 @@ bool Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::millisec
 std::optional<std::vector<std::uint8_t>> Socket::receive_exact(
     std::size_t size, std::chrono::milliseconds timeout) const {
     if (!valid()) return std::nullopt;
-    const auto deadline = Clock::now() + timeout;
+    const auto started = Clock::now();
+    const auto deadline = started + timeout;
     std::vector<std::uint8_t> result(size);
     std::size_t received{};
     while (received < size) {
-        if (!wait_for(native(handle_), false, deadline)) return std::nullopt;
+        int wait_error{};
+        if (!wait_for(native(handle_), false, deadline, &wait_error)) {
+            log_io_failure(handle_, "receive", wait_error ? "wait error" : "deadline", wait_error, received, size, started, timeout);
+            return std::nullopt;
+        }
         const int chunk = static_cast<int>(std::min<std::size_t>(size - received, INT_MAX));
 #ifdef _WIN32
         const int count = ::recv(native(handle_), reinterpret_cast<char*>(result.data() + received), chunk, 0);
@@ -162,9 +195,15 @@ std::optional<std::vector<std::uint8_t>> Socket::receive_exact(
             received += static_cast<std::size_t>(count);
             continue;
         }
-        if (count == 0) return std::nullopt;
+        if (count == 0) {
+            log_io_failure(handle_, "receive", "peer closed", 0, received, size, started, timeout);
+            return std::nullopt;
+        }
         const int error = last_error();
-        if (!interrupted(error) && !would_block(error)) return std::nullopt;
+        if (!interrupted(error) && !would_block(error)) {
+            log_io_failure(handle_, "receive", "socket error", error, received, size, started, timeout);
+            return std::nullopt;
+        }
     }
     return result;
 }
