@@ -100,6 +100,8 @@ struct Ch9329ControlSink::Impl {
     }
 
     void begin_clear(Clock::time_point now, bool both_mouse_modes = false) {
+        // Both idle and in-flight ACK release paths must forget held input.
+        keyboard.clear(); buttons = 0; relative_x = relative_y = wheel = 0.0;
         std::array<std::uint8_t, 6> empty{};
         clear_both_mouse_modes = both_mouse_modes;
         clear_step = ClearStep::keyboard;
@@ -445,6 +447,9 @@ void Ch9329ControlSink::set_mouse_mode(MouseMode mode) {
     if (impl_->mouse_mode != mode) {
         impl_->queue.request_release();
         impl_->status.epoch = impl_->queue.epoch();
+        impl_->status.release_confirmed = false;
+        if (impl_->status.state == ControlConnectionState::ready)
+            impl_->status.state = ControlConnectionState::clearing;
         impl_->mouse_mode = mode;
     }
     impl_->wake.notify_one();
@@ -476,6 +481,9 @@ void Ch9329ControlSink::release_all() noexcept {
     impl_->control_active = false;
     impl_->queue.request_release();
     impl_->status.epoch = impl_->queue.epoch();
+    impl_->status.release_confirmed = false;
+    if (impl_->status.state == ControlConnectionState::ready)
+        impl_->status.state = ControlConnectionState::clearing;
     impl_->wake.notify_one();
 }
 

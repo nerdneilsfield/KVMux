@@ -103,11 +103,29 @@ int main() {
         });
     }), "key down sent");
 
+    // Release while a keyboard transaction awaits its ACK. The next epoch
+    // must not rebuild a report from the previous held modifiers or keys.
+    sink.release_all();
+    require(!sink.snapshot().release_confirmed && sink.snapshot().epoch != epoch,
+            "release immediately invalidates confirmation and epoch");
+    require(eventually([&] { return sink.snapshot().state == ControlConnectionState::ready &&
+                                   sink.snapshot().release_confirmed; }), "release completed");
+    epoch = sink.snapshot().epoch;
+    require(sink.submit({epoch, 2, std::chrono::steady_clock::now(), KeyEdge{4, true}}) ==
+                SubmitResult::accepted, "new epoch key accepted");
+    require(eventually([&] {
+        std::lock_guard lock(fake.mutex);
+        return std::ranges::any_of(fake.received, [](const auto& frame) {
+            return frame.command == 0x02 && frame.data.size() == 8 &&
+                   frame.data[0] == 0 && frame.data[2] == 4;
+        });
+    }), "new epoch key does not retain old modifier");
+
     {
         std::lock_guard lock(fake.mutex);
         fake.answer = false;
     }
-    require(sink.submit({epoch, 2, std::chrono::steady_clock::now(), RelativeMotion{19, -7}}) ==
+    require(sink.submit({epoch, 3, std::chrono::steady_clock::now(), RelativeMotion{19, -7}}) ==
                 SubmitResult::accepted, "relative move accepted");
     require(eventually([&] { return sink.snapshot().state == ControlConnectionState::stalled; }, 300ms),
             "late ack stalls and invalidates session");
