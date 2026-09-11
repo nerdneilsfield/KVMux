@@ -48,6 +48,7 @@ private:
     std::array<unsigned int, 3> planes_{};
     std::array<int, 3> plane_widths_{};
     std::array<int, 3> plane_heights_{};
+    std::array<unsigned int, 3> plane_formats_{};
     int width_{};
     int height_{};
     std::array<std::vector<std::uint8_t>, 3> staging_;

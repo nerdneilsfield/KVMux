@@ -183,11 +183,13 @@ bool VideoRenderer::upload_plane(int index, int width, int height, unsigned int 
     glPixelStorei(GL_UNPACK_ROW_LENGTH, upload_stride / channels);
     const unsigned int internal = channels == 4 ? GL_RGBA8 : (channels == 2 ? GL_RG8 : GL_R8);
     if (plane_widths_[static_cast<std::size_t>(index)] != width ||
-        plane_heights_[static_cast<std::size_t>(index)] != height) {
+        plane_heights_[static_cast<std::size_t>(index)] != height ||
+        plane_formats_[static_cast<std::size_t>(index)] != internal) {
         glTexImage2D(GL_TEXTURE_2D, 0, static_cast<int>(internal), width, height, 0,
                      format, GL_UNSIGNED_BYTE, upload);
         plane_widths_[static_cast<std::size_t>(index)] = width;
         plane_heights_[static_cast<std::size_t>(index)] = height;
+        plane_formats_[static_cast<std::size_t>(index)] = internal;
     } else {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, GL_UNSIGNED_BYTE, upload);
     }
@@ -291,6 +293,8 @@ void VideoRenderer::destroy() noexcept {
     if (program_) glDeleteProgram(program_);
     output_texture_ = framebuffer_ = vertex_array_ = program_ = 0;
     planes_.fill(0); width_ = height_ = 0;
+    // New GL objects have no storage, even when the next stream has the same size.
+    plane_widths_.fill(0); plane_heights_.fill(0); plane_formats_.fill(0);
 }
 
 }  // namespace kvmux

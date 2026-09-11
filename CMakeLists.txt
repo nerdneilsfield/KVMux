@@ -108,6 +108,12 @@ if(KVMUX_BUILD_GUI)
 endif()
 
 if(BUILD_TESTING)
+    if(APPLE AND KVMUX_BUILD_GUI)
+        add_executable(kvmux_video_renderer_test tests/video_renderer_macos_test.cpp)
+        target_link_libraries(kvmux_video_renderer_test PRIVATE kvmux::renderer kvmux::imgui)
+        add_test(NAME video_renderer COMMAND kvmux_video_renderer_test)
+    endif()
+
     add_executable(kvmux_relay_selection_test tests/relay_selection_test.cpp)
     target_link_libraries(kvmux_relay_selection_test PRIVATE kvmux::core)
     add_test(NAME relay_selection COMMAND kvmux_relay_selection_test)
