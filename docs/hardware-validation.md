@@ -25,3 +25,18 @@
    serial unplug/replug and target USB loss.
 4. Measure only with the design's stated clocks and external high-speed-video
    method. Do not use fake source values as KVM performance data.
+
+## Jetson USB serial discovery
+
+SSH inspection of `jetson-hy` (Ubuntu, aarch64, `5.15.148-tegra`) identified
+`1a86:7523`, a CH340-family host adapter. The kernel had
+`CONFIG_USB_SERIAL_CH341` disabled. The initially loaded CH343 driver did not
+match this device. After installing WCH CH341 V1.9 (2025.12), re-probing created
+`ttyCH341USB0`, but the kernel explicitly logged BRLTTY setting configuration 1
+and the CH341 driver disconnecting two seconds later.
+
+`brltty.service` was inactive while `brltty-udev.service` remained running;
+its udev rule matched `1a86/7523/*`. The user subsequently reported finding the
+port. No CH9329 transaction or input-control acceptance was established by
+this discovery. User-facing diagnosis and recovery steps are in
+[LAN relay troubleshooting](lan-relay.md#troubleshooting-usb-serial-port-is-missing-on-jetsonubuntu).

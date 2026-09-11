@@ -95,3 +95,122 @@ Local automated tests use loopback TCP and fake capture/serial boundaries.
 They are not real capture-card or CH9329 hardware acceptance. Windows/Linux
 native relay operation and two-host hardware behavior still need measurements
 on those hosts. See `acceptance.md` for the existing local-KVM evidence.
+
+## Troubleshooting: USB serial port is missing on Jetson/Ubuntu
+
+Do not select a board UART such as `ttyTHS*`, `ttyTCU0` or `ttyAMA0` simply
+because it appears in `--list-serial`. Identify the USB adapter first:
+
+```sh
+lsusb
+lsusb -t
+journalctl -k -n 40 --no-pager
+```
+
+### Check the adapter ID and matching driver
+
+The control cable tested on Jetson identified as **`1a86:7523` (CH340 family)**,
+not CH343. Installing a `ch343` driver does not provide support for this ID.
+
+On the tested `5.15.148-tegra` kernel, `CONFIG_USB_SERIAL_CH341` was disabled.
+A matching CH341 driver had to be installed. Check your own kernel before
+installing anything:
+
+```sh
+modinfo ch341
+zcat /proc/config.gz | grep CONFIG_USB_SERIAL_CH341
+```
+
+Some distributions do not provide `/proc/config.gz`; check their kernel config
+under `/boot` instead. Any external module must match the running kernel and
+architecture. Do not install a module built for another Ubuntu kernel.
+
+The mainline driver commonly creates `/dev/ttyUSB0`. The tested WCH CH341
+V1.9 driver instead creates **`/dev/ttyCH341USB0`**. The numeric suffix can vary.
+Use the node actually reported by the driver, not a guessed name.
+
+### Check whether BRLTTY takes the device
+
+On Ubuntu, BRLTTY's udev rules can match `1a86:7523` and claim the adapter as a
+Braille device. In the observed failure, the serial node appeared and then
+vanished two seconds later. The kernel reported:
+
+```text
+ttyCH341USB0: ch341 USB device
+interface 0 claimed by usb_ch341 while 'brltty' sets config #1
+ch341 usb device disconnect.
+```
+
+Check **both** services:
+
+```sh
+systemctl status brltty.service brltty-udev.service --no-pager
+```
+
+Stopping or disabling `brltty.service` alone is not sufficient: the separate
+`brltty-udev.service` can remain running. `Driver=usbfs` in `lsusb -t` suggests
+userspace ownership, but does not by itself prove that BRLTTY is responsible;
+confirm with the service state and kernel log.
+
+**If this host does not use Braille devices**, temporarily stop and mask the
+udev service, then stop the ordinary service:
+
+```sh
+sudo systemctl mask --runtime --now brltty-udev.service
+sudo systemctl stop brltty.service
+systemctl is-active brltty-udev.service
+```
+
+Expect `inactive` from the last command; its nonzero exit status is normal.
+Check any errors from the mask command before continuing. Unplug and reconnect
+only the USB serial adapter on the relay host, then repeat `lsusb -t` and
+`kvmux-relay --list-serial`.
+
+If physical reconnection is impractical, re-probe the adapter's **current USB
+interface ID**, obtained from sysfs/udev. For example, `1-2.1:1.0` was the ID on
+the tested Jetson, but it is not a universal value:
+
+```sh
+printf '%s' 'YOUR_USB_INTERFACE_ID' | sudo tee /sys/bus/usb/drivers_probe
+```
+
+The runtime mask lasts only until reboot. To retain the workaround on a host
+that does not need BRLTTY, replace it with a persistent mask:
+
+```sh
+sudo systemctl mask --now brltty-udev.service
+```
+
+To undo these masks:
+
+```sh
+sudo systemctl unmask brltty-udev.service
+sudo systemctl unmask --runtime brltty-udev.service
+```
+
+This workaround disables BRLTTY's udev service for all matching devices. Do not
+use it on a host that needs Braille-device support without arranging a narrower
+device-specific rule.
+
+### Check permissions after the node appears
+
+Inspect the actual node, for example:
+
+```sh
+ls -l /dev/ttyCH341USB0
+id
+```
+
+If it belongs to group `dialout` and your user is not a member:
+
+```sh
+sudo usermod -aG dialout "$USER"
+```
+
+Log out and reconnect before starting the relay. Do not use `chmod 777` or run
+the entire relay as root to bypass device permissions. If the node exists but
+KVMux does not list it, record its exact path and ownership; driver binding,
+permissions and application enumeration are separate checks.
+
+A visible serial port proves only device enumeration. It does not prove a
+successful CH9329 handshake, the correct baud rate, or keyboard/mouse control.
