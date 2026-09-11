@@ -95,12 +95,12 @@ int main() {
     }
     assert(blocked && queued>0);
     diagnostics.str("");
-    const std::array<std::uint8_t,3> skipped{8,8,8};
-    const auto dropped=kvmux::relay::send_packet(*client,kvmux::relay::PacketType::video_mjpeg,skipped,100ms);
+    const auto skipped=kvmux::relay::encode_hello({41,kvmux::VideoCodec::mjpeg});
+    const auto dropped=kvmux::relay::send_packet(*client,kvmux::relay::PacketType::hello,skipped,100ms);
     assert(dropped.unsent_deadline());
     assert(diagnostics.str().empty()); // Recoverable drops do not flood the socket log.
     assert(server->receive_exact(queued,2s));
-    const auto latest=kvmux::relay::encode_session(42);
+    const auto latest=kvmux::relay::encode_hello({42,kvmux::VideoCodec::mjpeg});
     assert(kvmux::relay::send_packet(*client,kvmux::relay::PacketType::hello,latest,1s));
     const auto resumed=kvmux::relay::receive_packet(*server,1s);
     assert(resumed && resumed->type==kvmux::relay::PacketType::hello && resumed->payload==latest);
