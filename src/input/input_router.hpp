@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -44,6 +45,13 @@ struct Rect {
 [[nodiscard]] Rect fit_video_rect(Rect area, int video_width, int video_height) noexcept;
 [[nodiscard]] bool supported_usb_keyboard_usage(std::uint16_t usage) noexcept;
 
+// UI-thread diagnostics. Submission means queue acceptance, not a device ACK.
+struct InputPointerSnapshot {
+    std::optional<std::pair<double, double>> video_local; // Logical window units.
+    std::optional<std::pair<std::uint16_t, std::uint16_t>> submitted_absolute; // 0..4095.
+    std::optional<std::pair<int, int>> submitted_relative; // Last report delta.
+};
+
 class InputRouter {
 public:
     using Clock = std::chrono::steady_clock;
@@ -59,7 +67,11 @@ public:
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
     // logical window coordinates, not GL framebuffer pixels).
     void set_video_rect(Rect rect) noexcept { video_rect_ = rect; }
-    void set_video_fresh(bool fresh) noexcept { video_fresh_ = fresh; }
+    void set_video_fresh(bool fresh) noexcept {
+        video_fresh_ = fresh;
+        if (!fresh) { pointer_ = {}; }
+    }
+    [[nodiscard]] InputPointerSnapshot pointer_snapshot() const noexcept { return pointer_; }
     void set_host_key(std::uint16_t usage) noexcept;
     void set_relative_gain(double gain) noexcept;
     void set_mouse_mode(MouseMode mode);
@@ -98,6 +110,7 @@ private:
     InputState state_{InputState::preview};
     MouseMode mouse_mode_{MouseMode::absolute};
     Rect video_rect_{};
+    InputPointerSnapshot pointer_;
     std::uint16_t host_usage_;
     double relative_gain_{1.0};
     double residual_x_{};

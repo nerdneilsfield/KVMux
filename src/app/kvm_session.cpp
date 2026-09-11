@@ -227,6 +227,7 @@ KvmSessionSnapshot KvmSession::snapshot() const {
     value.video = video_.snapshot();
     value.control = control_->snapshot();
     value.input_state = input_.state();
+    value.pointer = input_.pointer_snapshot();
     return value;
 }
 

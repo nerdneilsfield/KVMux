@@ -256,5 +256,48 @@ int main() {
         }
     }
 
+    {
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_rect({20, 30, 200, 100});
+        router.set_video_fresh(true);
+        capture(router, sink, 50, 50);
+        require(!router.pointer_snapshot().submitted_absolute, "activation sends no coordinates");
+        router.handle({InputPointerMotion{70, 80}});
+        auto pointer = router.pointer_snapshot();
+        require(pointer.video_local == std::pair{50.0, 50.0} &&
+                    pointer.submitted_absolute == std::pair<std::uint16_t, std::uint16_t>{1024, 2048},
+                "diagnostics show video-local units and accepted HID coordinates");
+        router.handle({InputButton{InputMouseButton::left, true, 120, 55}});
+        require(router.pointer_snapshot().submitted_absolute ==
+                    std::pair<std::uint16_t, std::uint16_t>{2048, 1024},
+                "button updates submitted coordinates");
+        sink.result = SubmitResult::overloaded;
+        router.handle({InputPointerMotion{220, 130}});
+        pointer = router.pointer_snapshot();
+        require(!pointer.video_local && !pointer.submitted_absolute && !pointer.submitted_relative,
+                "rejected submission clears diagnostics instead of reporting predicted coordinates");
+    }
+    {
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_rect({0, 0, 200, 200});
+        router.set_video_fresh(true);
+        router.set_mouse_mode(MouseMode::relative);
+        capture(router, sink);
+        router.handle({InputRelativeMotion{0.4, 0.4}});
+        require(!router.pointer_snapshot().submitted_relative, "fractional unsent delta stays absent");
+        router.handle({InputRelativeMotion{2.0, -3.0}});
+        require(router.pointer_snapshot().submitted_relative == std::pair{2, -2} &&
+                    !router.pointer_snapshot().submitted_absolute,
+                "relative diagnostics report accepted integral delta, not absolute coordinates");
+        router.set_video_fresh(false);
+        require(!router.pointer_snapshot().submitted_relative, "stale video clears diagnostics");
+        router.set_video_fresh(true);
+        router.handle({InputRelativeMotion{1, 1}});
+        router.release();
+        require(!router.pointer_snapshot().submitted_relative, "release clears diagnostics");
+    }
+
     return EXIT_SUCCESS;
 }

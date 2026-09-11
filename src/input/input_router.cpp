@@ -56,6 +56,7 @@ void InputRouter::set_mouse_mode(const MouseMode mode) {
         return;
     }
     mouse_mode_ = mode;
+    pointer_ = {};
     residual_x_ = residual_y_ = wheel_residual_ = 0;
 }
 
@@ -68,14 +69,35 @@ bool InputRouter::sink_ready_released() const {
 bool InputRouter::submit(ControlPayload payload) {
     const auto snapshot = sink_.snapshot();
     const auto result = sink_.submit(
-        {snapshot.epoch, ++sequence_, Clock::now(), std::move(payload)});
-    if (result != SubmitResult::accepted) { fail(); }
-    return result == SubmitResult::accepted;
+        {snapshot.epoch, ++sequence_, Clock::now(), payload});
+    if (result != SubmitResult::accepted) { fail(); return false; }
+    std::visit([this](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, AbsoluteMotion> ||
+                      std::is_same_v<T, ButtonEdge> || std::is_same_v<T, VerticalWheel>) {
+            if (mouse_mode_ == MouseMode::absolute) {
+                // These events contain the router's integer coordinate / 4095.
+                // SerialWorker's floor(4096 * value), clamped to 4095, recovers it.
+                pointer_.submitted_absolute = {
+                    static_cast<std::uint16_t>(std::lround(value.x * 4095.0)),
+                    static_cast<std::uint16_t>(std::lround(value.y * 4095.0))};
+            }
+        } else if constexpr (std::is_same_v<T, RelativeMotion>) {
+            pointer_.submitted_relative = {static_cast<int>(value.dx), static_cast<int>(value.dy)};
+        }
+    }, payload);
+    return true;
 }
 
 void InputRouter::handle(const InputEvent& event) {
     std::visit([this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, InputPointerMotion> ||
+                      std::is_same_v<T, InputButton> || std::is_same_v<T, InputWheel>) {
+            if (captured() && video_fresh_ && video_rect_.width > 0 && video_rect_.height > 0) {
+                pointer_.video_local = {value.x - video_rect_.x, value.y - video_rect_.y};
+            }
+        }
         if constexpr (std::is_same_v<T, InputKey>) { handle_key(value); }
         else if constexpr (std::is_same_v<T, InputPointerMotion>) { handle_pointer(value); }
         else if constexpr (std::is_same_v<T, InputRelativeMotion>) { handle_relative(value); }
@@ -225,6 +247,7 @@ void InputRouter::tick(const Clock::time_point now) {
 }
 
 void InputRouter::begin_release() noexcept {
+    pointer_ = {};
     special_steps_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -237,7 +260,7 @@ void InputRouter::release() noexcept { if (state_ != InputState::preview) begin_
 void InputRouter::focus_lost() noexcept { begin_release(); }
 void InputRouter::minimized() noexcept { begin_release(); }
 void InputRouter::video_stale() noexcept { video_fresh_ = false; begin_release(); }
-void InputRouter::fail() noexcept { sink_.release_all(); release_requested_ = true; state_ = InputState::fault; }
+void InputRouter::fail() noexcept { pointer_ = {}; sink_.release_all(); release_requested_ = true; state_ = InputState::fault; }
 void InputRouter::clear_fault() noexcept {
     if (state_ == InputState::fault && sink_ready_released()) {
         release_requested_ = false;

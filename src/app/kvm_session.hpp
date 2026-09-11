@@ -35,6 +35,7 @@ struct KvmSessionSnapshot {
     VideoPipelineSnapshot video;
     ControlSnapshot control;
     InputState input_state{InputState::preview};
+    InputPointerSnapshot pointer;
     bool video_fresh{};
     bool shutting_down{};
     bool serial_shutdown_timed_out{};
