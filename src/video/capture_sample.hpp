@@ -4,6 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <memory>
+
+struct AVFrame;
 #include <span>
 #include <vector>
 
@@ -52,6 +55,8 @@ struct CaptureSample {
     ColorMatrix color_matrix{ColorMatrix::unknown};
     std::optional<RawPayload> raw;
     std::optional<MjpegPayload> mjpeg;
+    // Owned CPU decoder output; no compressed dependencies cross this mailbox.
+    std::shared_ptr<AVFrame> decoded;
 
     [[nodiscard]] static std::optional<CaptureSample> make_raw(
         std::uint64_t generation, std::uint64_t sequence,

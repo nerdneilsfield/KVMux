@@ -3,6 +3,7 @@
 #include <atomic>
 #include <spdlog/spdlog.h>
 #include <deque>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -19,6 +20,9 @@ struct RelayClient::Impl {
     ControlSnapshot control;
     CaptureSnapshot capture;
     TrafficSnapshot traffic;
+    ClientVideoSnapshot video;
+    bool keyframe_pending{};
+    std::uint64_t keyframe_generation{};
     std::optional<CaptureSample> latest;
     std::deque<ControlEvent> events;
     std::optional<MouseMode> mode;
@@ -54,38 +58,157 @@ struct RelayClient::Impl {
         capture.error = std::move(error);
         latest.reset(); events.clear(); active = false;
     }
-    void video_loop(std::uint64_t token) {
+    void publish(CaptureSample sample, VideoCodec codec) {
+        std::lock_guard lock(mutex);
+        if (stopped) return;
+        if (latest) ++capture.overwritten_samples;
+        capture.state = CaptureState::streaming;
+        capture.actual_mode = {"relay", sample.width, sample.height, {0,1},
+            codec == VideoCodec::mjpeg ? PixelFormat::mjpeg : PixelFormat::nv12,
+            codec == VideoCodec::mjpeg ? PixelFormat::mjpeg : PixelFormat::nv12,
+            codec == VideoCodec::mjpeg ? "MJPEG" : "HEVC"};
+        ++capture.received_samples;
+        latest = std::move(sample);
+    }
+    void video_loop(Hello hello) {
         std::string error;
-        spdlog::debug("Relay client: connecting video to {}:{}", options.host, options.video_port);
         auto socket = tcp::connect(options.host, options.video_port, 500ms, error);
-        if (!socket || !send_packet(*socket, PacketType::hello, encode_session(token))) {
-            spdlog::debug("Relay client: video setup failed: {}", socket ? "pairing hello send failed or timed out" : error);
+        if (!socket || !send_packet(*socket, PacketType::hello, encode_hello(hello))) {
             fail("Video connection failed: " + error); return;
         }
-        spdlog::debug("Relay client: video connected, pairing hello sent, session={}", token);
+        // Only complete decoded pictures enter the latest-value stage. Compressed
+        // HEVC stays ordered until decoded, with explicit reference-chain recovery.
+        struct Ingress {
+            std::mutex mutex;
+            std::condition_variable changed;
+            std::deque<EncodedAccessUnit> queue;
+            std::size_t bytes{};
+            std::uint64_t reset{}, sequence{};
+            bool waiting{true}, done{};
+        } ingress;
+        auto recover = [&](const char* reason) {
+            // Caller holds ingress.mutex. The marker also fences in-flight output.
+            ingress.queue.clear(); ingress.bytes = 0; ++ingress.reset;
+            ingress.waiting = true; ingress.sequence = 0;
+            std::lock_guard lock(mutex);
+            latest.reset();
+            keyframe_pending = true; keyframe_generation = hello.session;
+            ++video.recoveries; video.error = reason;
+        };
+        std::jthread decoder_worker;
+        if (hello.codec == VideoCodec::hevc) {
+            decoder_worker = std::jthread([&] {
+                std::string failure;
+                auto decoder = create_video_decoder(options.decoder_backend, failure);
+                if (!decoder) { fail("HEVC decoder: " + failure); return; }
+                std::uint64_t marker = 0;
+                bool configured = false;
+                std::uint32_t width = 0, height = 0;
+                while (!stopped) {
+                    EncodedAccessUnit au;
+                    {
+                        std::unique_lock lock(ingress.mutex);
+                        ingress.changed.wait_for(lock, 5ms, [&] { return ingress.done || stopped || !ingress.queue.empty(); });
+                        if (ingress.done || stopped) break;
+                        if (ingress.queue.empty()) continue;
+                        au = std::move(ingress.queue.front()); ingress.queue.pop_front();
+                        ingress.bytes -= au.bytes.size();
+                        if (Clock::now() - au.arrival > 250ms) { recover("HEVC ingress age exceeded"); continue; }
+                        if (marker != ingress.reset) { configured = false; marker = ingress.reset; }
+                    }
+                    if (!configured || au.width != width || au.height != height) {
+                        if (!au.idr) {
+                            std::lock_guard lock(ingress.mutex); recover("HEVC dimensions changed without IDR"); continue;
+                        }
+                        CodecConfig config; config.width = au.width; config.height = au.height;
+                        config.generation = au.generation;
+                        auto result = decoder->configure(config);
+                        if (!result.ok()) { fail("HEVC decoder configuration: " + result.message); break; }
+                        configured = true; width = au.width; height = au.height;
+                        std::lock_guard lock(mutex); video.decoder_backend = decoder->backend();
+                    }
+                    auto drain = [&]() {
+                        for (unsigned output = 0; output < 32 && !stopped; ++output) {
+                            VideoFrame frame;
+                            auto result = decoder->poll(frame);
+                            if (result.status == CodecStatus::again) return true;
+                            if (!result.ok() || !frame.frame) return false;
+                            std::lock_guard lock(ingress.mutex);
+                            if (marker != ingress.reset) return false;
+                            if (Clock::now() - frame.arrival > 250ms) return false;
+                            CaptureSample sample;
+                            sample.generation = capture_snapshot_generation(); sample.sequence = frame.sequence;
+                            sample.arrival = frame.arrival;
+                            sample.width = static_cast<std::uint32_t>(frame.frame->width);
+                            sample.height = static_cast<std::uint32_t>(frame.frame->height);
+                            sample.device_timestamp = frame.device_timestamp;
+                            sample.device_time_base_numerator = frame.device_time_base_numerator;
+                            sample.device_time_base_denominator = frame.device_time_base_denominator;
+                            sample.sample_aspect_ratio_numerator = frame.sample_aspect_ratio_numerator;
+                            sample.sample_aspect_ratio_denominator = frame.sample_aspect_ratio_denominator;
+                            sample.color_range = frame.color_range; sample.color_matrix = frame.color_matrix;
+                            sample.decoded = std::move(frame.frame);
+                            publish(std::move(sample), VideoCodec::hevc);
+                            const auto diagnostic = decoder->diagnostic();
+                            std::lock_guard state_lock(mutex);
+                            video.hardware_active = diagnostic.hardware_active;
+                            video.hardware_verified = diagnostic.hardware_verified;
+                            video.decoder_diagnostic = diagnostic.detail;
+                            video.error.clear();
+                        }
+                        return false;
+                    };
+                    auto result = decoder->submit(au);
+                    bool good = true;
+                    while (result.status == CodecStatus::again && Clock::now() - au.arrival <= 250ms && !stopped) {
+                        if (!drain()) { good = false; break; }
+                        { std::lock_guard lock(ingress.mutex); if (marker != ingress.reset) { good = false; break; } }
+                        std::this_thread::sleep_for(1ms);
+                        result = decoder->submit(au);
+                    }
+                    good = good && result.ok() && drain();
+                    if (!good) {
+                        decoder->reset(); configured = false;
+                        std::lock_guard lock(ingress.mutex);
+                        if (marker == ingress.reset) recover("HEVC decoder lost progress or rejected access unit");
+                    }
+                }
+                decoder->shutdown();
+            });
+        }
         std::uint64_t sequence = 0;
         while (!stopped) {
             auto packet = receive_packet(*socket, 600ms);
             if (packet) { std::lock_guard lock(mutex); traffic.video_received_bytes += 12U + packet->payload.size(); }
-            if (!packet || packet->type != PacketType::video_mjpeg) {
-                spdlog::debug("Relay client: video ended: {}", !packet ? "receive failed, invalid packet, or timeout (600ms)" : "unexpected packet type");
-                break;
+            if (!packet) break;
+            if (hello.codec == VideoCodec::mjpeg) {
+                if (packet->type != PacketType::video_mjpeg) break;
+                auto sample = decode_mjpeg(packet->payload, capture_snapshot_generation());
+                if (!sample || sample->sequence <= sequence) break;
+                sequence = sample->sequence;
+                publish(std::move(*sample), hello.codec);
+                continue;
             }
-            auto sample = decode_mjpeg(packet->payload, capture_snapshot_generation());
-            if (!sample || sample->sequence <= sequence) {
-                spdlog::debug("Relay client: video ended: {}", !sample ? "invalid MJPEG sample" : "non-increasing video sequence");
-                break;
+            if (packet->type != PacketType::video_hevc) break;
+            auto au = decode_hevc(packet->payload);
+            if (!au) break;
+            au->arrival = Clock::now(); // Remote steady-clock epochs are unrelated.
+            std::lock_guard lock(ingress.mutex);
+            if (au->generation != hello.session) { recover("HEVC generation mismatch"); continue; }
+            if (!ingress.waiting && au->encoded_sequence != ingress.sequence + 1)
+                recover("HEVC encoded sequence gap");
+            if (ingress.queue.size() >= 8 || ingress.bytes + au->bytes.size() > 32U * 1024U * 1024U ||
+                (!ingress.queue.empty() && Clock::now() - ingress.queue.front().arrival > 250ms))
+                recover("HEVC ordered ingress limit exceeded");
+            if (ingress.waiting && !au->idr) {
+                std::lock_guard state_lock(mutex); keyframe_pending = true; keyframe_generation = hello.session;
+                continue;
             }
-            sequence = sample->sequence;
-            std::lock_guard lock(mutex);
-            if (stopped) return;
-            if (latest) ++capture.overwritten_samples;
-            if (capture.state != CaptureState::streaming) spdlog::debug("Relay client: video streaming, session={}", token);
-            capture.state = CaptureState::streaming;
-            capture.actual_mode = {"relay", sample->width, sample->height, {0,1}, PixelFormat::mjpeg, PixelFormat::mjpeg, "MJPEG"};
-            ++capture.received_samples;
-            latest = std::move(sample);
+            ingress.waiting = false; ingress.sequence = au->encoded_sequence;
+            ingress.bytes += au->bytes.size(); ingress.queue.push_back(std::move(*au));
+            ingress.changed.notify_one();
         }
+        { std::lock_guard lock(ingress.mutex); ingress.done = true; ingress.changed.notify_all(); }
         if (!stopped) fail("Video connection lost or stale");
     }
     std::uint64_t capture_snapshot_generation() { std::lock_guard lock(mutex); return capture.generation; }
@@ -97,11 +220,12 @@ struct RelayClient::Impl {
         auto hello = receive_packet(*socket, 500ms);
         if (hello) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + hello->payload.size(); }
         if (!hello) { fail("Control handshake read failed or timed out"); return; }
-        auto token = hello && hello->type == PacketType::hello ? decode_session(hello->payload) : std::nullopt;
+        auto greeting = hello->type == PacketType::hello ? decode_hello(hello->payload) : std::nullopt;
+        auto token = greeting ? std::optional(greeting->session) : std::nullopt;
         if (!token || !*token || stopped) { fail("Invalid relay handshake"); return; }
         spdlog::debug("Relay client: control handshake complete, session={}", *token);
-        { std::lock_guard lock(mutex); session = *token; }
-        video_worker = std::thread([this, token = *token] { video_loop(token); });
+        { std::lock_guard lock(mutex); session = *token; video.codec = greeting->codec; }
+        video_worker = std::thread([this, greeting = *greeting] { video_loop(greeting); });
         auto initial = receive_packet(*socket, 350ms);
         if (initial) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + initial->payload.size(); }
         if (!initial) { fail("Initial control status read failed or timed out"); return; }
@@ -134,6 +258,7 @@ struct RelayClient::Impl {
             }
         });
         auto heartbeat_at = Clock::time_point{};
+        auto keyframe_at = Clock::time_point{};
         bool last_active = false;
         std::string failure;
         while (!stopped) {
@@ -162,6 +287,10 @@ struct RelayClient::Impl {
                         control.state == ControlConnectionState::ready && control.target_usb_ready && control.release_confirmed,
                         consumed != Clock::time_point{} && now - consumed < 500ms, video_sequence});
                     heartbeat_at = now; last_active = active;
+                } else if (keyframe_pending && now - keyframe_at >= 100ms) {
+                    type = PacketType::keyframe_request;
+                    payload = encode_keyframe_request({session, keyframe_generation});
+                    keyframe_pending = false; keyframe_at = now;
                 } else if (!events.empty()) {
                     auto event = std::move(events.front()); events.pop_front();
                     if (event.epoch == control.epoch && event.epoch >= min_epoch &&
@@ -193,6 +322,7 @@ void RelayClient::start() {
     if (p.video_worker.joinable()) p.video_worker.join();
     {
         std::lock_guard lock(p.mutex);
+        p.video = {}; p.keyframe_pending = false; p.keyframe_generation = 0;
         p.control = {}; p.control.state = ControlConnectionState::opening;
         const auto generation = p.capture.generation + 1;
         p.capture = {}; p.capture.generation = generation; p.capture.state = CaptureState::starting;
@@ -267,6 +397,7 @@ ControlSnapshot RelayClient::control_snapshot() const {
     return result;
 }
 CaptureSnapshot RelayClient::capture_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->capture; }
+ClientVideoSnapshot RelayClient::video_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->video; }
 TrafficSnapshot RelayClient::traffic_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->traffic; }
 std::optional<CaptureSample> RelayClient::take_sample() {
     std::lock_guard lock(impl_->mutex);

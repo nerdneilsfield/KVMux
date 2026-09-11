@@ -2,11 +2,15 @@
 #include "app/kvm_session.hpp"
 #include "network/relay_protocol.hpp"
 #include "video/video_pipeline.hpp"
+#include "video/video_processor.hpp"
 #include "relay_test_fakes.hpp"
 #include <atomic>
 #include <fstream>
 #include <stdexcept>
 #include <thread>
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
 using namespace kvmux;
 using namespace kvmux::relay;
 using namespace std::chrono_literals;
@@ -17,12 +21,47 @@ std::unique_ptr<CaptureSource> create_platform_capture_source() {
 }
 }
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+std::vector<kvmux::EncodedAccessUnit> read_units(const char* path) {
+    using namespace kvmux;
+    std::ifstream in(path, std::ios::binary);
+    require(in.good(), "open HEVC test fixture");
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), {});
+    const auto size=bytes.size();
+    bytes.resize(size+AV_INPUT_BUFFER_PADDING_SIZE);
+    auto* parser=av_parser_init(AV_CODEC_ID_HEVC);
+    auto* context=avcodec_alloc_context3(avcodec_find_decoder(AV_CODEC_ID_HEVC));
+    require(parser && context, "HEVC parser allocation");
+    std::vector<EncodedAccessUnit> units;
+    auto parse=[&](const std::uint8_t* data, int count) {
+        std::uint8_t* packet=nullptr; int packet_size=0;
+        const int used=av_parser_parse2(parser, context, &packet, &packet_size, data, count,
+                                       AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        require(used>=0 && (used || packet_size || !count), "HEVC parse progress");
+        if (packet_size) {
+            EncodedAccessUnit au;
+            au.bytes.assign(packet, packet+packet_size);
+            au.width=1920; au.height=1080; au.generation=7;
+            au.capture_sequence=100+units.size(); au.pts_ns=static_cast<std::int64_t>(units.size())*16'666'667;
+            au.idr=parser->key_frame==1;
+            au.color_range=AVCOL_RANGE_MPEG; au.color_space=AVCOL_SPC_BT709;
+            au.sample_aspect_ratio={4,3};
+            units.push_back(std::move(au));
+        }
+        return used;
+    };
+    std::size_t offset=0;
+    while (offset<size) offset+=parse(bytes.data()+offset, static_cast<int>(size-offset));
+    parse(nullptr,0);
+    av_parser_close(parser); avcodec_free_context(&context);
+    return units;
+}
+void hevc_test(const char* fixture);
 void integrated_test(const std::vector<std::uint8_t>& jpeg);
 void session_stall_test(const std::vector<std::uint8_t>& jpeg);
 void startup_grace_test(const std::vector<std::uint8_t>& jpeg);
 void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active = false);
 int main(int argc, char** argv) {
-    require(argc == 2, "JPEG fixture required");
+    require(argc == 3, "JPEG and HEVC fixtures required");
     std::ifstream input(argv[1], std::ios::binary);
     std::vector<std::uint8_t> jpeg((std::istreambuf_iterator<char>(input)), {});
     std::string error;
@@ -36,7 +75,7 @@ int main(int argc, char** argv) {
         Status status; status.session = 42; status.control.epoch = 5;
         status.control.state = ControlConnectionState::ready;
         status.control.target_usb_ready = status.control.release_confirmed = true;
-        if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
+        if (!send_packet(*socket, PacketType::hello, encode_hello({42, VideoCodec::mjpeg})) ||
             !send_packet(*socket, PacketType::status, encode_status(status))) return;
         while (!done) {
             auto packet = receive_packet(*socket, 400ms);
@@ -58,7 +97,7 @@ int main(int argc, char** argv) {
         auto socket = videos->accept(2s);
         if (!socket) return;
         auto hello = receive_packet(*socket, 500ms);
-        if (!hello || decode_session(hello->payload) != 42) return;
+        if (!hello || !decode_hello(hello->payload) || decode_hello(hello->payload)->session != 42) return;
         std::uint64_t sequence = 0;
         while (!done) {
             auto sample = CaptureSample::make_mjpeg(1, ++sequence, std::chrono::steady_clock::now(), 16, 16, jpeg);
@@ -106,6 +145,7 @@ int main(int argc, char** argv) {
     startup_grace_test(jpeg);
     delayed_status_test(jpeg);
     delayed_status_test(jpeg, true);
+    hevc_test(argv[2]);
 }
 
 void integrated_test(const std::vector<std::uint8_t>& jpeg) {
@@ -151,9 +191,9 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
         Status status; status.session = 42; status.control.epoch = 1;
         status.control.state = ControlConnectionState::ready;
         status.control.target_usb_ready = status.control.release_confirmed = true;
-        if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
+        if (!send_packet(*socket, PacketType::hello, encode_hello({42, VideoCodec::mjpeg})) ||
             !send_packet(*socket, PacketType::status, encode_status(status))) return;
-        control_sent_bytes = 12U + encode_session(42).size() + 12U + encode_status(status).size();
+        control_sent_bytes = 12U + encode_hello({42, VideoCodec::mjpeg}).size() + 12U + encode_status(status).size();
         while (!done) {
             auto packet = receive_packet(*socket, 400ms);
             if (!packet) break;
@@ -228,7 +268,7 @@ void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active) {
         Status status; status.session = 42; status.control.epoch = 1;
         status.control.state = ControlConnectionState::ready;
         status.control.target_usb_ready = status.control.release_confirmed = true;
-        if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
+        if (!send_packet(*socket, PacketType::hello, encode_hello({42, VideoCodec::mjpeg})) ||
             !send_packet(*socket, PacketType::status, encode_status(status))) return;
         auto first = receive_packet(*socket, 250ms);
         if (!first || first->type != PacketType::heartbeat) return;
@@ -357,4 +397,91 @@ void session_stall_test(const std::vector<std::uint8_t>& jpeg) {
     session.shutdown(); client.reset();
     require(std::chrono::steady_clock::now() - stop_at < 1s, "session stop remains bounded");
     server.stop(); hardware.disconnect();
+}
+
+void hevc_test(const char* fixture) {
+    auto units = read_units(fixture);
+    require(units.size() == 60 && units[0].idr && units[30].idr, "HEVC fixture IDR boundaries");
+    std::string error;
+    auto controls = tcp::Listener::bind("127.0.0.1", 0, error);
+    auto videos = tcp::Listener::bind("127.0.0.1", 0, error);
+    require(controls && videos, "HEVC listeners");
+    std::atomic<bool> done{}, request_seen{}, initial_seen{}, recovered_seen{};
+    std::atomic<int> requests{};
+    std::jthread server([&] {
+        auto socket = controls->accept(2s);
+        if (!socket) return;
+        Status status; status.session = 77; status.control.epoch = 1;
+        status.control.state = ControlConnectionState::ready;
+        status.control.target_usb_ready = status.control.release_confirmed = true;
+        if (!send_packet(*socket, PacketType::hello, encode_hello({77, VideoCodec::hevc})) ||
+            !send_packet(*socket, PacketType::status, encode_status(status))) return;
+        while (!done) {
+            auto packet = receive_packet(*socket, 400ms);
+            if (!packet) break;
+            if (packet->type == PacketType::keyframe_request) {
+                const auto request = decode_keyframe_request(packet->payload);
+                if (request && request->session == 77 && request->generation == 77) {
+                    request_seen = true; ++requests;
+                }
+            }
+            if (!send_packet(*socket, PacketType::status, encode_status(status))) break;
+        }
+    });
+    std::jthread video([&] {
+        auto socket = videos->accept(2s);
+        if (!socket) return;
+        auto packet = receive_packet(*socket, 500ms);
+        const auto hello = packet ? decode_hello(packet->payload) : std::nullopt;
+        if (!hello || hello->session != 77 || hello->codec != VideoCodec::hevc) return;
+        auto send = [&](std::size_t index, std::uint64_t encoded_sequence) {
+            auto au = units[index]; au.generation = 77; au.encoded_sequence = encoded_sequence;
+            au.capture_sequence = 100 + index;
+            // Deliberately foreign steady-clock epoch: only receive time is meaningful.
+            au.arrival = std::chrono::steady_clock::time_point{};
+            return bool(send_packet(*socket, PacketType::video_hevc, encode_hevc(au)));
+        };
+        if (!send(0, 1)) return;
+        const auto initial_deadline = std::chrono::steady_clock::now() + 2s;
+        while (!initial_seen && !done && std::chrono::steady_clock::now() < initial_deadline)
+            std::this_thread::sleep_for(2ms);
+        // Skip encoded sequence 2. Dependent pictures must not enter the mailbox.
+        if (!send(2, 3) || !send(3, 4)) return;
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (!request_seen && !done && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(2ms);
+        if (!request_seen || !send(30, 5)) return;
+        for (std::size_t i = 31; i < units.size() && !done; ++i) {
+            if (!send(i, i - 25)) break;
+            std::this_thread::sleep_for(10ms);
+        }
+        while (!done) std::this_thread::sleep_for(2ms);
+    });
+    RelayClient client({"127.0.0.1", *controls->local_port(), *videos->local_port(), CodecBackend::ffmpeg_software});
+    client.start();
+    VideoProcessor processor;
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    bool invalid_sequence = false;
+    while (!recovered_seen && std::chrono::steady_clock::now() < deadline) {
+        client.gui_progress();
+        if (auto sample = client.take_sample()) {
+            auto frame = processor.process(*sample);
+            require(frame && frame->frame->data[0], "TCP HEVC owned CPU picture processes");
+            if (frame->sequence == 100) initial_seen = true;
+            if (frame->sequence == 102 || frame->sequence == 103) invalid_sequence = true;
+            if (frame->sequence >= 130) recovered_seen = true;
+            client.video_presented(frame->sequence);
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    const auto diagnostic = client.video_snapshot();
+    const auto traffic = client.traffic_snapshot();
+    client.stop(); done = true; server.join(); video.join();
+    require(initial_seen && recovered_seen && request_seen && !invalid_sequence,
+            "TCP HEVC sequence gap requests IDR and recovers without publishing dependents");
+    require(diagnostic.codec == VideoCodec::hevc && diagnostic.decoder_backend == CodecBackend::ffmpeg_software &&
+            !diagnostic.hardware_active && diagnostic.recoveries >= 1 && requests <= 3,
+            "actual software decoder diagnostics and bounded recovery requests");
+    require(traffic.video_received_bytes > 0 && traffic.control_sent_bytes > 0,
+            "HEVC traffic counters preserved");
 }

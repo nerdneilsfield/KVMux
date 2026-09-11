@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/pixdesc.h>
 }
 
 namespace kvmux {
@@ -68,9 +69,43 @@ VideoProcessor::~VideoProcessor() { avcodec_free_context(&decoder_); }
 std::optional<VideoFrame> VideoProcessor::process(const CaptureSample& sample) {
     last_error_.clear();
     if (!valid_dimensions(sample.width, sample.height) ||
-        (sample.raw.has_value() == sample.mjpeg.has_value())) {
+        (static_cast<int>(sample.raw.has_value()) + static_cast<int>(sample.mjpeg.has_value()) +
+         static_cast<int>(bool(sample.decoded)) != 1)) {
         fail("sample must contain exactly one valid payload");
         return std::nullopt;
+    }
+    if (sample.decoded) {
+        const auto& frame = *sample.decoded;
+        if (frame.width != static_cast<int>(sample.width) ||
+            frame.height != static_cast<int>(sample.height) || !frame.buf[0] ||
+            !frame.data[0] || frame.linesize[0] <= 0 ||
+            av_image_check_size(frame.width, frame.height, 0, nullptr) < 0) {
+            fail("invalid owned decoded frame");
+            return std::nullopt;
+        }
+        const auto format = static_cast<AVPixelFormat>(frame.format);
+        const auto* description = av_pix_fmt_desc_get(format);
+        std::array<int, 4> minimum{};
+        const int planes = av_pix_fmt_count_planes(format);
+        if (!description || (description->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
+            planes < 1 || planes > 4 || av_image_fill_linesizes(minimum.data(), format, frame.width) < 0) {
+            fail("decoded frame must have a supported CPU layout");
+            return std::nullopt;
+        }
+        for (int plane = 0; plane < planes; ++plane) {
+            const auto* buffer = av_frame_get_plane_buffer(sample.decoded.get(), plane);
+            const int rows = plane == 1 || plane == 2
+                ? AV_CEIL_RSHIFT(frame.height, description->log2_chroma_h) : frame.height;
+            const auto size = frame.linesize[plane] > 0
+                ? static_cast<std::size_t>(rows - 1) * frame.linesize[plane] + minimum[plane] : 0;
+            if (!buffer || !frame.data[plane] || frame.linesize[plane] < minimum[plane] ||
+                frame.data[plane] < buffer->data || size > buffer->size ||
+                static_cast<std::size_t>(frame.data[plane] - buffer->data) > buffer->size - size) {
+                fail("decoded plane is outside owned storage");
+                return std::nullopt;
+            }
+        }
+        return metadata(sample, sample.decoded);
     }
     return sample.raw ? process_raw(sample) : process_mjpeg(sample);
 }

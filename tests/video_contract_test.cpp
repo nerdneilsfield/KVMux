@@ -79,6 +79,17 @@ int main(int argc, char** argv) {
                 frame->frame->data[0][frame->frame->linesize[0]] == 81,
             "raw stride rows are preserved");
 
+    CaptureSample retained;
+    retained.generation = 4; retained.sequence = 21; retained.arrival = now;
+    retained.width = 2; retained.height = 2; retained.decoded = frame->frame;
+    auto retained_frame = processor.process(retained);
+    require(retained_frame && retained_frame->frame == frame->frame,
+            "decoded sample retains owned frame without copying pixels");
+    retained.raw = processable->raw;
+    require(!processor.process(retained), "mixed decoded and raw payload rejected");
+    retained.raw.reset(); retained.width = 3;
+    require(!processor.process(retained), "decoded dimensions validated");
+
     const std::array reversed{PlaneLayout{4, -4, 4, 2}};
     auto bottom_up = CaptureSample::make_raw(4, 21, now, 2, 2,
                                               PixelFormat::yuy2, reversed, yuy2);
