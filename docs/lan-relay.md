@@ -63,13 +63,16 @@ these devices. The default baud rate is 9600; use `--baud` to match your CH9329.
 
 Automatic capture selection requires exactly one enumerated device. Multiple
 devices produce an error listing candidates; choose one with `--device`.
-Automatic mode selection requires both native and delivered MJPEG. It prefers
+With the default `--codec mjpeg`, automatic mode selection requires both native
+and delivered MJPEG. It prefers
 1080p60, 720p60, 1080p30, then 720p30. The 60/30 groups include 59.94/29.97
 (including 60000/1001 and 30000/1001); the original rational rate is preserved.
 Other usable MJPEG modes sort by descending pixel area, width, height, then
 frame rate. Within a preferred group the higher frame rate wins. Exact ties
 use the first enumerated index. Modes outside the capture dimension limits or
-with invalid frame rates are not usable. Raw modes are never selected.
+with invalid frame rates are not usable. MJPEG mode never selects raw capture.
+With `--codec hevc`, selection instead requires native and delivered raw video
+with even dimensions and uses the same resolution and frame-rate priorities.
 
 Automatic serial selection uses libserialport USB VID/PID metadata, not port
 names. Supported adapter IDs are `1a86:7523`, `1a86:5523` and `1a86:55d3`. Exactly one match is required. Multiple matches produce an error
@@ -97,10 +100,11 @@ Replace `DEVICE_ID` with the exact ID from the first command. On Windows, use
 `build/windows-debug-headless/kvmux-relay.exe` for the same commands. Quote IDs containing
 spaces or special characters.
 
-Choose a mode whose native format is **MJPEG**. Mode numbers start at zero and
-refer to the current enumeration. This first relay implementation does not
-encode raw YUY2, UYVY, NV12 or BGRA. Selecting such a mode produces an error;
-it does not silently change the requested mode.
+For `--codec mjpeg`, choose a mode whose native and delivered formats are
+**MJPEG**. For `--codec hevc`, choose supported raw capture with even dimensions;
+MJPEG-to-H.265 transcoding is not supported. Mode numbers start at zero and refer
+to the current enumeration. An incompatible explicit mode produces an error;
+the relay does not silently change the requested mode.
 
 ## Start with explicit choices
 
@@ -125,6 +129,27 @@ Linux needs permission to open both the video device and serial port. Windows
 needs a working serial driver on the relay host; the Mac does not need that
 driver. The baud rate must match the CH9329 configuration.
 
+## Choose H.265 encoding
+
+MJPEG remains the default. To encode raw capture as H.265, add
+`--codec hevc --encoder auto`. Auto tries hardware first, then falls back to CPU
+encoding if hardware initialization fails. The relay diagnostic reports the actual
+backend and fallback reason. `--encoder jetson` requires the Jetson hardware
+backend; `--encoder software` requires the FFmpeg CPU backend. Explicit choices
+do not fall back. `--bitrate` sets bits per second; the default is `8000000`.
+Fallback does not promise a seamless codec switch during a running stream.
+Runtime errors still use the relay's recovery or reconnection path.
+
+CPU encoding requires an installed FFmpeg build with the `libx265` encoder.
+KVMux does not download or install it automatically. If neither hardware nor
+CPU encoding is available, Auto reports an error. CPU encoding can be slower
+than capture; selecting it does not establish real-time performance.
+
+FFmpeg builds that include GPL `libx265` have GPL licensing obligations.
+Before distributing binaries, check the licenses of the FFmpeg and x265 builds
+you package and provide the required notices and corresponding source/build
+information. See [building.md](building.md) for dependency and packaging details.
+
 ## Connect the GUI
 
 Build the desktop application with the existing `macos-debug` preset. In the GUI:
@@ -133,8 +158,10 @@ Build the desktop application with the existing `macos-debug` preset. In the GUI
 2. Enter the relay computer's IPv4 address, not the Mac's loopback address.
 3. Set the control and video ports to match the relay.
 4. Choose **Decode** for H.265: **Auto**, **VideoToolbox**, or **FFmpeg software**.
-   Auto probes hardware only. An unavailable backend reports an error instead
-   of silently switching to software. This setting does not affect MJPEG.
+   Auto tries hardware first, then falls back to CPU decoding if hardware
+   initialization fails. Diagnostics shows the actual backend and fallback reason.
+   An explicit backend reports an error if unavailable; it does not fall back.
+   This setting does not affect MJPEG.
 5. Select **Connect relay**.
 6. Wait for a new video frame and ready/cleared serial status before clicking
    the video area to capture input. The Host key releases input locally.
@@ -533,5 +560,5 @@ A synthetic test on the Orin NX with L4T R36.4.7 successfully encoded 60 I420
 1920×1080 frames through `nvvidconv`, NVMM NV12 and `nvv4l2h265enc`, with no
 B-frames and a configured bitrate of 12,000,000 bits/s. The NVIDIA encoder
 reported H.265 Profile 1 and reached EOS. This confirms that hardware encoding
-works for that test; raw-to-H.265 relay transport and Mac hardware decoding
-are not yet implemented or validated end to end.
+works for that test. It does not establish capture-card latency or two-host
+hardware acceptance for the implemented raw-to-H.265 relay and Mac decoder.

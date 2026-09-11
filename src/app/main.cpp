@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
                     ImGui::EndCombo();
                 }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("H.265 decoder for the next connection. Auto requires hardware.\nUnavailable backends report an error; MJPEG is unchanged.");
+                    ImGui::SetTooltip("H.265 decoder for the next connection. Auto prefers hardware, then falls back to CPU.\nExplicit backends do not fall back; MJPEG is unchanged.");
                 if (ImGui::Button("Connect relay") && retired_sessions.empty() && control_port > 0 && control_port <= 65535 && video_port > 0 && video_port <= 65535) {
                     retire_session();
                     devices_future = {}; modes_future.reset();
