@@ -28,6 +28,7 @@ public:
         if (!config.width || !config.height || config.width > kMaxCaptureWidth ||
             config.height > kMaxCaptureHeight || (config.width % 2) || (config.height % 2) ||
             !config.fps_numerator || !config.fps_denominator ||
+            config.fps_numerator < config.fps_denominator ||
             config.fps_numerator > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
             config.fps_denominator > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
             static_cast<std::uint64_t>(config.fps_numerator) >

@@ -23,6 +23,10 @@ int main(int argc, char** argv) try {
     invalid_rate.fps_denominator = 1000;
     auto result = encoder->configure(invalid_rate);
     require(result.status == CodecStatus::invalid_input, "accepted frame rate above 240fps");
+    invalid_rate.fps_numerator = 1;
+    invalid_rate.fps_denominator = 2;
+    result = encoder->configure(invalid_rate);
+    require(result.status == CodecStatus::invalid_input, "accepted frame rate below 1fps");
     result=encoder->configure(config); require(result.ok(), result.message);
     require(!encoder->diagnostic().hardware_active,"hardware claimed before output");
     AVFrame* raw=av_frame_alloc(); require(raw, "alloc frame");
