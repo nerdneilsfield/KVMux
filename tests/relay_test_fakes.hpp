@@ -71,6 +71,6 @@ struct FakeCapture final:CaptureSource {
     }
     CaptureSnapshot snapshot() const override {
         CaptureSnapshot out;out.state=CaptureState::streaming;
-        out.actual_mode.delivered_format=PixelFormat::mjpeg;return out;
+        out.actual_mode={"fake",16,16,{50,1},PixelFormat::mjpeg,PixelFormat::mjpeg,"MJPEG"};return out;
     }
 };

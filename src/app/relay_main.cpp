@@ -30,11 +30,13 @@ void print_help(std::ostream& out) {
            "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
            "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
+           "       [--codec mjpeg|hevc] [--encoder auto|jetson] [--bitrate 8000000]\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
            "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including 59.94/29.97),\n"
            "then descending pixel area, width, height and fps; ties use first index.\n"
-           "Explicit choices never fall back. Native and delivered MJPEG only.\n"
+           "HEVC requires native and delivered raw video; encoder must be hardware.\n"
+           "Explicit choices never fall back. Bitrate is in bits/s.\n"
            "Unauthenticated LAN TCP: trusted networks only.\n";
 }
 
@@ -50,10 +52,19 @@ int serve(int argc,char** argv) {
         if(key=="--device")device_request=value;
         else if(key=="--serial")serial_request=value;
         else if(key=="--bind")options.bind_address=value;
-        else {
+        else if(key=="--codec") {
+            if(value=="mjpeg")options.codec=kvmux::VideoCodec::mjpeg;
+            else if(value=="hevc")options.codec=kvmux::VideoCodec::hevc;
+            else throw std::runtime_error("--codec must be mjpeg or hevc");
+        } else if(key=="--encoder") {
+            if(value=="auto")options.encoder_backend=kvmux::CodecBackend::automatic;
+            else if(value=="jetson")options.encoder_backend=kvmux::CodecBackend::jetson_gstreamer;
+            else throw std::runtime_error("--encoder must be auto or jetson");
+        } else {
             int number{};const auto result=std::from_chars(value.data(),value.data()+value.size(),number);
             if(result.ec!=std::errc{}||result.ptr!=value.data()+value.size()||number<0)throw std::runtime_error("Invalid numeric option");
             if(key=="--mode-index")mode_request=static_cast<std::size_t>(number);
+            else if(key=="--bitrate"&&number>0&&number<=100000000)options.bitrate=static_cast<std::uint32_t>(number);
             else if(key=="--baud"&&number>0)baud=number;
             else if(key=="--control-port"&&number>0&&number<=65535)options.control_port=static_cast<std::uint16_t>(number);
             else if(key=="--video-port"&&number>0&&number<=65535)options.video_port=static_cast<std::uint16_t>(number);
@@ -63,14 +74,16 @@ int serve(int argc,char** argv) {
     auto capture=kvmux::create_platform_capture_source();
     const auto device=kvmux::relay::select_device(capture->enumerate_devices(),device_request);
     const auto modes=capture->enumerate_modes(device);
-    const auto mode=kvmux::relay::select_mode(modes,mode_request);
+    const auto mode=kvmux::relay::select_mode(modes,mode_request,options.codec);
     const auto serial=kvmux::relay::select_serial(
         serial_request ? std::vector<kvmux::SerialPortInfo>{} : kvmux::enumerate_serial_ports(),serial_request);
     const auto& selected=modes[mode];
     std::cout << "Selected device=" << std::quoted(device) << " mode-index=" << mode
               << " size=" << selected.width << 'x' << selected.height
               << " fps=" << selected.frame_rate.numerator << '/' << selected.frame_rate.denominator
-              << " native-format=MJPEG (" << selected.device_format_name << ") delivered-format=MJPEG"
+              << " native-format=" << selected.device_format_name
+              << " delivered-format=" << static_cast<int>(selected.delivered_format)
+              << " codec=" << (options.codec==kvmux::VideoCodec::hevc ? "hevc" : "mjpeg")
               << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
     if (!serial_request)
         std::cout << "USB adapter VID/PID match only; CH9329 handshake not yet verified.\n";

@@ -5,9 +5,14 @@
 
 namespace kvmux::relay {
 namespace {
-bool usable(const CaptureMode& mode) {
-    return mode.device_format == PixelFormat::mjpeg &&
-           mode.delivered_format == PixelFormat::mjpeg &&
+bool raw(PixelFormat format) {
+    return format >= PixelFormat::yuy2 && format <= PixelFormat::rgba;
+}
+bool usable(const CaptureMode& mode, VideoCodec codec) {
+    const bool format = codec == VideoCodec::mjpeg ?
+        mode.device_format == PixelFormat::mjpeg && mode.delivered_format == PixelFormat::mjpeg :
+        raw(mode.device_format) && raw(mode.delivered_format) && mode.width % 2 == 0 && mode.height % 2 == 0;
+    return format &&
            valid_dimensions(mode.width, mode.height) &&
            mode.frame_rate.numerator > 0 && mode.frame_rate.denominator > 0;
 }
@@ -55,16 +60,16 @@ std::string select_device(std::span<const DeviceInfo> devices,
     for (const auto& device : devices) error += "\n  " + device.stable_id + " (" + device.display_name + ")";
     throw std::runtime_error(error);
 }
-std::size_t select_mode(std::span<const CaptureMode> modes, std::optional<std::size_t> requested) {
+std::size_t select_mode(std::span<const CaptureMode> modes, std::optional<std::size_t> requested, VideoCodec codec) {
     if (requested) {
         if (*requested >= modes.size()) throw std::runtime_error("Capture mode index out of range");
-        if (!usable(modes[*requested])) throw std::runtime_error("LAN relay requires usable native and delivered MJPEG; raw modes are unsupported");
+        if (!usable(modes[*requested], codec)) throw std::runtime_error(codec == VideoCodec::hevc ? "HEVC requires supported native and delivered raw video with even dimensions; MJPEG transcoding is not supported" : "LAN relay requires usable native and delivered MJPEG; raw modes are unsupported");
         return *requested;
     }
     std::optional<std::size_t> best;
     for (std::size_t i = 0; i < modes.size(); ++i)
-        if (usable(modes[i]) && (!best || better(modes[i], modes[*best]))) best = i;
-    if (!best) throw std::runtime_error("No usable native and delivered MJPEG modes found; raw modes are unsupported");
+        if (usable(modes[i], codec) && (!best || better(modes[i], modes[*best]))) best = i;
+    if (!best) throw std::runtime_error(codec == VideoCodec::hevc ? "No supported native and delivered raw modes for HEVC found" : "No usable native and delivered MJPEG modes found; raw modes are unsupported");
     return *best;
 }
 std::string select_serial(std::span<const SerialPortInfo> ports,

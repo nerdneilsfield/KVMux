@@ -43,6 +43,11 @@ int main() {
     std::vector<CaptureMode> raw{modes.back()};
     fails([&]{select_mode(raw);}, "No usable");
     fails([]{select_mode({});}, "No usable");
+    raw.front().delivered_format=PixelFormat::yuy2;
+    assert(select_mode(raw,{},VideoCodec::hevc)==0);
+    fails([&]{select_mode(modes,0,VideoCodec::hevc);}, "raw");
+    raw.front().width=1279;
+    fails([&]{select_mode(raw,0,VideoCodec::hevc);}, "even dimensions");
     std::vector<SerialPortInfo> ports{
         {"/dev/ttyTHS0","board",{},{}}, {"/dev/ttyUSB0","other",0x0403,0x6001},
         {"/dev/ttyUSB1","unknown WCH",0x1a86,0xffff},

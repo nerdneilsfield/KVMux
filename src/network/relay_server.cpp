@@ -1,5 +1,11 @@
 #include "network/relay_server.hpp"
 #include "network/relay_protocol.hpp"
+#include "network/relay_selection.hpp"
+#include "video/video_processor.hpp"
+extern "C" {
+#include <libswscale/swscale.h>
+}
+#include <stdexcept>
 #include <atomic>
 #include <spdlog/spdlog.h>
 #include "input/input_router.hpp"
@@ -27,26 +33,136 @@ struct RelayServer::Impl {
     std::optional<tcp::Listener> control_listener,video_listener;
     std::atomic<bool> stopping{false}; std::thread worker;
     std::uint64_t next_session{};
-    Impl(CaptureSource& c,Ch9329ControlSink& s):capture(c),sink(s){}
+    ServerOptions options;
+    EncoderFactory encoder_factory;
+    Impl(CaptureSource& c,Ch9329ControlSink& s,EncoderFactory factory):capture(c),sink(s),encoder_factory(std::move(factory)){}
+    CodecConfig config(std::uint64_t generation) const {
+        const auto mode=capture.snapshot().actual_mode;
+        CodecConfig result;
+        result.width=mode.width;result.height=mode.height;
+        result.fps_numerator=static_cast<std::uint32_t>(mode.frame_rate.numerator);
+        result.fps_denominator=static_cast<std::uint32_t>(mode.frame_rate.denominator);
+        result.bitrate=options.bitrate;result.generation=generation;
+        return result;
+    }
+    std::unique_ptr<VideoEncoder> encoder(std::uint64_t generation,std::string& error) {
+        auto result=encoder_factory(options.encoder_backend,error);
+        if(result) {
+            auto configured=result->configure(config(generation));
+            if(!configured.ok()){error=configured.message;result->shutdown();return {};}
+        }
+        return result;
+    }
+    void hevc_video(tcp::Socket& socket,std::uint64_t id,std::atomic<bool>& done,
+                    std::atomic<std::uint64_t>& sent_sequence,std::atomic<bool>& keyframe) {
+        std::string error;
+        auto codec=encoder(id,error);
+        if(!codec)throw std::runtime_error("HEVC encoder: "+error);
+        struct Shutdown { VideoEncoder& codec; ~Shutdown(){codec.shutdown();} } shutdown{*codec};
+        VideoProcessor processor;
+        std::unique_ptr<SwsContext,decltype(&sws_freeContext)> scaler(nullptr,sws_freeContext);
+        auto last=Clock::now();
+        std::optional<std::uint64_t> capture_generation;
+        std::uint64_t encoded_sequence{};
+        bool waiting_idr=true;
+        while(!done&&!stopping) {
+            if(auto extra=video_listener->accept(1ms))extra->close();
+            if(keyframe.exchange(false)) {
+                auto result=codec->request_keyframe();
+                if(!result.ok())throw std::runtime_error(result.message);
+            }
+            // Drain ordered output before admitting another latest raw sample.
+            for(unsigned i=0;i<16;++i) {
+                EncodedAccessUnit unit;
+                const auto result=codec->poll(unit);
+                if(result.status==CodecStatus::again)break;
+                if(!result.ok())throw std::runtime_error(result.message);
+                unit.encoded_sequence=++encoded_sequence;
+                if(unit.generation!=id)throw std::runtime_error("HEVC encoder generation mismatch");
+                if(Clock::now()-unit.arrival>500ms)throw std::runtime_error("HEVC encoded output stale for 500ms");
+                if(waiting_idr&&!unit.idr)continue;
+                const auto bytes=encode_hevc(unit);
+                if(bytes.empty())throw std::runtime_error("Invalid HEVC access unit");
+                const auto sent=send_packet(socket,PacketType::video_hevc,bytes,100ms);
+                if(sent.unsent_deadline()) {
+                    waiting_idr=true;
+                    const auto request=codec->request_keyframe();
+                    if(!request.ok())throw std::runtime_error(request.message);
+                    continue;
+                }
+                if(!sent)throw std::runtime_error("HEVC partial send or transport failure");
+                waiting_idr=false;sent_sequence=unit.capture_sequence;
+            }
+            auto sample=capture.take_latest_sample();
+            if(sample) {
+                if(!sample->raw||sample->mjpeg||Clock::now()-sample->arrival>500ms||
+                   (capture_generation&&*capture_generation!=sample->generation))
+                    throw std::runtime_error("HEVC capture changed, is compressed, or is stale");
+                capture_generation=sample->generation;last=sample->arrival;
+                const auto mode=config(id);
+                if(sample->width!=mode.width||sample->height!=mode.height)
+                    throw std::runtime_error("HEVC capture dimensions changed");
+                auto frame=processor.process(*sample);
+                if(!frame)throw std::runtime_error(processor.last_error());
+                auto input=frame->frame;
+                if(input->format!=AV_PIX_FMT_NV12&&input->format!=AV_PIX_FMT_YUV420P) {
+                    AvFramePtr converted(av_frame_alloc(),[](AVFrame* f){av_frame_free(&f);});
+                    if(!converted)throw std::runtime_error("HEVC frame allocation failed");
+                    converted->format=AV_PIX_FMT_NV12;converted->width=input->width;converted->height=input->height;
+                    if(av_frame_get_buffer(converted.get(),32)<0||av_frame_copy_props(converted.get(),input.get())<0)
+                        throw std::runtime_error("HEVC frame storage allocation failed");
+                    scaler.reset(sws_getCachedContext(scaler.release(),input->width,input->height,
+                        static_cast<AVPixelFormat>(input->format),input->width,input->height,AV_PIX_FMT_NV12,
+                        SWS_FAST_BILINEAR,nullptr,nullptr,nullptr));
+                    const int matrix=input->colorspace==AVCOL_SPC_BT709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+                    const bool rgb=input->format==AV_PIX_FMT_BGRA||input->format==AV_PIX_FMT_RGBA;
+                    const int full=rgb||input->color_range==AVCOL_RANGE_JPEG ? 1 : 0;
+                    converted->color_range=full ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+                    converted->colorspace=matrix==SWS_CS_ITU709 ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
+                    if(!scaler||sws_setColorspaceDetails(scaler.get(),sws_getCoefficients(matrix),full,
+                        sws_getCoefficients(matrix),full,0,1<<16,1<<16)<0||
+                        sws_scale(scaler.get(),input->data,input->linesize,0,input->height,
+                        converted->data,converted->linesize)!=input->height)
+                        throw std::runtime_error("HEVC raw conversion failed");
+                    input=std::move(converted);
+                }
+                EncoderInput value;
+                value.frame=std::move(input);value.generation=id;value.capture_sequence=sample->sequence;
+                value.arrival=sample->arrival;
+                value.pts_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(sample->arrival.time_since_epoch()).count();
+                const auto result=codec->submit(value);
+                // again did not accept this raw frame. The next capture replaces it.
+                if(!result.ok()&&result.status!=CodecStatus::again)throw std::runtime_error(result.message);
+            }
+            if(Clock::now()-last>500ms)throw std::runtime_error("HEVC capture stale for 500ms");
+            if(!sample)std::this_thread::sleep_for(2ms);
+        }
+    }
     void session(tcp::Socket control) {
         const auto id=++next_session;
         spdlog::debug("Relay server: control connected, session={}",id);
         sink.set_control_active(false); sink.release_all();
-        if(!send_packet(control,PacketType::hello,encode_session(id))){spdlog::debug("Relay server session={}: handshake send failed or timed out",id);return;}
-        std::atomic<bool> done{false},paired{false}; std::atomic<std::uint64_t> sent_sequence{0};
+        if(!send_packet(control,PacketType::hello,encode_hello({id,options.codec}))){spdlog::debug("Relay server session={}: handshake send failed or timed out",id);return;}
+        std::atomic<bool> done{false},paired{false},keyframe{false}; std::atomic<std::uint64_t> sent_sequence{0};
         std::thread video([&] {
             std::optional<tcp::Socket> socket;
             const auto pairing_deadline=Clock::now()+2s;
             while(!done&&!stopping&&Clock::now()<pairing_deadline) {
                 auto candidate=video_listener->accept(20ms); if(!candidate)continue;
                 auto hello=receive_packet(*candidate,100ms);
-                if(hello&&hello->type==PacketType::hello&&decode_session(hello->payload)==id) {
+                auto value=hello&&hello->type==PacketType::hello ? decode_hello(hello->payload) : std::nullopt;
+                if(value&&value->session==id&&value->codec==options.codec) {
                     socket=std::move(candidate);break;
                 }
             }
             if(!socket){spdlog::debug("Relay server session={}: video pairing ended: {}",id,stopping ? "server stopping" : done ? "control channel ended" : "pairing timeout (2s)");done=true;sink.release_all();return;}
             spdlog::debug("Relay server session={}: video channel paired",id);
             paired=true;
+            if(options.codec==VideoCodec::hevc) {
+                try { hevc_video(*socket,id,done,sent_sequence,keyframe); }
+                catch(const std::exception& error){spdlog::error("Relay HEVC session={}: {}",id,error.what());}
+                done=true;sink.release_all();return;
+            }
             auto last=Clock::now();
             auto drop_log=last;
             std::size_t dropped{};
@@ -109,6 +225,10 @@ struct RelayServer::Impl {
                 if(active!=allow)spdlog::debug("Relay server session={}: control authorization {}",id,allow ? "enabled" : "disabled by heartbeat safety checks");
                 if(active&&!allow)sink.release_all();
                 active=allow;sink.set_control_active(active);
+            } else if(packet->type==PacketType::keyframe_request) {
+                const auto request=decode_keyframe_request(packet->payload);
+                if(!request||request->session!=id||options.codec!=VideoCodec::hevc)break;
+                if(request->generation==id)keyframe=true;
             } else if(packet->type==PacketType::release) {
                 if(decode_session(packet->payload)!=id){spdlog::debug("Relay server session={}: invalid release session",id);break;}
                 active=false;sink.set_control_active(false);sink.release_all();
@@ -135,12 +255,24 @@ struct RelayServer::Impl {
         }
     }
 };
-RelayServer::RelayServer(CaptureSource& c,Ch9329ControlSink& s):impl_(std::make_unique<Impl>(c,s)){}
+RelayServer::RelayServer(CaptureSource& c,Ch9329ControlSink& s,EncoderFactory factory):impl_(std::make_unique<Impl>(c,s,std::move(factory))){}
 RelayServer::~RelayServer(){stop();}
 bool RelayServer::start(const ServerOptions& options,std::string& error) {
     if(impl_->worker.joinable()){error="Relay already running";return false;}
-    if(impl_->capture.snapshot().actual_mode.delivered_format!=PixelFormat::mjpeg) {
-        error="LAN relay requires native MJPEG; raw-only capture modes are unsupported";return false;
+    error.clear();
+    impl_->options=options;
+    const auto mode=impl_->capture.snapshot().actual_mode;
+    try { select_mode(std::span<const CaptureMode>(&mode,1),0,options.codec); }
+    catch(const std::exception& e){error=e.what();return false;}
+    if(options.codec==VideoCodec::hevc) {
+        if(!options.bitrate||options.bitrate>100'000'000){error="HEVC bitrate must be 1..100000000 bits/s";return false;}
+        // Lifecycle probing stays off the caller thread and fails before listening.
+        std::thread probe([&]{
+            try { auto codec=impl_->encoder(1,error);if(codec)codec->shutdown();
+                  else if(error.empty())error="HEVC hardware encoder unavailable"; }
+            catch(const std::exception& e){error=e.what();}
+        });
+        probe.join();if(!error.empty())return false;
     }
     impl_->control_listener=tcp::Listener::bind(options.bind_address,options.control_port,error);
     if(!impl_->control_listener){spdlog::debug("Relay server: control bind failed: {}",error);return false;}
