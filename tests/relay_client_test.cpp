@@ -12,6 +12,7 @@ using namespace std::chrono_literals;
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void integrated_test(const std::vector<std::uint8_t>& jpeg);
 void startup_grace_test(const std::vector<std::uint8_t>& jpeg);
+void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active = false);
 int main(int argc, char** argv) {
     require(argc == 2, "JPEG fixture required");
     std::ifstream input(argv[1], std::ios::binary);
@@ -94,6 +95,8 @@ int main(int argc, char** argv) {
     server.join(); video.join();
     integrated_test(jpeg);
     startup_grace_test(jpeg);
+    delayed_status_test(jpeg);
+    delayed_status_test(jpeg, true);
 }
 
 void integrated_test(const std::vector<std::uint8_t>& jpeg) {
@@ -199,4 +202,83 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
     require(stopped.video_received_bytes == traffic.video_received_bytes &&
         stopped.control_received_bytes == traffic.control_received_bytes && stopped.control_sent_bytes == traffic.control_sent_bytes,
         "stop preserves cumulative traffic");
+}
+
+
+// A delayed/fragmented return path must not stop Preview heartbeats. Keep
+// actual TCP video and GUI ticks alive; no device or hardware connection.
+void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active) {
+    std::string error;
+    auto controls = tcp::Listener::bind("127.0.0.1", 0, error);
+    auto videos = tcp::Listener::bind("127.0.0.1", 0, error);
+    require(controls && videos, "delayed status listeners");
+    std::atomic<bool> done{}, delayed_sent{}, expired{}, inactive_only{true}, reactivated{};
+    std::atomic<unsigned> heartbeats{};
+    std::jthread server([&] {
+        auto socket = controls->accept(1s);
+        if (!socket) return;
+        Status status; status.session = 42; status.control.epoch = 1;
+        status.control.state = ControlConnectionState::ready;
+        status.control.target_usb_ready = status.control.release_confirmed = true;
+        if (!send_packet(*socket, PacketType::hello, encode_session(42)) ||
+            !send_packet(*socket, PacketType::status, encode_status(status))) return;
+        auto first = receive_packet(*socket, 250ms);
+        if (!first || first->type != PacketType::heartbeat) return;
+        ++heartbeats;
+        auto last = std::chrono::steady_clock::now();
+        std::jthread delayed([&] {
+            // Split the header as well as the packet, so the reader must retain
+            // partial input while the writer continues renewing the lease.
+            const auto bytes = encode_packet(PacketType::status, encode_status(status));
+            if (!socket->send_all(std::span(bytes).first(5), 50ms)) return;
+            std::this_thread::sleep_for(280ms);
+            if (!socket->send_all(std::span(bytes).subspan(5), 50ms)) return;
+            delayed_sent = true;
+        });
+        while (!done) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(last + 250ms - std::chrono::steady_clock::now());
+            auto packet = left > 0ms ? receive_packet(*socket, left) : std::nullopt;
+            if (!packet) { expired = true; break; }
+            if (packet->type == PacketType::heartbeat) {
+                auto heartbeat = decode_heartbeat(packet->payload);
+                if (!heartbeat || heartbeat->gui_active) inactive_only = false;
+                if (delayed_sent && heartbeat && heartbeat->gui_active) reactivated = true;
+                ++heartbeats; last = std::chrono::steady_clock::now();
+            }
+            // After the delayed write completes, resume ordinary responses.
+            if (delayed_sent && !send_packet(*socket, PacketType::status, encode_status(status))) break;
+        }
+    });
+    std::jthread video([&] {
+        auto socket = videos->accept(1s);
+        if (!socket || !receive_packet(*socket, 500ms)) return;
+        std::uint64_t sequence{};
+        while (!done) {
+            auto sample = CaptureSample::make_mjpeg(1, ++sequence, std::chrono::steady_clock::now(), 16, 16, jpeg);
+            if (!sample || !send_packet(*socket, PacketType::video_mjpeg, encode_mjpeg(*sample))) break;
+            std::this_thread::sleep_for(10ms);
+        }
+    });
+    RelayClient client({"127.0.0.1", *controls->local_port(), *videos->local_port()});
+    client.start();
+    client.active(active);
+    const auto started = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - started < 450ms) {
+        client.gui_progress();
+        std::this_thread::sleep_for(5ms);
+    }
+    const bool survived = delayed_sent && !expired && heartbeats >= 6 &&
+        client.control_snapshot().state == ControlConnectionState::ready;
+    // The independent writer must still stop when real GUI ticks stop, even
+    // though the receiver and video threads remain alive.
+    const auto deadline = std::chrono::steady_clock::now() + 700ms;
+    while (client.control_snapshot().state != ControlConnectionState::disconnected &&
+           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
+    const auto snapshot = client.control_snapshot();
+    client.stop(); done = true; server.join(); video.join();
+    require(survived, "280ms fragmented status must not starve 250ms Preview heartbeat lease");
+    require(active || inactive_only, "Preview heartbeats never authorize control");
+    require(!reactivated, "status recovery must not restore old active authorization");
+    require(snapshot.state == ControlConnectionState::disconnected && !snapshot.release_confirmed &&
+        snapshot.error == "GUI heartbeat expired", "GUI expiry is independent of status receive");
 }

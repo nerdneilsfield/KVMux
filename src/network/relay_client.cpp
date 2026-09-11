@@ -27,9 +27,10 @@ struct RelayClient::Impl {
     Clock::time_point progress{}, consumed{}, status_at{};
 
     void fail(std::string error) {
-        spdlog::debug("Relay client: disconnected: {}", error);
-        stopped = true;
         std::lock_guard lock(mutex);
+        if (stopped) return;
+        stopped = true;
+        spdlog::debug("Relay client: disconnected: {}", error);
         control.state = ControlConnectionState::disconnected;
         control.release_confirmed = false;
         control.target_usb_ready = false;
@@ -94,6 +95,29 @@ struct RelayClient::Impl {
         if (!initial_status || initial_status->session != *token) { fail("Invalid initial status"); return; }
         { std::lock_guard lock(mutex); control = initial_status->control; status_at = Clock::now(); }
         spdlog::debug("Relay client: initial control state={}, epoch={}", static_cast<int>(initial_status->control.state), initial_status->control.epoch);
+        // Reading a status must not prevent fresh GUI progress from reaching
+        // the server's 250ms heartbeat lease. One reader and one writer own the
+        // two TCP directions; this scoped worker joins before socket destruction.
+        std::jthread status_reader([&] {
+            while (!stopped) {
+                auto packet = receive_packet(*socket, 350ms);
+                if (packet) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + packet->payload.size(); }
+                if (!packet) { if (!stopped) fail("Control status read failed or timed out"); return; }
+                if (packet->type != PacketType::status) { fail("Unexpected control packet"); return; }
+                auto status = decode_status(packet->payload);
+                if (!status || status->session != *token) { fail("Invalid control status or session"); return; }
+                std::lock_guard lock(mutex);
+                if (stopped) return;
+                if (status->control.epoch < control.epoch || status->control.epoch < min_epoch) continue;
+                if (control.state != status->control.state || control.epoch != status->control.epoch ||
+                    control.target_usb_ready != status->control.target_usb_ready || control.release_confirmed != status->control.release_confirmed)
+                    spdlog::debug("Relay client: control state {} -> {}, epoch={}, USB ready={}, release confirmed={}",
+                        static_cast<int>(control.state), static_cast<int>(status->control.state), status->control.epoch,
+                        status->control.target_usb_ready, status->control.release_confirmed);
+                control = std::move(status->control);
+                status_at = Clock::now();
+            }
+        });
         auto last_progress = Clock::time_point{};
         auto heartbeat_at = Clock::time_point{};
         bool last_active = false;
@@ -105,6 +129,12 @@ struct RelayClient::Impl {
             {
                 std::lock_guard lock(mutex);
                 const auto now = Clock::now();
+                if (now - status_at >= 250ms) {
+                    // A recovered status restores Preview readiness, not an old
+                    // capture authorization or queued input from before the gap.
+                    active = false;
+                    events.clear();
+                }
                 if (release_pending) {
                     type = PacketType::release; payload = encode_session(session);
                     release_pending = false;
@@ -113,12 +143,15 @@ struct RelayClient::Impl {
                     min_epoch = control.epoch + 1; control.release_confirmed = false;
                     control.state = ControlConnectionState::clearing; mode.reset();
                 } else if ((progress != last_progress || active != last_active) && now - progress < 250ms && (now - heartbeat_at >= 50ms || active != last_active) && (active || events.empty())) {
-                    payload = encode_heartbeat({session, control.epoch, active && gui_seen,
+                    payload = encode_heartbeat({session, control.epoch, active && gui_seen && now - status_at < 250ms &&
+                        control.state == ControlConnectionState::ready && control.target_usb_ready && control.release_confirmed,
                         consumed != Clock::time_point{} && now - consumed < 500ms, video_sequence});
                     last_progress = progress; heartbeat_at = now; last_active = active;
                 } else if (!events.empty()) {
                     auto event = std::move(events.front()); events.pop_front();
-                    if (event.epoch == control.epoch && event.epoch >= min_epoch) {
+                    if (event.epoch == control.epoch && event.epoch >= min_epoch &&
+                        now - status_at < 250ms && control.state == ControlConnectionState::ready &&
+                        control.target_usb_ready && control.release_confirmed) {
                         type = PacketType::control; payload = encode_session_control({session, event});
                     }
                 }
@@ -131,21 +164,6 @@ struct RelayClient::Impl {
             }
             if (!send_packet(*socket, type, payload, 50ms)) { failure = "Control send failed or timed out"; break; }
             { std::lock_guard lock(mutex); traffic.control_sent_bytes += 12U + payload.size(); }
-            auto packet = receive_packet(*socket, 350ms);
-            if (packet) { std::lock_guard lock(mutex); traffic.control_received_bytes += 12U + packet->payload.size(); }
-            if (!packet) { failure = "Control status read failed or timed out"; break; }
-            if (packet->type != PacketType::status) { failure = "Unexpected control packet"; break; }
-            auto status = decode_status(packet->payload);
-            if (!status || status->session != *token) { failure = "Invalid control status or session"; break; }
-            std::lock_guard lock(mutex);
-            if (status->control.epoch < control.epoch || status->control.epoch < min_epoch) continue;
-            if (control.state != status->control.state || control.epoch != status->control.epoch ||
-                control.target_usb_ready != status->control.target_usb_ready || control.release_confirmed != status->control.release_confirmed)
-                spdlog::debug("Relay client: control state {} -> {}, epoch={}, USB ready={}, release confirmed={}",
-                    static_cast<int>(control.state), static_cast<int>(status->control.state), status->control.epoch,
-                    status->control.target_usb_ready, status->control.release_confirmed);
-            control = std::move(status->control);
-            status_at = Clock::now();
         }
         if (!stopped) fail(std::move(failure));
     }
