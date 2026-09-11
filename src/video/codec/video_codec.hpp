@@ -94,7 +94,8 @@ public:
     [[nodiscard]] virtual CodecDiagnostic diagnostic() const = 0;
 };
 
-// Explicit unavailable backends fail. Automatic probes hardware only.
+// Explicit unavailable backends fail. Automatic tries hardware, then software
+// during initialization and reports the fallback reason in diagnostics.
 [[nodiscard]] std::unique_ptr<VideoEncoder> create_video_encoder(
     CodecBackend backend, std::string& error);
 [[nodiscard]] std::unique_ptr<VideoDecoder> create_video_decoder(

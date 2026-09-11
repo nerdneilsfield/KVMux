@@ -20,8 +20,10 @@ and IDR flag. Encoded sequence starts at1 on configure and survives reset. Param
 are bounded and nonblocking. `again` means unaccepted input or absent output.
 No accepted compressed frame is dropped. Latest-value dropping is legal only
 before encoding and after ordered decoding. Lifecycle calls can block.
-Explicit backend or runtime-probed automatic selection must fail clearly when
-hardware is unavailable; it must not silently choose a software encoder/decoder.
+Explicit backend selection fails clearly when unavailable. Per the later user
+request, automatic selection tries hardware first and falls back to CPU encoding
+or decoding with a reported reason. CPU HEVC encoding uses FFmpeg libx265 when
+available; queue and latency bounds remain unchanged.
 An explicitly selected ffmpeg_software decoder is allowed. finish signals EOS;
 poll returns end_of_stream after all delayed outputs.
 Jetson uses appsrc/nvvidconv/NVENC/appsink. Mac uses FFmpeg VideoToolbox and
@@ -120,3 +122,26 @@ Remaining acceptance: complete project tests, real Jetson backend-enabled and
 backend-disabled project builds, actual relay TCP to Mac decoded frames with
 recovery, final Release build and user-facing startup/dependency instructions.
 Real camera mode availability and physical input remain distinct hardware checks.
+
+### Added requirement: CPU fallback
+
+The user explicitly requested CPU encoder and decoder fallback. Add a common
+FFmpeg libx265 encoder backend and automatic wrappers that try hardware, then
+software during configuration. Explicit backend selection remains strict.
+Verify force-IDR, drain/reset, bounded metadata, software round-trip and
+hardware-disabled auto selection. Report the actual backend and fallback reason.
+Document FFmpeg/libx265 availability and licensing. This task is required before
+completion, not an optional follow-up.
+
+User authorized local commit/push followed by Jetson fast-forward pull/build.
+Do not edit remote production source or overwrite a dirty remote worktree.
+Temporary isolated synthetic tests remain permitted and must not use camera/HID.
+
+Latest local acceptance: macos-debug full CTest 15/15 passed after CPU encoder
+and Auto fallback integration; macos-release build passed. Backend AUTO/OFF
+factory tests verify software selection and a fallback reason when hardware is
+unavailable. Jetson native backend-OFF build passed. Backend-ON qualification
+found and fixed an old FFmpeg AVFrame API use and the missing GStreamer video
+link dependency; native relink and cross-machine synthetic streaming remain in
+progress. GitHub pull from Jetson timed out; local commits have been pushed, but
+remote formal checkout has not yet been confirmed updated. No remote source edits.
