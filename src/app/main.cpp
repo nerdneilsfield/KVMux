@@ -313,7 +313,6 @@ int main(int argc, char** argv) {
                 (void)session->connect_control(ports[selected_port].name, config.serial_baud_rate, config.serial_address);
             ImGui::SameLine(); if (ImGui::Button("Disconnect")) (void)session->disconnect_control();
             }
-            ImGui::SameLine();
             if (ImGui::RadioButton("Absolute", config.mouse_mode == MouseMode::absolute)) {
                 config.mouse_mode = MouseMode::absolute; (void)session->set_mouse_mode(config.mouse_mode);
             }
@@ -327,21 +326,21 @@ int main(int argc, char** argv) {
             session->set_relative_gain(config.sensitivity);
             ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session->send_special(SpecialKeys::control_alt_delete);
             ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session->send_special(SpecialKeys::alt_tab);
-            ImGui::SameLine(); ImGui::Checkbox("VSync", &config.vsync);
-            ImGui::SameLine(); ImGui::SetNextItemWidth(145.F);
+            ImGui::Checkbox("VSync", &config.vsync);
+            ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
             const char* color_names[] = {"Color: automatic", "Color: BT.601 limited", "Color: BT.601 full", "Color: BT.709 limited", "Color: BT.709 full"};
             int color = static_cast<int>(config.color_override);
             if (ImGui::Combo("##color", &color, color_names, 5)) config.color_override = static_cast<ColorOverride>(color);
-            ImGui::SameLine(); ImGui::SetNextItemWidth(140.F);
-    #if defined(__APPLE__)
+            ImGui::SameLine(); ImGui::SetNextItemWidth(190.F);
+#if defined(__APPLE__)
             const char* host_names[] = {"Host: Right Command", "Host: Right Control"};
             int host = config.host_scancode == 228 ? 1 : 0;
             if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 231 : 228;
-    #else
+#else
             const char* host_names[] = {"Host: Right Control", "Host: Right GUI"};
             int host = config.host_scancode == 231 ? 1 : 0;
             if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 228 : 231;
-    #endif
+#endif
             session->set_host_key(config.host_scancode);
             ImGui::EndDisabled();
         }
@@ -349,7 +348,7 @@ int main(int argc, char** argv) {
         if (captured) ImGui::TextUnformatted("Control captured. Host key releases control.");
         ImGui::Separator();
         const ImVec2 available = ImGui::GetContentRegionAvail();
-        const float status_height = ImGui::GetTextLineHeightWithSpacing() * 3.F;
+        const float status_height = ImGui::GetTextLineHeightWithSpacing() * 4.F;
         const ImVec2 status_pos{ImGui::GetCursorScreenPos().x,
             ImGui::GetCursorScreenPos().y + available.y - status_height};
         // ImGui and SDL pointer coordinates are logical pixels. Use this same fitted
@@ -394,6 +393,21 @@ int main(int argc, char** argv) {
         if (ImGui::IsItemHovered() && (!snapshot.capture.error.empty() || !snapshot.control.error.empty() || !snapshot.session_error.empty()))
             ImGui::SetTooltip("Capture: %s\nControl: %s\nSession: %s", snapshot.capture.error.c_str(),
                 snapshot.control.error.c_str(), snapshot.session_error.c_str());
+        if (snapshot.pointer.video_local)
+            ImGui::Text("Pointer in video: (%.1f, %.1f) logical px", snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
+        else ImGui::TextUnformatted("Pointer in video: --");
+        ImGui::SameLine();
+        if (snapshot.pointer.submitted_absolute)
+            ImGui::Text("| Submitted HID: (%u, %u) / 4095", static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
+                static_cast<unsigned>(snapshot.pointer.submitted_absolute->second));
+        else if (snapshot.pointer.submitted_relative)
+            ImGui::Text("| Submitted delta: (%d, %d)", snapshot.pointer.submitted_relative->first,
+                snapshot.pointer.submitted_relative->second);
+        else ImGui::TextUnformatted("| Submitted: --");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Pointer position is relative to the displayed video in logical pixels.\n"
+            "Submitted coordinates were accepted by the control queue, not acknowledged by the device.\n"
+            "HID coordinates use 0..4095; relative mode shows the last submitted movement delta.");
         ImGui::EndChild();
         ImGui::End();
         ImGui::PopStyleVar(2);
