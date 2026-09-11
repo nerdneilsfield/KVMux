@@ -113,8 +113,13 @@ The control cable tested on Jetson identified as **`1a86:7523` (CH340 family)**,
 not CH343. Installing a `ch343` driver does not provide support for this ID.
 
 On the tested `5.15.148-tegra` kernel, `CONFIG_USB_SERIAL_CH341` was disabled.
-A matching CH341 driver had to be installed. Check your own kernel before
-installing anything:
+A matching CH341 driver had to be installed. For this Jetson setup, install
+WCH's CH340/CH341 Linux serial driver:
+[WCHSoftGroup/ch341ser_linux](https://github.com/WCHSoftGroup/ch341ser_linux).
+Do not substitute the CH343 driver. If your adapter already works with the
+kernel's built-in CH341 driver, you do not need to replace it.
+
+Check your own kernel before installing:
 
 ```sh
 modinfo ch341
@@ -124,6 +129,27 @@ zcat /proc/config.gz | grep CONFIG_USB_SERIAL_CH341
 Some distributions do not provide `/proc/config.gz`; check their kernel config
 under `/boot` instead. Any external module must match the running kernel and
 architecture. Do not install a module built for another Ubuntu kernel.
+
+Install a compiler, `make`, and development headers matching `uname -r` before
+building. On Jetson, use the matching NVIDIA/L4T kernel headers; generic Ubuntu
+headers for another kernel are not a substitute. Follow the upstream README:
+
+```sh
+git clone https://github.com/WCHSoftGroup/ch341ser_linux.git
+cd ch341ser_linux/driver
+make
+sudo make install
+```
+
+Run the install command only if `make` succeeds and produces `ch341.ko`.
+The upstream `sudo make install` target installs the driver for persistent use.
+For a temporary load instead of installation, use `sudo make load` after
+building. To remove a persistent installation later, run `sudo make uninstall`
+from the same driver directory.
+
+Reconnect the USB adapter and check the kernel log. If the port appears and
+then disappears, continue with the BRLTTY checks below; reinstalling the driver
+will not fix another service taking the device.
 
 The mainline driver commonly creates `/dev/ttyUSB0`. The tested WCH CH341
 V1.9 driver instead creates **`/dev/ttyCH341USB0`**. The numeric suffix can vary.
