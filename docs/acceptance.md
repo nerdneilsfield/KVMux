@@ -4,7 +4,10 @@ This record distinguishes source/build evidence from hardware evidence. A
 software build, CI result, fake transport, camera device or UVC-like device is
 not evidence that a CH9329 KVM hardware combination passed.
 
-## Software evidence
+## Earlier local-KVM software evidence
+
+The table below records earlier runs. Generic preset names in those historical
+commands have since been replaced; use [current build instructions](building.md).
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -34,3 +37,22 @@ not evidence that a CH9329 KVM hardware combination passed.
 
 The current macOS device list can contain an iPhone Continuity Camera. That is
 not a substitute for the UVC capture-card acceptance target.
+
+## LAN relay follow-up evidence
+
+- The user built and ran `linux-release-headless` on Jetson (`5.15.148-tegra`,
+  aarch64). SSH inspection confirmed the relay listener and LCC2003B enumeration.
+- The user supplied a remote GUI image containing target video, but also
+  `VIDEO UNAVAILABLE`, `Capture: Fault` and a control-connection error. This
+  demonstrates received video, not sustained streaming or working input.
+- SSH inspection confirmed a `root:dialout` serial node and a running relay
+  process without that group. CH9329 control was not accepted by this evidence.
+- Automatic-selection and connection-fix checks passed 10/10 CTests under
+  `macos-debug-headless`. The Mac GUI target built successfully.
+- A local offscreen OpenGL probe checked all three YUVJ planar formats with
+  repeated uploads: GPU paths, full-range fallback semantics, and texture-row
+  orientation. These checks do not replace a visual retest of the remote GUI.
+- End-to-end hardware control after the permission/render/connection fixes,
+  sustained performance and Windows relay hardware remain unverified.
+
+See [user-facing relay troubleshooting](lan-relay.md) for recovery steps.

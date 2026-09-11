@@ -1,7 +1,7 @@
 # LAN relay quick start
 
 Run `kvmux-relay` on the Windows or Linux computer connected to the capture
-card and CH343/CH9329 serial adapter. Run the desktop GUI on your Mac.
+card and CH340/CH341/CH343 host serial adapter connected to CH9329. Run the desktop GUI on your Mac.
 The relay does not need a desktop session.
 
 This version uses two unencrypted, unauthenticated TCP connections, as requested
@@ -274,3 +274,78 @@ permissions and application enumeration are separate checks.
 
 A visible serial port proves only device enumeration. It does not prove a
 successful CH9329 handshake, the correct baud rate, or keyboard/mouse control.
+
+## Troubleshooting: video appears but input does not work
+
+Seeing a picture does not prove the connection is live. If the GUI displays
+`VIDEO UNAVAILABLE - control disabled`, it may be showing the last frame from
+before a disconnect. Do not treat that image as a working control session.
+
+1. Check the GUI's capture, serial and target USB states separately. Input
+   requires fresh decoded video, ready serial/target USB state and confirmed
+   input clearing. Click the video area to capture input only after these are
+   ready; the first activation click is not sent to the target.
+2. If the serial node exists, check its permissions and the **running relay
+   process**, not only your current shell. On the tested Jetson the node was
+   `root:dialout` with mode `0660`, but the relay user was not in `dialout`.
+   Device enumeration worked while opening the port could not succeed.
+3. Add the user to the node's group if needed, as described above. Log out,
+   log back in, confirm `id` contains `dialout`, stop the old relay with Ctrl+C,
+   and start it from the new login. An already-running relay does not acquire
+   new supplementary groups when `usermod` changes the account.
+4. If the port is accessible but control is still not ready, check the selected
+   baud rate, CH9329 target-end USB connection and the GUI's serial error. A
+   listening TCP server is not evidence of a successful CH9329 handshake.
+
+### Read the disconnect reason
+
+| GUI error | Meaning and next check |
+| --- | --- |
+| `GUI heartbeat expired` | GUI progress stopped for 250 ms. Check UI/render stalls; a running video network thread does not renew input authority. |
+| `Control connection failed: ...` | Check the relay address, listening control port and firewall. |
+| `Control status read failed or timed out` | The expected status did not arrive. Check relay output and whether either channel closed; this message alone cannot identify the server-side cause. |
+| `Control send failed or timed out` | The control socket could not complete a write within its deadline. Check connection and relay state. |
+| `Video connection lost or stale` | No complete video packet arrived within the client's read deadline, or the video stream was invalid/closed. Check capture and network state. |
+
+A video-channel failure can also end the paired control session. A subsequent
+control error does not necessarily mean the serial cable disconnected. Older
+builds collapsed several causes into `Control connection lost`; update both
+ends before collecting another failure report.
+
+### Upside-down MJPEG or repeated swscale warnings
+
+Older GUI builds inverted the video texture's vertical coordinates and sent
+MJPEG `YUVJ420P/422P/444P` through CPU conversion. This could produce repeated:
+
+```text
+deprecated pixel format used, make sure you did set range correctly
+```
+
+The corrected renderer uses the existing planar GPU paths for these formats,
+keeps full-range semantics and uses the correct display texture coordinates.
+Update and rebuild the Mac GUI rather than suppressing FFmpeg logs. This warning
+is not a CH9329 or serial-permission error.
+
+## Rebuild and restart after updating source
+
+After obtaining the updated source on each machine, stop its old process and
+build the matching platform preset. On the Jetson:
+
+```sh
+cmake --preset linux-release-headless
+cmake --build --preset linux-release-headless
+./build/linux-release-headless/kvmux-relay --serve
+```
+
+On the Mac, quit the old KVMux application, then:
+
+```sh
+cmake --preset macos-debug
+cmake --build --preset macos-debug
+open build/macos-debug/kvmux.app
+```
+
+Reconnect with **Remote** using the Jetson's LAN IPv4 address. Rebuilding does
+not replace a process already running from an older executable. If a failure
+remains, report the exact GUI error, relay output, selected capture mode and
+serial settings; a screenshot of the retained video alone is insufficient.
