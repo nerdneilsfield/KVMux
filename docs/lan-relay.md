@@ -464,3 +464,17 @@ A complete desktop image scaled from 1920×1080 to a smaller video frame should
 still map proportionally. Black bars embedded by the capture device, cropping or
 a different target multi-monitor mapping require separate diagnosis; transmission
 resolution alone does not identify those conditions.
+
+### Control heartbeat blocked by status replies
+
+The client previously waited for each control status reply before sending its
+next packet. A reply delayed beyond the server's 250 ms heartbeat lease could
+therefore disconnect a healthy GUI, even in Preview. A loopback test reproduced
+this dependency with a fragmented status reply delayed by 280 ms.
+
+The client now reads status independently of its heartbeat sender. The 250 ms
+GUI freshness and server lease limits are unchanged. Stale status disables input
+and clears queued events; a later reply does not restore the old input authority.
+The existing 350 ms status-read deadline still applies. Rebuild and restart the
+Mac GUI to use this change. This fixes the reproduced scheduling dependency,
+not every possible reason for delayed network traffic.
