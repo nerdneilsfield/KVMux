@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -348,7 +349,7 @@ int main(int argc, char** argv) {
         if (captured) ImGui::TextUnformatted("Control captured. Host key releases control.");
         ImGui::Separator();
         const ImVec2 available = ImGui::GetContentRegionAvail();
-        const float status_height = ImGui::GetTextLineHeightWithSpacing() * 3.F;
+        const float status_height = ImGui::GetTextLineHeightWithSpacing();
         const ImVec2 status_pos{ImGui::GetCursorScreenPos().x,
             ImGui::GetCursorScreenPos().y + available.y - status_height};
         // ImGui and SDL pointer coordinates are logical pixels. Use this same fitted
@@ -375,32 +376,47 @@ int main(int argc, char** argv) {
         ImGui::BeginChild("Status", {available.x, status_height}, ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         const auto d = diagnostics.snapshot();
-        ImGui::Text("%s | D/P %.1f/%.1f fps", resolution.c_str(), d.decode_fps, d.unique_present_fps);
-        ImGui::SameLine();
+        char rates[64];
         if (video_bytes_per_second && control_bytes_per_second)
-            ImGui::Text("| V rx %.1f KiB/s | C io %.1f KiB/s",
+            std::snprintf(rates, sizeof(rates), "V:%.2f C:%.2fK/s",
                 *video_bytes_per_second / 1024.0, *control_bytes_per_second / 1024.0);
-        else ImGui::TextUnformatted("| V rx -- | C io --");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("V: video received. C: control received + sent. Relay bytes/s.");
-        ImGui::Text("%s | Video %s | Control %s | Input %s",
-            remote ? "Remote" : "Local", capture_state(snapshot.capture.state),
-            control_state(snapshot.control.state), input_state(snapshot.input_state));
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("USB: %s\nCapture: %s\nControl: %s\nSession: %s",
-                snapshot.control.target_usb_ready ? "ready" : "not ready", snapshot.capture.error.c_str(),
-                snapshot.control.error.c_str(), snapshot.session_error.c_str());
+        else std::snprintf(rates, sizeof(rates), "V:-- C:--");
+        char pointer[96];
         if (snapshot.pointer.video_local)
-            ImGui::Text("P(%.1f, %.1f)", snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
-        else ImGui::TextUnformatted("P(--)");
-        ImGui::SameLine();
+            std::snprintf(pointer, sizeof(pointer), "P:%.0f,%.0f",
+                snapshot.pointer.video_local->first, snapshot.pointer.video_local->second);
+        else std::snprintf(pointer, sizeof(pointer), "P:--");
+        char submitted[64];
         if (snapshot.pointer.submitted_absolute)
-            ImGui::Text("-> HID(%u, %u)", static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
+            std::snprintf(submitted, sizeof(submitted), "H:%u,%u",
+                static_cast<unsigned>(snapshot.pointer.submitted_absolute->first),
                 static_cast<unsigned>(snapshot.pointer.submitted_absolute->second));
         else if (snapshot.pointer.submitted_relative)
-            ImGui::Text("-> d(%d, %d)", snapshot.pointer.submitted_relative->first,
-                snapshot.pointer.submitted_relative->second);
-        else ImGui::TextUnformatted("-> --");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("P: video-local logical pixels. HID: 0..4095. d: relative delta. Submitted, not ACKed.");
+            std::snprintf(submitted, sizeof(submitted), "d:%d,%d",
+                snapshot.pointer.submitted_relative->first, snapshot.pointer.submitted_relative->second);
+        else std::snprintf(submitted, sizeof(submitted), "H:--");
+        char line[320];
+        std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s",
+            remote ? "LAN" : "Local", resolution.c_str(), d.decode_fps, d.unique_present_fps,
+            rates, input_state(snapshot.input_state), pointer, submitted);
+        const auto origin = ImGui::GetCursorScreenPos();
+        const float line_height = ImGui::GetTextLineHeight();
+        const bool connected = snapshot.video_fresh && snapshot.control.state == ControlConnectionState::ready;
+        const ImU32 state_color = connected ? IM_COL32(80, 210, 120, 255) : IM_COL32(230, 155, 70, 255);
+        auto* draw = ImGui::GetWindowDrawList();
+        draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F, state_color);
+        const float text_width = ImGui::CalcTextSize(line).x;
+        const float room = std::max(1.F, ImGui::GetContentRegionAvail().x - 14.F);
+        const float font_size = ImGui::GetFontSize() * std::min(1.F, room / std::max(1.F, text_width));
+        draw->AddText(ImGui::GetFont(), font_size,
+            {origin.x + 14.F, origin.y + (line_height - font_size) * .5F},
+            ImGui::GetColorU32(ImGuiCol_Text), line);
+        ImGui::InvisibleButton("##status_details", {ImGui::GetContentRegionAvail().x, line_height});
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Video: %s | Control: %s | USB: %s\n%s\n%s",
+                capture_state(snapshot.capture.state), control_state(snapshot.control.state),
+                snapshot.control.target_usb_ready ? "ready" : "not ready",
+                snapshot.capture.error.c_str(), snapshot.control.error.c_str());
         ImGui::EndChild();
         ImGui::End();
         ImGui::PopStyleVar(2);

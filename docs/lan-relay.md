@@ -478,3 +478,13 @@ and clears queued events; a later reply does not restore the old input authority
 The existing 350 ms status-read deadline still applies. Rebuild and restart the
 Mac GUI to use this change. This fixes the reproduced scheduling dependency,
 not every possible reason for delayed network traffic.
+
+The status bar uses one line. `LAN` identifies remote mode; the status dot is
+green when video is fresh and control is ready, and amber otherwise. Hover for
+separate video/control states. The FPS pair is decode/present. `V` and `C`
+are video receive and control bidirectional rates in KiB/s (shown as `K/s`).
+`P` is video-local position, `H` is the accepted absolute HID coordinate, and
+`d` is accepted relative movement. Text scales to the available width without
+wrapping; full details remain in Diagnostics and the reference above.
+FPS uses one decimal place, bandwidth two, and displayed pointer coordinates
+are rounded to whole logical pixels. HID coordinates are integers.
