@@ -21,6 +21,7 @@ add_library(kvmux_core STATIC
     src/control/serial_transport.cpp
     src/control/serial_worker.cpp
     src/input/input_router.cpp
+    src/network/relay_protocol.cpp
     src/support/build_info.cpp
     src/support/config.cpp
     src/support/diagnostics.cpp
@@ -100,6 +101,10 @@ if(BUILD_TESTING)
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)
+
+    add_executable(kvmux_relay_protocol_test tests/relay_protocol_test.cpp)
+    target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)
+    add_test(NAME relay_protocol COMMAND kvmux_relay_protocol_test)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
