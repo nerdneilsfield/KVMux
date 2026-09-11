@@ -30,12 +30,12 @@ void print_help(std::ostream& out) {
            "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
            "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
-           "       [--codec mjpeg|hevc] [--encoder auto|jetson] [--bitrate 8000000]\n"
+           "       [--codec mjpeg|hevc] [--encoder auto|jetson|software] [--bitrate 8000000]\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
            "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including 59.94/29.97),\n"
            "then descending pixel area, width, height and fps; ties use first index.\n"
-           "HEVC requires native and delivered raw video; encoder must be hardware.\n"
+           "HEVC requires native and delivered raw video. Auto tries hardware, then CPU.\n"
            "Explicit choices never fall back. Bitrate is in bits/s.\n"
            "Unauthenticated LAN TCP: trusted networks only.\n";
 }
@@ -59,7 +59,8 @@ int serve(int argc,char** argv) {
         } else if(key=="--encoder") {
             if(value=="auto")options.encoder_backend=kvmux::CodecBackend::automatic;
             else if(value=="jetson")options.encoder_backend=kvmux::CodecBackend::jetson_gstreamer;
-            else throw std::runtime_error("--encoder must be auto or jetson");
+            else if(value=="software")options.encoder_backend=kvmux::CodecBackend::ffmpeg_software;
+            else throw std::runtime_error("--encoder must be auto, jetson, or software");
         } else {
             int number{};const auto result=std::from_chars(value.data(),value.data()+value.size(),number);
             if(result.ec!=std::errc{}||result.ptr!=value.data()+value.size()||number<0)throw std::runtime_error("Invalid numeric option");
