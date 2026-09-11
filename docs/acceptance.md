@@ -72,3 +72,28 @@ including ImGui interleaving and texture reallocation cases. The macos-debug
 build and 11/11 CTests passed. Real GUI reconnect still needs user confirmation.
 The Windows Caps Lock initial-state question remains unresolved; the user
 confirmed macOS Caps Lock input-source switching is enabled.
+
+## HEVC relay and CPU fallback verification
+
+The implementation passed 16/16 macos-debug CTests and a macos-release build.
+Tests include codec framing, explicit software decode, libx265 encode/decode,
+automatic fallback, IDR recovery and existing input/relay safety regressions.
+
+On Jetson Orin NX (L4T R36.4.7, GCC 11.4, libavcodec 58.134.100 and libavutil
+56.70.100), a temporary synthetic NV12 source drove the actual RelayServer and
+NVIDIA encoder over LAN TCP to the Mac RelayClient, VideoToolbox decoder and
+VideoPipeline. The same client object stopped and restarted between sessions;
+each session produced 120 decoded 1920×1080 frames, with no decoder/pipeline
+error or recovery request. The finite server exited normally. This was not a
+capture-card test, a measured 60 fps throughput test or a latency benchmark.
+
+The Mac produced `videotoolbox_vld` frames with `hw_frames_ctx=yes` and explicit
+NV12 CPU transfer. The Apple session hardware property could not be verified;
+Diagnostics correctly reports that uncertainty. This is not zero-copy evidence.
+
+A native Jetson GUI-OFF, Jetson-backend-OFF, VideoToolbox-OFF build also passed.
+The CPU path encoded and decoded 12 synthetic 64×64 frames with libx265, including
+NV12/YUV420P input, metadata, EAGAIN, forced IDR, reset and EOS checks. It does not
+establish CPU real-time 1080p60 performance. No camera, serial device, physical
+input or user application was used by these probes. Other platform hardware
+backends and real capture-to-display acceptance remain unverified.

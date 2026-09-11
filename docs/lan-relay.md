@@ -150,6 +150,29 @@ Before distributing binaries, check the licenses of the FFmpeg and x265 builds
 you package and provide the required notices and corresponding source/build
 information. See [building.md](building.md) for dependency and packaging details.
 
+### Jetson raw-to-H.265 example
+
+After updating both ends to protocol v2, build the relay with its backend enabled:
+
+```sh
+cmake --preset linux-release-headless -DKVMUX_JETSON_ENCODER=ON
+cmake --build --preset linux-release-headless -j 2
+./build/linux-release-headless/kvmux-relay --debug --serve --codec hevc --encoder auto --bitrate 8000000
+```
+
+Automatic device selection still requires unambiguous capture and serial devices.
+HEVC mode chooses a supported raw capture mode. For a specific raw mode, retain
+`--device`, `--mode-index`, `--serial` and other explicit choices from device
+listing. A mode index used for MJPEG may not be valid for raw capture. Check the
+printed selected dimensions, rate and pixel format; 1080p60 raw is available only
+if the capture device actually advertises it. Both applications must be updated:
+protocol v1 and v2 are intentionally not compatible.
+
+On the Mac, use **Connections → Decode → Auto** or explicitly choose
+**VideoToolbox**. Software is available explicitly; Auto reports a CPU fallback
+reason if hardware startup fails. See Diagnostics for actual negotiated codec,
+decoder output and hardware verification status. No zero-copy claim is implied.
+
 ## Connect the GUI
 
 Build the desktop application with the existing `macos-debug` preset. In the GUI:

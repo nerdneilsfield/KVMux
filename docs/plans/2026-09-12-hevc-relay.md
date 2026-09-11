@@ -145,3 +145,14 @@ found and fixed an old FFmpeg AVFrame API use and the missing GStreamer video
 link dependency; native relink and cross-machine synthetic streaming remain in
 progress. GitHub pull from Jetson timed out; local commits have been pushed, but
 remote formal checkout has not yet been confirmed updated. No remote source edits.
+
+## Final software and synthetic acceptance
+
+All implementation tasks are complete. macos-debug 16/16 tests and Release build
+passed. Jetson native backend-ON actual TCP synthetic two-session 120+120 frames
+and backend-OFF build passed. Native libx265 small-frame encode/decode passed.
+Evidence is summarized in docs/acceptance.md; temporary detailed probe report is
+/tmp/kvmux-hevc-e2e-report.md. Apple VideoToolbox output is confirmed, session
+hardware-use property unverified. Real capture-card operation, long-duration
+stability and native Windows hardware are not inferred from synthetic evidence.
+Formal Jetson repository build/update is still finishing; no remote source edits.
