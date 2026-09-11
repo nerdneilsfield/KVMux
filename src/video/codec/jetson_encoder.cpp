@@ -18,6 +18,11 @@ class JetsonEncoder final : public VideoEncoder {
 public:
     ~JetsonEncoder() override { shutdown(); }
     CodecBackend backend() const noexcept override { return CodecBackend::jetson_gstreamer; }
+    CodecDiagnostic diagnostic() const override {
+        return {backend(), hardware_active_, hardware_active_, hardware_active_
+            ? "NVIDIA nvv4l2h265enc emitted a hardware HEVC access unit"
+            : "NVIDIA encoder selected; hardware output not yet observed"};
+    }
     CodecResult configure(const CodecConfig& config) override {
         shutdown();
         if (!config.width || !config.height || config.width > kMaxCaptureWidth ||
@@ -141,6 +146,7 @@ public:
             return fail("Jetson AU exceeds payload limit");
         }
         output = std::move(pending_.front()); pending_.pop_front();
+        hardware_active_ = true;
         output.encoded_sequence = ++encoded_sequence_;
         output.bytes.assign(map.data, map.data + map.size);
         for (std::size_t i = 0; i + 4 < map.size; ++i) {
@@ -179,7 +185,7 @@ public:
         for (auto* element : {input_, output_, encoder_, pipeline_})
             if (element) gst_object_unref(element);
         input_ = output_ = encoder_ = pipeline_ = nullptr;
-        pending_.clear(); last_pts_ = -1; finished_ = false;
+        pending_.clear(); last_pts_ = -1; finished_ = false; hardware_active_ = false;
     }
 private:
     CodecResult bus_error() {
@@ -199,6 +205,7 @@ private:
     std::deque<EncodedAccessUnit> pending_;
     std::int64_t last_pts_{-1};
     bool finished_{};
+    bool hardware_active_{};
     std::uint64_t encoded_sequence_{};
 };
 }  // namespace

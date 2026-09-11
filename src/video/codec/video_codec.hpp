@@ -18,6 +18,13 @@ struct CodecResult {
     [[nodiscard]] bool ok() const noexcept { return status == CodecStatus::ok; }
 };
 
+struct CodecDiagnostic {
+    CodecBackend backend{CodecBackend::automatic};
+    bool hardware_active{};
+    bool hardware_verified{};
+    std::string detail;
+};
+
 struct CodecConfig {
     std::uint32_t width{}, height{};
     std::uint32_t fps_numerator{60}, fps_denominator{1};
@@ -69,6 +76,7 @@ public:
     virtual CodecResult reset() = 0;
     virtual void shutdown() noexcept = 0;
     [[nodiscard]] virtual CodecBackend backend() const noexcept = 0;
+    [[nodiscard]] virtual CodecDiagnostic diagnostic() const = 0;
 };
 
 class VideoDecoder {
@@ -83,6 +91,7 @@ public:
     virtual CodecResult reset() = 0;
     virtual void shutdown() noexcept = 0;
     [[nodiscard]] virtual CodecBackend backend() const noexcept = 0;
+    [[nodiscard]] virtual CodecDiagnostic diagnostic() const = 0;
 };
 
 // Explicit unavailable backends fail. Automatic probes hardware only.

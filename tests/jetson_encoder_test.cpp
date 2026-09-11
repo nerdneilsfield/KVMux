@@ -19,6 +19,7 @@ int main(int argc, char** argv) try {
     require(bool(encoder), error);
     CodecConfig config{1920,1080,60,1,8'000'000,600,7};
     auto result=encoder->configure(config); require(result.ok(), result.message);
+    require(!encoder->diagnostic().hardware_active,"hardware claimed before output");
     AVFrame* raw=av_frame_alloc(); require(raw, "alloc frame");
     AvFramePtr frame(raw, [](AVFrame* p){av_frame_free(&p);});
     frame->width=1920; frame->height=1080; frame->format=AV_PIX_FMT_NV12;
@@ -57,6 +58,7 @@ int main(int argc, char** argv) try {
         } else std::this_thread::yield();
     }
     require(submitted==60 && received==60 && idrs>=2,"60-frame drain/IDR test failed");
+    require(encoder->diagnostic().hardware_active && encoder->diagnostic().hardware_verified,"hardware output diagnostic");
     result=encoder->reset();require(result.ok(),result.message);
     EncoderInput input{frame,0,1000,7,{}};
     result=encoder->submit(input);require(result.ok(),result.message);
