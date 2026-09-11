@@ -102,6 +102,23 @@ ColorOverride parse_color_override(const std::string& value) {
     throw std::runtime_error("invalid color override");
 }
 
+std::string_view decoder_backend_name(CodecBackend backend) {
+    switch (backend) {
+    case CodecBackend::automatic: return "automatic";
+    case CodecBackend::videotoolbox: return "videotoolbox";
+    case CodecBackend::ffmpeg_software: return "ffmpeg_software";
+    case CodecBackend::jetson_gstreamer: break;
+    }
+    throw std::runtime_error("invalid decoder backend");
+}
+
+CodecBackend parse_decoder_backend(const std::string& value) {
+    if (value == "automatic") return CodecBackend::automatic;
+    if (value == "videotoolbox") return CodecBackend::videotoolbox;
+    if (value == "ffmpeg_software") return CodecBackend::ffmpeg_software;
+    throw std::runtime_error("invalid decoder backend");
+}
+
 void replace_file(const std::filesystem::path& temporary,
                   const std::filesystem::path& destination) {
     std::error_code error;
@@ -164,6 +181,9 @@ Config parse_config(const json& root) {
     result.color_override =
         parse_color_override(control.at("color_override").get<std::string>());
 
+    result.decoder_backend = parse_decoder_backend(
+        root.value("decoder_backend", std::string("automatic")));
+
     result.window.x = window.at("x").get<int>();
     result.window.y = window.at("y").get<int>();
     result.window.width = window.at("width").get<int>();
@@ -181,6 +201,7 @@ Config parse_config(const json& root) {
 json serialize_config(const Config& config) {
     return {
         {"schema_version", kConfigSchemaVersion},
+        {"decoder_backend", decoder_backend_name(config.decoder_backend)},
         {"capture", {
             {"stable_id", config.capture_stable_id},
             {"mode", {

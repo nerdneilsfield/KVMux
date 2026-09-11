@@ -132,9 +132,19 @@ Build the desktop application with the existing `macos-debug` preset. In the GUI
 1. Select **Remote**.
 2. Enter the relay computer's IPv4 address, not the Mac's loopback address.
 3. Set the control and video ports to match the relay.
-4. Select **Connect relay**.
-5. Wait for a new video frame and ready/cleared serial status before clicking
+4. Choose **Decode** for H.265: **Auto**, **VideoToolbox**, or **FFmpeg software**.
+   Auto probes hardware only. An unavailable backend reports an error instead
+   of silently switching to software. This setting does not affect MJPEG.
+5. Select **Connect relay**.
+6. Wait for a new video frame and ready/cleared serial status before clicking
    the video area to capture input. The Host key releases input locally.
+
+The relay selects the transmitted codec. The GUI's Decode setting only chooses
+its H.265 decoder; it does not change server encoding or bitrate. The choice is
+saved locally and takes effect on the next connection. Open **Diagnostics** to
+see the negotiated codec, actual decoder backend, hardware-active state,
+recovery count and decoder error. A selected backend is not proof that hardware
+decoding is active; the diagnostic uses the decoder's runtime state.
 
 Only one controller is supported. Reconnection starts in Preview and never
 restores held keys. The relay pairs the video connection with the control

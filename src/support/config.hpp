@@ -4,6 +4,7 @@
 #include "input/input_router.hpp"
 #include "render/video_renderer.hpp"
 #include "video/capture/capture_source.hpp"
+#include "video/codec/video_codec.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -37,6 +38,7 @@ struct Config {
     double sensitivity{1.0};
     bool vsync{};
     ColorOverride color_override{ColorOverride::automatic};
+    CodecBackend decoder_backend{CodecBackend::automatic};
     WindowConfig window;
 };
 

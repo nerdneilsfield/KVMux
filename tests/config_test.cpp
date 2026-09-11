@@ -30,6 +30,16 @@ int main() {
             require(loaded.target_aspect == aspect && loaded.serial_port == "test-port",
                     "target aspect round trip preserves config");
         }
+        require(load_config(directory / "missing.json").decoder_backend == CodecBackend::automatic,
+                "missing config defaults to automatic decoding");
+        for (const auto backend : {CodecBackend::automatic, CodecBackend::videotoolbox,
+                                   CodecBackend::ffmpeg_software}) {
+            config.decoder_backend = backend;
+            save_config(path, config);
+            const auto loaded = load_config(path);
+            require(loaded.decoder_backend == backend && loaded.serial_port == "test-port",
+                    "decoder backend round trip preserves config");
+        }
         nlohmann::json root;
         { std::ifstream input(path); input >> root; }
         root["control"].erase("target_aspect");
@@ -44,6 +54,20 @@ int main() {
             require(loaded.target_aspect == TargetAspect::full_frame && loaded.serial_port.empty() &&
                         std::filesystem::exists(path.string() + ".broken"),
                     "invalid aspect follows existing broken config policy");
+        }
+        root["control"].erase("target_aspect");
+        root.erase("decoder_backend");
+        { std::ofstream output(path); output << root; }
+        loaded = load_config(path);
+        require(loaded.decoder_backend == CodecBackend::automatic && loaded.serial_port == "test-port",
+                "absent decoder setting defaults to automatic and preserves settings");
+        for (const auto& invalid : {nlohmann::json("jetson_gstreamer"), nlohmann::json("unknown"), nlohmann::json(42)}) {
+            root["decoder_backend"] = invalid;
+            { std::ofstream output(path); output << root; }
+            loaded = load_config(path);
+            require(loaded.decoder_backend == CodecBackend::automatic && loaded.serial_port.empty() &&
+                        std::filesystem::exists(path.string() + ".broken"),
+                    "invalid decoder follows existing broken config policy");
         }
         root["schema_version"] = kConfigSchemaVersion + 1;
         { std::ofstream output(path); output << root; }

@@ -27,6 +27,15 @@
 namespace {
 using namespace kvmux;
 
+const char* decoder_backend_label(CodecBackend backend) {
+    switch (backend) {
+    case CodecBackend::automatic: return "Auto";
+    case CodecBackend::videotoolbox: return "VideoToolbox";
+    case CodecBackend::ffmpeg_software: return "FFmpeg software";
+    case CodecBackend::jetson_gstreamer: return "Jetson GStreamer";
+    }
+    return "Unknown";
+}
 const char* capture_state(CaptureState state) {
     switch (state) { case CaptureState::stopped: return "Stopped"; case CaptureState::starting: return "Starting"; case CaptureState::streaming: return "Streaming"; case CaptureState::stopping: return "Stopping"; case CaptureState::permission_denied: return "Permission denied"; case CaptureState::fault: return "Fault"; }
     return "Unknown";
@@ -242,12 +251,24 @@ int main(int argc, char** argv) {
                 ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
                 ImGui::InputInt("Control port", &control_port);
                 ImGui::InputInt("Video port", &video_port);
+                if (ImGui::BeginCombo("Decode", decoder_backend_label(config.decoder_backend))) {
+                    for (const auto backend : {CodecBackend::automatic, CodecBackend::videotoolbox,
+                                               CodecBackend::ffmpeg_software}) {
+                        if (ImGui::Selectable(decoder_backend_label(backend), config.decoder_backend == backend))
+                            config.decoder_backend = backend;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("H.265 decoder for the next connection. Auto requires hardware.\nUnavailable backends report an error; MJPEG is unchanged.");
                 if (ImGui::Button("Connect relay") && retired_sessions.empty() && control_port > 0 && control_port <= 65535 && video_port > 0 && video_port <= 65535) {
                     retire_session();
                     devices_future = {}; modes_future.reset();
                     devices.clear(); modes.clear(); selected_device = selected_mode = -1;
-                    auto client = std::make_shared<relay::RelayClient>(relay::ClientOptions{
-                        remote_host, static_cast<std::uint16_t>(control_port), static_cast<std::uint16_t>(video_port)});
+                    relay::ClientOptions client_options{
+                        remote_host, static_cast<std::uint16_t>(control_port), static_cast<std::uint16_t>(video_port)};
+                    client_options.decoder_backend = config.decoder_backend;
+                    auto client = std::make_shared<relay::RelayClient>(std::move(client_options));
                     remote_client = client;
                     auto capture = std::make_unique<relay::NetworkCaptureSource>(client);
                     const auto device = capture->enumerate_devices().front();
@@ -433,6 +454,18 @@ int main(int argc, char** argv) {
             const auto d = diagnostics.snapshot();
             ImGui::Begin("Diagnostics", &diagnostics_open);
             ImGui::Text("Decoded video resolution: %s", resolution.c_str());
+            if (remote_client) {
+                const auto video = remote_client->video_snapshot();
+                ImGui::Text("Relay codec: %s", video.codec == VideoCodec::hevc ? "H.265" : "MJPEG");
+                ImGui::Text("Decoder backend: %s", video.decoder_backend
+                    ? decoder_backend_label(*video.decoder_backend) : "-- (not active)");
+                ImGui::Text("Hardware decoding: %s", !video.hardware_verified ? "unverified" :
+                    video.hardware_active ? "active" : "not active");
+                if (!video.decoder_diagnostic.empty())
+                    ImGui::TextWrapped("Decoder detail: %s", video.decoder_diagnostic.c_str());
+                ImGui::Text("Decoder recoveries: %llu", static_cast<unsigned long long>(video.recoveries));
+                if (!video.error.empty()) ImGui::TextWrapped("Decoder error: %s", video.error.c_str());
+            }
             int logical_width{}, logical_height{}, pixel_width{}, pixel_height{};
             SDL_GetWindowSize(window, &logical_width, &logical_height);
             SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height);
