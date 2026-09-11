@@ -214,5 +214,47 @@ int main() {
         require(sink.events.empty(), "mode switch discards old fractional motion");
     }
 
+    {
+        // SDL and ImGui use logical window coordinates. The GL framebuffer may
+        // be 1x, 1.5x or 2x larger; it must not scale only one side of the map.
+        // A complete desktop scaled into MJPEG needs no target-resolution knob.
+        for (const auto source : {std::pair{1920, 1080}, std::pair{1280, 720},
+                                  std::pair{640, 480}, std::pair{2560, 1080}}) {
+            for (const double dpi : {1.0, 1.5, 2.0}) {
+                const Rect area{31.25, 87.5, 1000, 700};
+                const auto logical = fit_video_rect(area, source.first, source.second);
+                const auto pixels = fit_video_rect(
+                    {area.x * dpi, area.y * dpi, area.width * dpi, area.height * dpi},
+                    source.first, source.second);
+                for (const bool framebuffer_coordinates : {false, true}) {
+                    FakeSink sink;
+                    InputRouter router(sink);
+                    const Rect rect = framebuffer_coordinates ? pixels : logical;
+                    router.set_video_rect(rect);
+                    router.set_video_fresh(true);
+                    capture(router, sink, rect.x, rect.y);
+                    // Official WCH section 2.2.4: (100,100) on 1280x768
+                    // maps to (320,533), using width/height, NOT width-1.
+                    const double u = 100.0 / 1280.0;
+                    const double v = 100.0 / 768.0;
+                    const double x = rect.x + rect.width * u;
+                    const double y = rect.y + rect.height * v;
+                    router.handle({InputPointerMotion{x, y}});
+                    const auto motion = std::get<AbsoluteMotion>(sink.events.back().payload);
+                    require(std::lround(motion.x * 4095) == 320 &&
+                                std::lround(motion.y * 4095) == 533,
+                            "scaled video, letterbox and HiDPI preserve WCH coordinates");
+                    router.handle({InputButton{InputMouseButton::left, true, x, y}});
+                    const auto button = std::get<ButtonEdge>(sink.events.back().payload);
+                    router.handle({InputWheel{1, x, y}});
+                    const auto wheel = std::get<VerticalWheel>(sink.events.back().payload);
+                    require(button.x == motion.x && button.y == motion.y &&
+                                wheel.x == motion.x && wheel.y == motion.y,
+                            "motion, button and wheel share the same absolute mapping");
+                }
+            }
+        }
+    }
+
     return EXIT_SUCCESS;
 }

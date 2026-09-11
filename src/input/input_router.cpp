@@ -197,6 +197,9 @@ void InputRouter::send_relative_integral(int dx, int dy, int wheel) {
 std::pair<std::uint16_t, std::uint16_t> InputRouter::absolute(
     const double x, const double y) const noexcept {
     if (video_rect_.width <= 0 || video_rect_.height <= 0) { return {0, 0}; }
+    // WCH protocol 2.2.4 uses 4096 * position / screen extent, not extent-1.
+    // Full-frame capture scaling cancels in this ratio, even when the target
+    // desktop and transmitted video have different pixel dimensions.
     const double u = std::clamp((x - video_rect_.x) / video_rect_.width, 0.0, 1.0);
     const double v = std::clamp((y - video_rect_.y) / video_rect_.height, 0.0, 1.0);
     return {static_cast<std::uint16_t>(std::min(4095.0, std::floor(4096.0 * u))),

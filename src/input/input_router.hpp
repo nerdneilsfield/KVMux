@@ -56,6 +56,8 @@ public:
 
     [[nodiscard]] bool special_active() const noexcept { return !special_steps_.empty(); }
 
+    // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
+    // logical window coordinates, not GL framebuffer pixels).
     void set_video_rect(Rect rect) noexcept { video_rect_ = rect; }
     void set_video_fresh(bool fresh) noexcept { video_fresh_ = fresh; }
     void set_host_key(std::uint16_t usage) noexcept;
