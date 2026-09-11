@@ -24,6 +24,7 @@ add_library(kvmux_core STATIC
     src/control/serial_transport.cpp
     src/control/serial_worker.cpp
     src/input/input_router.cpp
+    src/network/relay_server.cpp
     src/network/relay_protocol.cpp
     src/network/tcp_socket.cpp
     src/support/build_info.cpp
@@ -125,6 +126,11 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_tcp_socket_test PRIVATE kvmux::core)
     add_test(NAME tcp_socket COMMAND kvmux_tcp_socket_test)
     set_tests_properties(tcp_socket PROPERTIES TIMEOUT 15)
+
+    add_executable(kvmux_relay_server_test tests/relay_server_test.cpp)
+    target_link_libraries(kvmux_relay_server_test PRIVATE kvmux::core)
+    add_test(NAME relay_server COMMAND kvmux_relay_server_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+    set_tests_properties(relay_server PROPERTIES TIMEOUT 15)
 
     add_executable(kvmux_relay_protocol_test tests/relay_protocol_test.cpp)
     target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)
