@@ -75,7 +75,7 @@ for independent decoder check. No capture/camera/HID or running app touched.
 This proves finite synthetic codec operation, not real capture latency.
 
 ### T2: Mac hardware decoder
-Status: pending. Depends on: T1 contract. Acceptance: A2, A3.
+Status: implemented; standalone software and VideoToolbox decode/reset passed. Depends on: T1 contract. Acceptance: A2, A3.
 Create common-contract VideoToolbox backend. Details readiness-gated on finalized
 header and owned test AU output. Parent assigns files and exact native test.
 
@@ -96,7 +96,7 @@ server transport and recovery where deterministic. No production fake capture.
 Build discovery remains parent-owned and platform-specific.
 
 ### T4: UI and application acceptance
-Status: pending. Depends on: T3. Acceptance: A5.
+Status: integration verification. Depends on: T3. Acceptance: A5.
 Parent defines exact UI/config entry points after working relay contract. Preserve
 MJPEG and existing safety release behavior. No unverified real latency claims.
 
@@ -106,3 +106,17 @@ Reuse native 60-frame encoder/decode evidence, then test actual relay framing an
 existing MJPEG tests. Hardware camera/display acceptance is separate from synthetic
 codec evidence. T1 native backend is verified; parent resumes T2/T3 integration; later details remain blocked until contracts and
 runtime results are available, not on another permission request.
+
+## Integration checkpoint
+
+Common contracts, NVIDIA encoder, FFmpeg decoder, v2 codec handshake/AU framing,
+server raw-to-HEVC path and client ordered decode are implemented. CMake provides
+AUTO/ON/OFF backend switches. Software decoder and protocol fixtures are checked
+in. GUI/config build passed; full macos-debug CTest passed 13/13 and Release built. Cross-machine
+synthetic acceptance is in progress using temporary probes, separate test ports
+and no hardware capture or input. Do not interpret this checkpoint as completion.
+
+Remaining acceptance: complete project tests, real Jetson backend-enabled and
+backend-disabled project builds, actual relay TCP to Mac decoded frames with
+recovery, final Release build and user-facing startup/dependency instructions.
+Real camera mode availability and physical input remain distinct hardware checks.
