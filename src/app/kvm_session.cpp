@@ -200,6 +200,8 @@ void KvmSession::tick(Clock::time_point now) {
     const auto decoded = video_.snapshot();
     input_.set_video_fresh(fresh && decoded.processed_frames > 0 &&
         decoded.latest_arrival != Clock::time_point{} && now - decoded.latest_arrival < kStaleAfter);
+    if ((input_.captured() || input_.special_active()) &&
+        control_->snapshot().state != ControlConnectionState::ready) release = true;
     if (release) request_release();
     control_->set_control_active(input_.captured() || input_.special_active());
     input_.clear_fault();

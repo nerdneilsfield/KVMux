@@ -1,4 +1,5 @@
 #include "network/relay_client.hpp"
+#include "app/kvm_session.hpp"
 #include "network/relay_protocol.hpp"
 #include "video/video_pipeline.hpp"
 #include "relay_test_fakes.hpp"
@@ -9,8 +10,15 @@
 using namespace kvmux;
 using namespace kvmux::relay;
 using namespace std::chrono_literals;
+namespace kvmux {
+// This test always injects its relay source. Never open a platform device.
+std::unique_ptr<CaptureSource> create_platform_capture_source() {
+    throw std::runtime_error("platform capture is forbidden in relay client tests");
+}
+}
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void integrated_test(const std::vector<std::uint8_t>& jpeg);
+void session_stall_test(const std::vector<std::uint8_t>& jpeg);
 void startup_grace_test(const std::vector<std::uint8_t>& jpeg);
 void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active = false);
 int main(int argc, char** argv) {
@@ -84,16 +92,17 @@ int main(int argc, char** argv) {
     require(sink.submit({6,2,{},KeyEdge{4,true}}) == SubmitResult::accepted, "current input accepted");
     require(sink.submit({6,2,{},KeyEdge{4,true}}) == SubmitResult::not_ready, "duplicate sequence rejected");
     require(pump([&] { return input_seen.load(); }), "input crosses actual socket");
-    // Keep decoder/video thread running but stop the GUI progress updates.
-    const auto deadline = std::chrono::steady_clock::now() + 1s;
-    while (sink.snapshot().state != ControlConnectionState::disconnected && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(5ms);
-    require(sink.snapshot().state == ControlConnectionState::disconnected && !sink.snapshot().release_confirmed,
-        "network thread cannot renew stopped GUI lease");
-    require(sink.snapshot().error == "GUI heartbeat expired", "GUI expiry diagnostic");
+    // GUI loss revokes input, not the background Preview connection.
+    std::this_thread::sleep_for(650ms);
+    require(sink.snapshot().state != ControlConnectionState::disconnected,
+        "GUI expiry preserves network connection");
+    sink.update_ui_heartbeat(); sink.set_control_active(true);
+    require(sink.submit({6,3,{},KeyEdge{5,true}}) == SubmitResult::not_ready,
+        "returning GUI and repeated active cannot restore old capture");
     source.stop(); pipeline.stop(); done = true;
     server.join(); video.join();
     integrated_test(jpeg);
+    session_stall_test(jpeg);
     startup_grace_test(jpeg);
     delayed_status_test(jpeg);
     delayed_status_test(jpeg, true);
@@ -180,10 +189,9 @@ void startup_grace_test(const std::vector<std::uint8_t>& jpeg) {
            std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
     require(client.control_snapshot().state == ControlConnectionState::ready, "handshake survives before first GUI tick");
     require(client.submit({1,1,{},KeyEdge{4,true}}) == SubmitResult::not_ready, "startup grace cannot authorize input");
-    while (client.control_snapshot().state != ControlConnectionState::disconnected &&
-           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
-    require(client.control_snapshot().error == "GUI heartbeat expired", "startup grace expires without real GUI progress");
-    require(std::chrono::steady_clock::now() - started >= 250ms, "startup gets the existing bounded grace");
+    std::this_thread::sleep_for(650ms);
+    require(client.control_snapshot().state == ControlConnectionState::ready,
+        "Preview survives without GUI progress");
     require(!active_seen, "startup grace never grants an active lease");
     client.stop(); done = true;
     server.join(); video.join();
@@ -261,24 +269,92 @@ void delayed_status_test(const std::vector<std::uint8_t>& jpeg, bool active) {
     });
     RelayClient client({"127.0.0.1", *controls->local_port(), *videos->local_port()});
     client.start();
+    client.gui_progress();
     client.active(active);
     const auto started = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - started < 450ms) {
         client.gui_progress();
         std::this_thread::sleep_for(5ms);
     }
+    const auto expected_state = active ? ControlConnectionState::stalled : ControlConnectionState::ready;
     const bool survived = delayed_sent && !expired && heartbeats >= 6 &&
-        client.control_snapshot().state == ControlConnectionState::ready;
-    // The independent writer must still stop when real GUI ticks stop, even
-    // though the receiver and video threads remain alive.
-    const auto deadline = std::chrono::steady_clock::now() + 700ms;
-    while (client.control_snapshot().state != ControlConnectionState::disconnected &&
-           std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
+        client.control_snapshot().state == expected_state;
+    // Inactive transport heartbeats continue without granting an input lease.
+    std::this_thread::sleep_for(650ms);
     const auto snapshot = client.control_snapshot();
+    const bool transport_alive = !expired;
     client.stop(); done = true; server.join(); video.join();
     require(survived, "280ms fragmented status must not starve 250ms Preview heartbeat lease");
     require(active || inactive_only, "Preview heartbeats never authorize control");
     require(!reactivated, "status recovery must not restore old active authorization");
-    require(snapshot.state == ControlConnectionState::disconnected && !snapshot.release_confirmed &&
-        snapshot.error == "GUI heartbeat expired", "GUI expiry is independent of status receive");
+    require(transport_alive && snapshot.state == expected_state,
+        "GUI expiry preserves inactive Preview transport");
+}
+
+// Exercise the real per-tick active(true) caller, input router, TCP relay and
+// serial safety worker. Only capture frames and serial I/O are simulated.
+void session_stall_test(const std::vector<std::uint8_t>& jpeg) {
+    FakeSerial serial; Ch9329ControlSink hardware(serial.io()); hardware.connect("fake", 57600);
+    FakeCapture capture; capture.jpeg = jpeg;
+    RelayServer server(capture, hardware); std::string error;
+    require(server.start({"127.0.0.1",0,0}, error), "session relay listen");
+    auto client = std::make_shared<RelayClient>(ClientOptions{"127.0.0.1",server.control_port(),server.video_port()});
+    KvmSession session(std::make_unique<NetworkCaptureSource>(client), std::make_unique<NetworkControlSink>(client));
+    DeviceInfo device; device.stable_id = "relay"; device.weak_match = true;
+    CaptureMode mode; mode.device_id = "relay";
+    require(session.select_capture(device, mode), "session select relay");
+    session.set_video_rect({0,0,100,100});
+    auto pump = [&](auto predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        do {
+            (void)session.take_latest_frame(); session.tick();
+            if (predicate()) return true;
+            std::this_thread::sleep_for(5ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+        return predicate();
+    };
+    auto ready = [&] { const auto s = session.snapshot(); return s.input_state == InputState::preview &&
+        s.control.state == ControlConnectionState::ready && s.video_fresh && s.video.processed_frames > 0; };
+    require(pump(ready), "session Preview ready");
+    const auto frames = client->capture_snapshot().received_samples;
+    std::this_thread::sleep_for(650ms);
+    require(client->control_snapshot().state == ControlConnectionState::ready &&
+        client->capture_snapshot().received_samples > frames, "stale Preview retains live video connection");
+    require(pump(ready), "Preview GUI resumes");
+    auto capture_input = [&] {
+        session.handle_input({InputButton{InputMouseButton::left,true,50,50}});
+        session.handle_input({InputButton{InputMouseButton::left,false,50,50}});
+        require(pump([&] {return session.snapshot().input_state == InputState::captured;}), "explicit capture click");
+    };
+    auto key_count = [&] {
+        std::lock_guard lock(serial.mutex);
+        return std::ranges::count_if(serial.received, [](const auto& f) {return f.command == 2 && f.data.size() == 8 && f.data[2] == 4;});
+    };
+    capture_input();
+    session.handle_input({InputKey{4,true,false}});
+    require(pump([&] {return key_count() > 0;}), "captured key reaches simulated HID");
+    const auto epoch = hardware.snapshot().epoch;
+    const auto count = key_count();
+    // No GUI ticks, but video/network workers continue. Release must not wait
+    // for the GUI to wake or for a later input event.
+    std::this_thread::sleep_for(650ms);
+    require(hardware.snapshot().epoch > epoch && hardware.snapshot().release_confirmed,
+        "captured GUI stall releases through real serial worker");
+    require(client->control_snapshot().state == ControlConnectionState::stalled,
+        "old capture stays fenced after server release confirmation");
+    client->gui_progress(); client->active(true);
+    require(client->submit({hardware.snapshot().epoch,999,{},KeyEdge{4,true}}) == SubmitResult::not_ready,
+        "fresh GUI and repeated true cannot bypass recapture latch");
+    require(pump(ready), "real session tick returns captured router to Preview");
+    session.handle_input({InputKey{4,false,false}});
+    const auto until = std::chrono::steady_clock::now() + 150ms;
+    require(pump([&] {return std::chrono::steady_clock::now() >= until;}), "resume observation");
+    require(key_count() == count, "GUI resume never replays held key");
+    capture_input();
+    session.handle_input({InputKey{4,true,false}});
+    require(pump([&] {return key_count() > count;}), "explicit recapture restores input");
+    const auto stop_at = std::chrono::steady_clock::now();
+    session.shutdown(); client.reset();
+    require(std::chrono::steady_clock::now() - stop_at < 1s, "session stop remains bounded");
+    server.stop(); hardware.disconnect();
 }

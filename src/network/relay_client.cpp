@@ -23,9 +23,24 @@ struct RelayClient::Impl {
     std::deque<ControlEvent> events;
     std::optional<MouseMode> mode;
     std::uint64_t session{}, min_epoch{}, last_sequence{}, video_sequence{};
-    bool release_pending{}, active{}, gui_seen{};
+    bool release_pending{}, active{}, gui_seen{}, recapture_required{};
     Clock::time_point progress{}, consumed{}, status_at{};
 
+    // Called under mutex, including before accepting a returning GUI tick.
+    void expire_gui(Clock::time_point now) {
+        if (stopped || now - progress < 250ms) return;
+        events.clear();
+        if (!active) return;
+        active = false;
+        recapture_required = true;
+        if (!release_pending && min_epoch <= control.epoch) {
+            min_epoch = control.epoch + 1;
+            release_pending = true;
+        }
+        control.state = ControlConnectionState::clearing;
+        control.release_confirmed = false;
+        spdlog::debug("Relay client: GUI input lease expired; release to Preview");
+    }
     void fail(std::string error) {
         std::lock_guard lock(mutex);
         if (stopped) return;
@@ -118,20 +133,20 @@ struct RelayClient::Impl {
                 status_at = Clock::now();
             }
         });
-        auto last_progress = Clock::time_point{};
         auto heartbeat_at = Clock::time_point{};
         bool last_active = false;
         std::string failure;
         while (!stopped) {
-            { std::lock_guard lock(mutex); if (Clock::now() - progress >= 250ms) { failure = "GUI heartbeat expired"; break; } }
             PacketType type = PacketType::heartbeat;
             std::vector<std::uint8_t> payload;
             {
                 std::lock_guard lock(mutex);
                 const auto now = Clock::now();
+                expire_gui(now);
                 if (now - status_at >= 250ms) {
                     // A recovered status restores Preview readiness, not an old
                     // capture authorization or queued input from before the gap.
+                    if (active) recapture_required = true;
                     active = false;
                     events.clear();
                 }
@@ -142,11 +157,11 @@ struct RelayClient::Impl {
                     type = PacketType::mouse_mode; payload = encode_mouse_mode({session, *mode});
                     min_epoch = control.epoch + 1; control.release_confirmed = false;
                     control.state = ControlConnectionState::clearing; mode.reset();
-                } else if ((progress != last_progress || active != last_active) && now - progress < 250ms && (now - heartbeat_at >= 50ms || active != last_active) && (active || events.empty())) {
-                    payload = encode_heartbeat({session, control.epoch, active && gui_seen && now - status_at < 250ms &&
+                } else if ((now - heartbeat_at >= 50ms || active != last_active) && (active || events.empty())) {
+                    payload = encode_heartbeat({session, control.epoch, active && gui_seen && now - progress < 250ms && now - status_at < 250ms &&
                         control.state == ControlConnectionState::ready && control.target_usb_ready && control.release_confirmed,
                         consumed != Clock::time_point{} && now - consumed < 500ms, video_sequence});
-                    last_progress = progress; heartbeat_at = now; last_active = active;
+                    heartbeat_at = now; last_active = active;
                 } else if (!events.empty()) {
                     auto event = std::move(events.front()); events.pop_front();
                     if (event.epoch == control.epoch && event.epoch >= min_epoch &&
@@ -157,9 +172,6 @@ struct RelayClient::Impl {
                 }
             }
             if (payload.empty()) {
-                bool expired;
-                { std::lock_guard lock(mutex); expired = Clock::now() - progress >= 250ms; }
-                if (expired) { failure = "GUI heartbeat expired"; break; }
                 std::this_thread::sleep_for(2ms); continue;
             }
             if (!send_packet(*socket, type, payload, 50ms)) { failure = "Control send failed or timed out"; break; }
@@ -185,7 +197,7 @@ void RelayClient::start() {
         const auto generation = p.capture.generation + 1;
         p.capture = {}; p.capture.generation = generation; p.capture.state = CaptureState::starting;
         p.latest.reset(); p.events.clear(); p.session = p.min_epoch = p.last_sequence = p.video_sequence = 0;
-        p.release_pending = p.active = p.gui_seen = false; p.consumed = {}; p.status_at = {};
+        p.release_pending = p.active = p.gui_seen = p.recapture_required = false; p.consumed = {}; p.status_at = {};
         // Allow the first GUI tick to follow the asynchronous network handshake.
         // This startup grace is not authorization to forward input.
         p.progress = Clock::now();
@@ -219,6 +231,9 @@ void RelayClient::mouse_mode(MouseMode mode) {
 }
 void RelayClient::active(bool active) noexcept {
     std::lock_guard lock(impl_->mutex);
+    impl_->expire_gui(Clock::now());
+    if (!active) impl_->recapture_required = false;
+    if (active && (impl_->recapture_required || !impl_->gui_seen || Clock::now() - impl_->progress >= 250ms)) return;
     // The final special-key release edges still need the GUI-authorized lease.
     // A later GUI tick deactivates after these bounded queued edges drain.
     if (active || impl_->events.empty()) impl_->active = active;
@@ -227,11 +242,16 @@ void RelayClient::video_presented(std::uint64_t sequence) noexcept {
     std::lock_guard lock(impl_->mutex);
     if (sequence > impl_->video_sequence) { impl_->video_sequence = sequence; impl_->consumed = Clock::now(); }
 }
-void RelayClient::gui_progress() noexcept { std::lock_guard lock(impl_->mutex); impl_->progress = Clock::now(); impl_->gui_seen = true; }
+void RelayClient::gui_progress() noexcept {
+    std::lock_guard lock(impl_->mutex);
+    const auto now = Clock::now();
+    impl_->expire_gui(now);
+    impl_->progress = now; impl_->gui_seen = true;
+}
 SubmitResult RelayClient::submit(ControlEvent event) {
     std::lock_guard lock(impl_->mutex);
     auto& p = *impl_;
-    if (p.stopped || !p.gui_seen || p.control.state != ControlConnectionState::ready || !p.control.target_usb_ready || !p.control.release_confirmed ||
+    if (p.stopped || p.recapture_required || !p.gui_seen || p.control.state != ControlConnectionState::ready || !p.control.target_usb_ready || !p.control.release_confirmed ||
         event.epoch != p.control.epoch || event.epoch < p.min_epoch || event.sequence <= p.last_sequence ||
         Clock::now() - p.status_at >= 250ms || Clock::now() - p.progress >= 250ms ||
         p.consumed == Clock::time_point{} || Clock::now() - p.consumed >= 500ms) return SubmitResult::not_ready;
@@ -241,7 +261,7 @@ SubmitResult RelayClient::submit(ControlEvent event) {
 ControlSnapshot RelayClient::control_snapshot() const {
     std::lock_guard lock(impl_->mutex);
     auto result = impl_->control;
-    if (result.state == ControlConnectionState::ready && Clock::now() - impl_->status_at >= 250ms) {
+    if (result.state == ControlConnectionState::ready && (impl_->recapture_required || Clock::now() - impl_->status_at >= 250ms)) {
         result.state = ControlConnectionState::stalled; result.release_confirmed = false;
     }
     return result;

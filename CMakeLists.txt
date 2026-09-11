@@ -154,7 +154,7 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)
     add_test(NAME relay_protocol COMMAND kvmux_relay_protocol_test)
 
-    add_executable(kvmux_relay_client_test tests/relay_client_test.cpp)
+    add_executable(kvmux_relay_client_test tests/relay_client_test.cpp src/app/kvm_session.cpp)
     target_link_libraries(kvmux_relay_client_test PRIVATE kvmux::core)
     add_test(NAME relay_client COMMAND kvmux_relay_client_test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
