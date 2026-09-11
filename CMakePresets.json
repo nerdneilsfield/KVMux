@@ -25,6 +25,14 @@
       }
     },
     {
+      "name": "headless",
+      "inherits": "dev",
+      "displayName": "KVMux headless relay Debug",
+      "cacheVariables": {
+        "KVMUX_BUILD_GUI": "OFF"
+      }
+    },
+    {
       "name": "release",
       "inherits": "base",
       "displayName": "KVMux Release",
@@ -43,11 +51,17 @@
     }
   ],
   "buildPresets": [
+    { "name": "headless", "configurePreset": "headless" },
     { "name": "dev", "configurePreset": "dev" },
     { "name": "release", "configurePreset": "release" },
     { "name": "sanitizers", "configurePreset": "sanitizers" }
   ],
   "testPresets": [
+    {
+      "name": "headless",
+      "configurePreset": "headless",
+      "output": { "outputOnFailure": true }
+    },
     {
       "name": "dev",
       "configurePreset": "dev",
