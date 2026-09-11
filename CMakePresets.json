@@ -1,76 +1,53 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 25,
-    "patch": 0
-  },
+  "cmakeMinimumRequired": {"major": 3, "minor": 25, "patch": 0},
   "configurePresets": [
-    {
-      "name": "base",
-      "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "BUILD_TESTING": "ON"
-      }
-    },
-    {
-      "name": "dev",
-      "inherits": "base",
-      "displayName": "KVMux Debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
-      }
-    },
-    {
-      "name": "headless",
-      "inherits": "dev",
-      "displayName": "KVMux headless relay Debug",
-      "cacheVariables": {
-        "KVMUX_BUILD_GUI": "OFF"
-      }
-    },
-    {
-      "name": "release",
-      "inherits": "base",
-      "displayName": "KVMux Release",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "BUILD_TESTING": "OFF"
-      }
-    },
-    {
-      "name": "sanitizers",
-      "inherits": "dev",
-      "displayName": "KVMux ASan and UBSan",
-      "cacheVariables": {
-        "KVMUX_ENABLE_SANITIZERS": "ON"
-      }
-    }
+    {"name": "base", "hidden": true, "generator": "Ninja", "binaryDir": "${sourceDir}/build/${presetName}", "cacheVariables": {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "macos-debug", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "macos-debug-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "macos-release", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "macos-release-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "macos-sanitizers", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "ON"}},
+    {"name": "macos-sanitizers-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "ON"}},
+    {"name": "linux-debug", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "linux-debug-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "linux-release", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "linux-release-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "linux-sanitizers", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "ON"}},
+    {"name": "linux-sanitizers-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "ON"}},
+    {"name": "windows-debug", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-debug-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-release", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-release-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}}
   ],
   "buildPresets": [
-    { "name": "headless", "configurePreset": "headless" },
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "sanitizers", "configurePreset": "sanitizers" }
+    {"name": "macos-debug", "configurePreset": "macos-debug"},
+    {"name": "macos-debug-headless", "configurePreset": "macos-debug-headless"},
+    {"name": "macos-release", "configurePreset": "macos-release"},
+    {"name": "macos-release-headless", "configurePreset": "macos-release-headless"},
+    {"name": "macos-sanitizers", "configurePreset": "macos-sanitizers"},
+    {"name": "macos-sanitizers-headless", "configurePreset": "macos-sanitizers-headless"},
+    {"name": "linux-debug", "configurePreset": "linux-debug"},
+    {"name": "linux-debug-headless", "configurePreset": "linux-debug-headless"},
+    {"name": "linux-release", "configurePreset": "linux-release"},
+    {"name": "linux-release-headless", "configurePreset": "linux-release-headless"},
+    {"name": "linux-sanitizers", "configurePreset": "linux-sanitizers"},
+    {"name": "linux-sanitizers-headless", "configurePreset": "linux-sanitizers-headless"},
+    {"name": "windows-debug", "configurePreset": "windows-debug"},
+    {"name": "windows-debug-headless", "configurePreset": "windows-debug-headless"},
+    {"name": "windows-release", "configurePreset": "windows-release"},
+    {"name": "windows-release-headless", "configurePreset": "windows-release-headless"}
   ],
   "testPresets": [
-    {
-      "name": "headless",
-      "configurePreset": "headless",
-      "output": { "outputOnFailure": true }
-    },
-    {
-      "name": "dev",
-      "configurePreset": "dev",
-      "output": { "outputOnFailure": true }
-    },
-    {
-      "name": "sanitizers",
-      "configurePreset": "sanitizers",
-      "output": { "outputOnFailure": true }
-    }
+    {"name": "macos-debug", "configurePreset": "macos-debug", "output": {"outputOnFailure": true}},
+    {"name": "macos-debug-headless", "configurePreset": "macos-debug-headless", "output": {"outputOnFailure": true}},
+    {"name": "macos-sanitizers", "configurePreset": "macos-sanitizers", "output": {"outputOnFailure": true}},
+    {"name": "macos-sanitizers-headless", "configurePreset": "macos-sanitizers-headless", "output": {"outputOnFailure": true}},
+    {"name": "linux-debug", "configurePreset": "linux-debug", "output": {"outputOnFailure": true}},
+    {"name": "linux-debug-headless", "configurePreset": "linux-debug-headless", "output": {"outputOnFailure": true}},
+    {"name": "linux-sanitizers", "configurePreset": "linux-sanitizers", "output": {"outputOnFailure": true}},
+    {"name": "linux-sanitizers-headless", "configurePreset": "linux-sanitizers-headless", "output": {"outputOnFailure": true}},
+    {"name": "windows-debug", "configurePreset": "windows-debug", "output": {"outputOnFailure": true}},
+    {"name": "windows-debug-headless", "configurePreset": "windows-debug-headless", "output": {"outputOnFailure": true}}
   ]
 }

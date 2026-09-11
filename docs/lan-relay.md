@@ -14,28 +14,28 @@ Install the repository's documented compiler, CMake, Ninja and FFmpeg developmen
 dependencies. From the repository root:
 
 ```sh
-cmake --preset headless
-cmake --build --preset headless
-ctest --preset headless
+cmake --preset linux-debug-headless
+cmake --build --preset linux-debug-headless
+ctest --preset linux-debug-headless
 ```
 
 This preset does not configure or build SDL, ImGui, glad or OpenGL.
-The executable is `build/headless/kvmux-relay` on Linux and
-`build/headless/kvmux-relay.exe` on Windows. On Windows, run the build from an
-MSVC developer shell and make the FFmpeg runtime DLLs available on PATH.
+The executable is `build/linux-debug-headless/kvmux-relay` on Linux and
+`build/windows-debug-headless/kvmux-relay.exe` on Windows. On Windows, run the build from an
+MSVC developer shell, replace the preset with `windows-debug-headless`, and make the FFmpeg runtime DLLs available on PATH.
 
 ## Select capture and serial devices
 
 On Linux:
 
 ```sh
-build/headless/kvmux-relay --list-devices
-build/headless/kvmux-relay --list-modes "DEVICE_ID"
-build/headless/kvmux-relay --list-serial
+build/linux-debug-headless/kvmux-relay --list-devices
+build/linux-debug-headless/kvmux-relay --list-modes "DEVICE_ID"
+build/linux-debug-headless/kvmux-relay --list-serial
 ```
 
 Replace `DEVICE_ID` with the exact ID from the first command. On Windows, use
-`build/headless/kvmux-relay.exe` for the same commands. Quote IDs containing
+`build/windows-debug-headless/kvmux-relay.exe` for the same commands. Quote IDs containing
 spaces or special characters.
 
 Choose a mode whose native format is **MJPEG**. Mode numbers start at zero and
@@ -48,13 +48,13 @@ it does not silently change the requested mode.
 Linux example (replace the device, mode index and serial port):
 
 ```sh
-build/headless/kvmux-relay --serve --device "/dev/video0" --mode-index 0 --serial "/dev/ttyUSB0" --baud 57600
+build/linux-debug-headless/kvmux-relay --serve --device "/dev/video0" --mode-index 0 --serial "/dev/ttyUSB0" --baud 57600
 ```
 
 Windows example:
 
 ```powershell
-build/headless/kvmux-relay.exe --serve --device "DEVICE_ID" --mode-index 0 --serial "COM3" --baud 57600
+build/windows-debug-headless/kvmux-relay.exe --serve --device "DEVICE_ID" --mode-index 0 --serial "COM3" --baud 57600
 ```
 
 The defaults are `0.0.0.0:17000` for control and `0.0.0.0:17001` for video.
@@ -68,7 +68,7 @@ driver. The baud rate must match the CH9329 configuration.
 
 ## Connect the GUI
 
-Build the desktop application with the existing `dev` preset. In the GUI:
+Build the desktop application with the existing `macos-debug` preset. In the GUI:
 
 1. Select **Remote**.
 2. Enter the relay computer's IPv4 address, not the Mac's loopback address.

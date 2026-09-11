@@ -1,6 +1,6 @@
 # Linux release directory
 
-`cmake --install build/release --prefix stage` produces the KVMux executable.
+`cmake --install build/linux-release --prefix stage` produces the KVMux executable.
 The target Ubuntu 24.04 installation must provide SDL/OpenGL and FFmpeg runtime
 libraries matching the package build. This first release does not create an
 AppImage or Flatpak.

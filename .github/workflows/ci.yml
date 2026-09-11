@@ -7,11 +7,11 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            preset: dev
+            preset: macos-debug
           - os: ubuntu-24.04
-            preset: dev
+            preset: linux-debug
           - os: windows-2022
-            preset: dev
+            preset: windows-debug
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +36,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavutil-dev libswscale-dev libgl1-mesa-dev
-      - run: cmake --preset sanitizers
-      - run: cmake --build --preset sanitizers --parallel
-      - run: ctest --preset sanitizers --output-on-failure
+      - run: cmake --preset linux-sanitizers
+      - run: cmake --build --preset linux-sanitizers --parallel
+      - run: ctest --preset linux-sanitizers --output-on-failure
