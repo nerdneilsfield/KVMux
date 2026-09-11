@@ -12,6 +12,16 @@
 
 namespace kvmux::tcp {
 
+enum class SendStatus { complete, deadline, error };
+struct SendResult {
+    SendStatus status{SendStatus::error};
+    std::size_t bytes_sent{};
+    operator bool() const noexcept { return status == SendStatus::complete; }
+    [[nodiscard]] bool unsent_deadline() const noexcept {
+        return status == SendStatus::deadline && bytes_sent == 0;
+    }
+};
+
 class Socket {
 public:
     Socket() = default;
@@ -24,7 +34,7 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] std::intptr_t native_handle() const noexcept { return handle_; }
     void close() noexcept;
-    [[nodiscard]] bool send_all(std::span<const std::uint8_t> bytes,
+    [[nodiscard]] SendResult send_all(std::span<const std::uint8_t> bytes,
                                 std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> receive_exact(
         std::size_t size, std::chrono::milliseconds timeout) const;

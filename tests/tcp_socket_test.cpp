@@ -1,4 +1,5 @@
 #include "network/tcp_socket.hpp"
+#include "network/relay_protocol.hpp"
 
 #include <array>
 #include <cassert>
@@ -66,7 +67,10 @@ int main() {
     // A peer that stops reading must not hold send_all past its deadline.
     std::vector<std::uint8_t> blocked_payload(32 * 1024 * 1024, 7);
     started = Clock::now();
-    assert(!client->send_all(blocked_payload, 150ms));
+    const auto partial_send=client->send_all(blocked_payload, 150ms);
+    assert(partial_send.status==kvmux::tcp::SendStatus::deadline);
+    assert(partial_send.bytes_sent>0 && partial_send.bytes_sent<blocked_payload.size());
+    assert(!partial_send.unsent_deadline()); // A partial packet must close, not skip bytes.
     elapsed = Clock::now() - started;
     assert(elapsed >= 100ms && elapsed < 500ms);
     assert(diagnostics.str().find("send failed: reason=deadline error=0 bytes=") != std::string::npos);
@@ -75,6 +79,32 @@ int main() {
     diagnostics.str("");
     client->close();
     server->close();
+
+    // Saturate a real socket, then drop only packets for which not even the
+    // header was written. Draining the queued bytes must restore clean framing.
+    client = kvmux::tcp::connect("127.0.0.1", *port, 1s, error);
+    server = listener->accept(1s);
+    assert(client && server);
+    std::size_t queued{};
+    bool blocked=false;
+    for(int attempt=0;attempt<20&&!blocked;++attempt) {
+        const auto result=client->send_all(blocked_payload,100ms);
+        queued+=result.bytes_sent;
+        assert(result.status==kvmux::tcp::SendStatus::deadline);
+        blocked=result.unsent_deadline();
+    }
+    assert(blocked && queued>0);
+    diagnostics.str("");
+    const std::array<std::uint8_t,3> skipped{8,8,8};
+    const auto dropped=kvmux::relay::send_packet(*client,kvmux::relay::PacketType::video_mjpeg,skipped,100ms);
+    assert(dropped.unsent_deadline());
+    assert(diagnostics.str().empty()); // Recoverable drops do not flood the socket log.
+    assert(server->receive_exact(queued,2s));
+    const auto latest=kvmux::relay::encode_session(42);
+    assert(kvmux::relay::send_packet(*client,kvmux::relay::PacketType::hello,latest,1s));
+    const auto resumed=kvmux::relay::receive_packet(*server,1s);
+    assert(resumed && resumed->type==kvmux::relay::PacketType::hello && resumed->payload==latest);
+    client->close();server->close();
 
     // FIN before the requested byte count returns promptly, rather than waiting.
     client = kvmux::tcp::connect("127.0.0.1", *port, 1s, error);

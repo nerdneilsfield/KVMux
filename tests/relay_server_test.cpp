@@ -26,7 +26,8 @@ int main(int argc,char** argv) {
     require(eventually([&]{return sink.snapshot().state==ControlConnectionState::ready;}),"serial ready");
     RelayServer server(capture,sink);std::string error;
     require(server.start({"127.0.0.1",0,0},error),"listen");
-    for(int scenario=0;scenario<4;++scenario) {
+    for(int scenario=0;scenario<5;++scenario) {
+        capture.stalled=false;
         auto control=tcp::connect("127.0.0.1",server.control_port(),1s,error);require(control.has_value(),"connect control");
         auto hello=receive_packet(*control,1s);require(hello&&hello->type==PacketType::hello,"session hello");
         const auto id=decode_session(hello->payload);require(id.has_value(),"session id");
@@ -75,6 +76,7 @@ int main(int argc,char** argv) {
         {std::lock_guard lock(serial.mutex);require(std::ranges::none_of(serial.received,[](auto& f){return f.command==2&&f.data.size()==8&&f.data[2]==5;}),"old epoch never emits HID");}
         send_key(state->control.epoch,3,6);
         require(eventually([&]{std::lock_guard lock(serial.mutex);return std::ranges::any_of(serial.received,[](auto& f){return f.command==2&&f.data.size()==8&&f.data[2]==6;});}),"new epoch reaches HID");
+        const auto held_epoch=state->control.epoch;
         std::size_t before;{std::lock_guard lock(serial.mutex);before=serial.received.size();}
         if(scenario==0)control->close();
         // scenario 1 stops GUI heartbeats while video continues; scenario 2 loses video.
@@ -89,10 +91,48 @@ int main(int argc,char** argv) {
                 std::this_thread::sleep_for(40ms);
             }
         }
+        if(scenario==4) {
+            // Fresh capture and GUI heartbeat cannot renew control using an
+            // already-consumed video sequence, including during congestion.
+            const auto until=std::chrono::steady_clock::now()+700ms;
+            while(std::chrono::steady_clock::now()<until) {
+                beat();
+                std::this_thread::sleep_for(40ms);
+            }
+            require(state->control.epoch!=held_epoch,"stale consumed sequence invalidates control epoch");
+        }
         require(eventually([&]{std::lock_guard lock(serial.mutex);return std::any_of(serial.received.begin()+static_cast<std::ptrdiff_t>(before),serial.received.end(),[](auto& f){return f.command==2&&f.data.size()==8&&std::ranges::all_of(f.data,[](auto v){return v==0;});});}),"lease loss sends serial ReleaseAll");
         drain=false;if(reader.joinable())reader.join();
         control->close();video->close();
         {std::lock_guard lock(serial.mutex);serial.received.clear();}
     }
+    // A frame larger than the loopback buffers makes progress, then blocks.
+    // Its deadline must end the session: skipping the remainder corrupts framing.
+    capture.stalled=false;
+    auto control=tcp::connect("127.0.0.1",server.control_port(),1s,error);
+    require(control.has_value(),"partial-send control connect");
+    auto hello=receive_packet(*control,1s);
+    require(hello&&hello->type==PacketType::hello,"partial-send hello");
+    auto id=decode_session(hello->payload);require(id.has_value(),"partial-send id");
+    // The previous session has joined, and the new video worker waits for pairing.
+    capture.jpeg.resize(kMaxCompressedSampleBytes,7);
+    auto video=tcp::connect("127.0.0.1",server.video_port(),1s,error);
+    require(video.has_value(),"partial-send video connect");
+    require(send_packet(*video,PacketType::hello,encode_session(*id)),"partial-send pairing");
+    bool closed=false;
+    const auto deadline=std::chrono::steady_clock::now()+1s;
+    while(std::chrono::steady_clock::now()<deadline) {
+        auto response=receive_packet(*control,350ms);
+        if(!response){closed=true;break;}
+        auto state=decode_status(response->payload);require(state.has_value(),"partial-send status");
+        if(!send_packet(*control,PacketType::heartbeat,encode_heartbeat({*id,state->control.epoch,true,true,0}))) {
+            closed=true;break;
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+    require(closed,"partial video send closes session despite GUI heartbeats");
+    const auto header=video->receive_exact(12,1s);
+    require(header.has_value(),"partial video send made header progress");
+    require(!video->receive_exact(kMaxCompressedSampleBytes+24,1s),"partial video packet is not continued");
     server.stop();sink.disconnect();
 }

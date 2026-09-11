@@ -147,7 +147,9 @@ std::optional<Packet> receive_packet(const tcp::Socket& socket,std::chrono::mill
     auto payload=socket.receive_exact(*size,remaining); if(!payload)return{};
     return Packet{static_cast<PacketType>(*type),std::move(*payload)};
 }
-bool send_packet(const tcp::Socket& socket,PacketType type,std::span<const std::uint8_t> payload,std::chrono::milliseconds timeout) {
-    auto bytes=encode_packet(type,payload); return !bytes.empty()&&socket.send_all(bytes,timeout);
+tcp::SendResult send_packet(const tcp::Socket& socket,PacketType type,std::span<const std::uint8_t> payload,std::chrono::milliseconds timeout) {
+    auto bytes=encode_packet(type,payload);
+    if(bytes.empty())return {};
+    return socket.send_all(bytes,timeout);
 }
 }  // namespace kvmux::relay

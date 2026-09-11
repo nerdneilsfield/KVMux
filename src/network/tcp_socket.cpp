@@ -133,16 +133,19 @@ void Socket::close() noexcept {
     }
 }
 
-bool Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::milliseconds timeout) const {
-    if (!valid()) return false;
+SendResult Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::milliseconds timeout) const {
+    if (!valid()) return {};
     const auto started = Clock::now();
     const auto deadline = started + timeout;
     std::size_t written{};
     while (written < bytes.size()) {
         int wait_error{};
         if (!wait_for(native(handle_), true, deadline, &wait_error)) {
-            log_io_failure(handle_, "send", wait_error ? "wait error" : "deadline", wait_error, written, bytes.size(), started, timeout);
-            return false;
+            // Zero-progress deadlines are recoverable at a packet boundary. The
+            // video caller aggregates these instead of logging every dropped frame.
+            if (wait_error || written != 0)
+                log_io_failure(handle_, "send", wait_error ? "wait error" : "deadline", wait_error, written, bytes.size(), started, timeout);
+            return {wait_error ? SendStatus::error : SendStatus::deadline, written};
         }
         const int size = static_cast<int>(std::min<std::size_t>(bytes.size() - written, INT_MAX));
 #ifdef _WIN32
@@ -161,15 +164,15 @@ bool Socket::send_all(std::span<const std::uint8_t> bytes, std::chrono::millisec
         }
         if (count == 0) {
             log_io_failure(handle_, "send", "zero write", 0, written, bytes.size(), started, timeout);
-            return false;
+            return {SendStatus::error, written};
         }
         const int error = last_error();
         if (!interrupted(error) && !would_block(error)) {
             log_io_failure(handle_, "send", "socket error", error, written, bytes.size(), started, timeout);
-            return false;
+            return {SendStatus::error, written};
         }
     }
-    return true;
+    return {SendStatus::complete, written};
 }
 
 std::optional<std::vector<std::uint8_t>> Socket::receive_exact(

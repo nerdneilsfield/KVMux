@@ -57,6 +57,7 @@ struct SessionMouseMode { std::uint64_t session{}; MouseMode mode{}; };
 // Whole-packet deadline, validated header and type-specific bounds before allocation.
 // Any failure (including partial packet timeout) requires closing the socket.
 [[nodiscard]] std::optional<Packet> receive_packet(const tcp::Socket&, std::chrono::milliseconds);
-[[nodiscard]] bool send_packet(const tcp::Socket&, PacketType, std::span<const std::uint8_t>,
+// Only a zero-byte deadline leaves a packet boundary safe for dropping/retrying.
+[[nodiscard]] tcp::SendResult send_packet(const tcp::Socket&, PacketType, std::span<const std::uint8_t>,
                                std::chrono::milliseconds timeout = std::chrono::milliseconds(100));
 }  // namespace kvmux::relay
