@@ -17,3 +17,15 @@ feedback slows source admission; it does not change codec bitrate at runtime.
 See the [LAN guide](docs/lan-relay.md#transport-cap-and-source-admission) for
 limits and blocked-frame recovery. Hardware validation is incomplete; software
 tests do not establish that every platform/device combination works.
+
+## Desktop controls
+
+Open **Connections** in the top menu to select local devices or a relay. The
+popup closes once fresh video and ready control are available. Click the video
+to capture input; press the configured Host key to release it.
+
+The menu hides while input is captured or recovering. In fullscreen, release
+with Host first, then move to the top edge to show the menu. **Status overlay**
+toggles the bottom metrics; hover it in preview for connection details.
+Menus and status sit over the video without changing its input mapping. The
+Host-key reminder fades after capture. These display choices are not saved.

@@ -126,7 +126,8 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::GetIO().IniFilename = nullptr; ImGui::StyleColorsDark();
     ImGui::GetStyle().WindowRounding = 6.F;
     ImGui::GetStyle().FrameRounding = 4.F;
-    ImGui::GetStyle().FramePadding = {8.F, 6.F};
+    ImGui::GetStyle().FramePadding = {6.F, 3.F};
+    ImGui::GetStyle().ItemSpacing = {6.F, 4.F};
     ImGui_ImplSDL3_InitForOpenGL(window, context); ImGui_ImplOpenGL3_Init("#version 150");
 
     auto session = std::make_unique<KvmSession>(); (void)session->set_mouse_mode(config.mouse_mode); session->set_host_key(config.host_scancode); session->set_relative_gain(config.sensitivity);
@@ -153,6 +154,12 @@ int main(int argc, char** argv) {
     std::optional<std::future<std::vector<CaptureMode>>> modes_future;
     int selected_device = -1, selected_mode = -1, selected_port = -1;
     bool fullscreen{}, diagnostics_open{}, running = true;
+    bool show_status = true, chrome_visible = true, was_captured = false;
+    double chrome_until = 0.0, captured_at = 0.0;
+    bool close_connections_when_ready = false;
+    bool popup_open = false;
+    std::vector<ImVec4> local_regions;
+    Uint32 local_buttons = 0;
     auto next_serial_scan = std::chrono::steady_clock::now();
     std::optional<VideoFrame> current_frame;
     std::string last_status;
@@ -163,7 +170,27 @@ int main(int argc, char** argv) {
         });
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
+            const auto event_state = session->snapshot().input_state;
+            const bool remote_input = event_state == InputState::captured ||
+                event_state == InputState::recovering || event_state == InputState::arming;
+            // Local overlays must not activate capture through the video underneath.
+            // Once armed, never let ImGui consume remote edges (including Host release).
+            bool local_click = false;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                const Uint32 bit = SDL_BUTTON_MASK(event.button.button);
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event_state == InputState::preview) {
+                    local_click = popup_open || std::any_of(local_regions.begin(), local_regions.end(), [&](const ImVec4& r) {
+                        return event.button.x >= r.x && event.button.x < r.z &&
+                            event.button.y >= r.y && event.button.y < r.w;
+                    });
+                    if (local_click) local_buttons |= bit;
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && (local_buttons & bit)) {
+                    local_buttons &= ~bit;
+                    local_click = true;
+                }
+            }
+            if (!remote_input) ImGui_ImplSDL3_ProcessEvent(&event);
+            if (local_click && !remote_input) continue;
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
             if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
             if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session->minimized();
@@ -214,181 +241,221 @@ int main(int argc, char** argv) {
 
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL3_NewFrame(); ImGui::NewFrame();
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(viewport->WorkSize);
+        local_regions.clear();
+        const auto record_local_region = [&] {
+            const auto pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+            local_regions.push_back({pos.x, pos.y, pos.x + size.x, pos.y + size.y});
+        };
         const bool captured = snapshot.input_state == InputState::captured || snapshot.input_state == InputState::recovering;
+        const bool remote_input = captured || snapshot.input_state == InputState::arming;
+        const double now = ImGui::GetTime();
+        if (captured && !was_captured) captured_at = now;
+        if (remote_input) {
+            ImGui::GetIO().ClearInputKeys();
+            ImGui::GetIO().ClearEventsQueue();
+            chrome_until = 0.0;
+        }
+        was_captured = captured;
         const bool relative_capture = captured && config.mouse_mode == MouseMode::relative;
         if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
             SDL_SetWindowRelativeMouseMode(window, relative_capture);
+        const auto mouse = ImGui::GetIO().MousePos;
+        const bool at_top = mouse.x >= viewport->Pos.x && mouse.x < viewport->Pos.x + viewport->Size.x &&
+            mouse.y >= viewport->Pos.y && mouse.y < viewport->Pos.y + 8.F;
+        if (!remote_input && at_top) chrome_until = now + 1.0;
+        chrome_visible = !remote_input && (!fullscreen || now < chrome_until ||
+            ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId));
+        const auto overlay_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.F);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.F);
-        ImGui::Begin("KVMuxRoot", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings |
-            ImGuiWindowFlags_MenuBar);
-        if (ImGui::BeginMenuBar()) {
-            if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
-                fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
-            }
-            if (ImGui::MenuItem("Diagnostics")) diagnostics_open = !diagnostics_open;
-            ImGui::EndMenuBar();
-        }
-        if (ImGui::CollapsingHeader("Connections", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const bool controls_enabled = !captured;
-            ImGui::BeginDisabled(!controls_enabled);
-            const bool retiring = !retired_sessions.empty();
-            if (retiring) ImGui::TextUnformatted("Stopping previous session...");
-            ImGui::BeginDisabled(retiring);
-            bool requested_remote = remote;
-            if (ImGui::RadioButton("Local", !remote)) requested_remote = false;
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
-            if (requested_remote != remote && !retiring) {
-                retire_session(); remote = requested_remote;
-                session = std::make_unique<KvmSession>();
-                devices.clear(); modes.clear(); selected_device = selected_mode = -1;
-                modes_future.reset(); devices_future = session->enumerate_capture_devices();
-                current_frame.reset(); renderer.destroy();
-                (void)session->set_mouse_mode(config.mouse_mode);
-                session->set_host_key(config.host_scancode);
-            }
-            if (remote) {
-                ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
-                ImGui::InputInt("Control port", &control_port);
-                ImGui::InputInt("Video port", &video_port);
-                if (ImGui::BeginCombo("Decode", decoder_backend_label(config.decoder_backend))) {
-                    for (const auto backend : {CodecBackend::automatic, CodecBackend::videotoolbox,
-                                               CodecBackend::ffmpeg_software}) {
-                        if (ImGui::Selectable(decoder_backend_label(backend), config.decoder_backend == backend))
-                            config.decoder_backend = backend;
+        if (chrome_visible) {
+            ImGui::SetNextWindowPos(viewport->Pos);
+            ImGui::SetNextWindowSize({viewport->Size.x, ImGui::GetFrameHeight()});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, {0.F, 0.F});
+            ImGui::Begin("Chrome", nullptr, overlay_flags | ImGuiWindowFlags_MenuBar |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PopStyleVar();
+            record_local_region();
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) chrome_until = now + 1.0;
+            if (ImGui::BeginMenuBar()) {
+                if (ImGui::MenuItem("Connections")) ImGui::OpenPopup("Connections");
+                if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
+                    fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
+                }
+                if (ImGui::MenuItem("Diagnostics")) diagnostics_open = !diagnostics_open;
+                ImGui::MenuItem("Status overlay", nullptr, &show_status);
+                ImGui::SetNextWindowPos({viewport->Pos.x + 8.F, viewport->Pos.y + ImGui::GetFrameHeight()});
+                ImGui::SetNextWindowSize({std::min(900.F, viewport->Size.x - 16.F), 0.F});
+                if (ImGui::BeginPopup("Connections")) {
+                    record_local_region();
+                    if (close_connections_when_ready && snapshot.video_fresh &&
+                        snapshot.control.state == ControlConnectionState::ready) {
+                        ImGui::CloseCurrentPopup();
+                        close_connections_when_ready = false;
                     }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("H.265 decoder for the next connection. Auto prefers hardware, then falls back to CPU.\nExplicit backends do not fall back; MJPEG is unchanged.");
-                if (ImGui::Button("Connect relay") && retired_sessions.empty() && control_port > 0 && control_port <= 65535 && video_port > 0 && video_port <= 65535) {
-                    retire_session();
-                    devices_future = {}; modes_future.reset();
-                    devices.clear(); modes.clear(); selected_device = selected_mode = -1;
-                    relay::ClientOptions client_options{
-                        remote_host, static_cast<std::uint16_t>(control_port), static_cast<std::uint16_t>(video_port)};
-                    client_options.decoder_backend = config.decoder_backend;
-                    auto client = std::make_shared<relay::RelayClient>(std::move(client_options));
-                    remote_client = client;
-                    auto capture = std::make_unique<relay::NetworkCaptureSource>(client);
-                    const auto device = capture->enumerate_devices().front();
-                    const auto mode = capture->enumerate_modes(device.stable_id).front();
-                    session = std::make_unique<KvmSession>(std::move(capture), std::make_unique<relay::NetworkControlSink>(client));
-                    session->set_host_key(config.host_scancode);
-                    (void)session->set_mouse_mode(config.mouse_mode);
-                    (void)session->select_capture(device, mode);
-                    current_frame.reset(); renderer.destroy();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Disconnect relay")) {
-                    session->release_control(); (void)session->stop_capture(); (void)session->disconnect_control();
-                    remote_client.reset(); traffic_baseline.reset();
-                    video_bytes_per_second.reset(); control_bytes_per_second.reset();
-                    current_frame.reset(); renderer.destroy();
-                }
-            }
-            ImGui::EndDisabled();
-            if (!remote) {
-            if (ImGui::BeginTable("connections", 4, ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("setting", ImGuiTableColumnFlags_WidthFixed, 120.F);
-                ImGui::TableSetupColumn("choice", ImGuiTableColumnFlags_WidthStretch, 2.F);
-                ImGui::TableSetupColumn("setting2", ImGuiTableColumnFlags_WidthFixed, 100.F);
-                ImGui::TableSetupColumn("choice2", ImGuiTableColumnFlags_WidthStretch, 1.F);
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Capture device");
-                ImGui::TableSetColumnIndex(1);
-                if (ImGui::BeginCombo("##capture_device", selected_device >= 0 ? devices[selected_device].display_name.c_str() : "Select device")) {
-                    for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
-                        if (ImGui::Selectable(devices[i].display_name.c_str(), i == selected_device)) {
-                            selected_device = i; modes.clear(); selected_mode = -1;
-                            modes_future = session->enumerate_capture_modes(devices[i].stable_id);
+                    const bool controls_enabled = !captured;
+                    ImGui::BeginDisabled(!controls_enabled);
+                    const bool retiring = !retired_sessions.empty();
+                    if (retiring) ImGui::TextUnformatted("Stopping previous session...");
+                    ImGui::BeginDisabled(retiring);
+                    bool requested_remote = remote;
+                    if (ImGui::RadioButton("Local", !remote)) requested_remote = false;
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
+                    if (requested_remote != remote && !retiring) {
+                        retire_session(); remote = requested_remote;
+                        session = std::make_unique<KvmSession>();
+                        devices.clear(); modes.clear(); selected_device = selected_mode = -1;
+                        modes_future.reset(); devices_future = session->enumerate_capture_devices();
+                        current_frame.reset(); renderer.destroy();
+                        (void)session->set_mouse_mode(config.mouse_mode);
+                        session->set_host_key(config.host_scancode);
+                    }
+                    if (remote) {
+                        ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
+                        ImGui::InputInt("Control port", &control_port);
+                        ImGui::InputInt("Video port", &video_port);
+                        if (ImGui::BeginCombo("Decode", decoder_backend_label(config.decoder_backend))) {
+                            for (const auto backend : {CodecBackend::automatic, CodecBackend::videotoolbox,
+                                                       CodecBackend::ffmpeg_software}) {
+                                if (ImGui::Selectable(decoder_backend_label(backend), config.decoder_backend == backend))
+                                    config.decoder_backend = backend;
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("H.265 decoder for the next connection. Auto prefers hardware, then falls back to CPU.\nExplicit backends do not fall back; MJPEG is unchanged.");
+                        if (ImGui::Button("Connect relay") && retired_sessions.empty() && control_port > 0 && control_port <= 65535 && video_port > 0 && video_port <= 65535) {
+                            close_connections_when_ready = true;
+                            retire_session();
+                            devices_future = {}; modes_future.reset();
+                            devices.clear(); modes.clear(); selected_device = selected_mode = -1;
+                            relay::ClientOptions client_options{
+                                remote_host, static_cast<std::uint16_t>(control_port), static_cast<std::uint16_t>(video_port)};
+                            client_options.decoder_backend = config.decoder_backend;
+                            auto client = std::make_shared<relay::RelayClient>(std::move(client_options));
+                            remote_client = client;
+                            auto capture = std::make_unique<relay::NetworkCaptureSource>(client);
+                            const auto device = capture->enumerate_devices().front();
+                            const auto mode = capture->enumerate_modes(device.stable_id).front();
+                            session = std::make_unique<KvmSession>(std::move(capture), std::make_unique<relay::NetworkControlSink>(client));
+                            session->set_host_key(config.host_scancode);
+                            (void)session->set_mouse_mode(config.mouse_mode);
+                            (void)session->select_capture(device, mode);
+                            current_frame.reset(); renderer.destroy();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Disconnect relay")) {
+                            session->release_control(); (void)session->stop_capture(); (void)session->disconnect_control();
+                            remote_client.reset(); traffic_baseline.reset();
+                            video_bytes_per_second.reset(); control_bytes_per_second.reset();
+                            current_frame.reset(); renderer.destroy();
                         }
                     }
-                    ImGui::EndCombo();
-                }
-                ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted("Serial port");
-                ImGui::TableSetColumnIndex(3);
-                if (ImGui::BeginCombo("##serial_port", selected_port >= 0 && selected_port < static_cast<int>(ports.size()) ? ports[selected_port].name.c_str() : "Select port")) {
-                    for (int i = 0; i < static_cast<int>(ports.size()); ++i)
-                        if (ImGui::Selectable(ports[i].name.c_str(), i == selected_port)) selected_port = i;
-                    ImGui::EndCombo();
-                }
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Capture mode");
-                ImGui::TableSetColumnIndex(1);
-                if (ImGui::BeginCombo("##capture_mode", selected_mode >= 0 ? mode_text(modes[selected_mode]).c_str() : "Select mode")) {
-                    for (int i = 0; i < static_cast<int>(modes.size()); ++i)
-                        if (ImGui::Selectable(mode_text(modes[i]).c_str(), i == selected_mode)) selected_mode = i;
-                    ImGui::EndCombo();
-                }
-                ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted("Baud rate");
-                ImGui::TableSetColumnIndex(3); ImGui::InputInt("##baud", &config.serial_baud_rate);
-                config.serial_baud_rate = std::max(1200, config.serial_baud_rate);
-                ImGui::EndTable();
-            }
-            if (ImGui::Button("Start preview") && selected_device >= 0 && selected_mode >= 0) {
-                (void)session->select_capture(devices[selected_device], modes[selected_mode]);
-                current_frame.reset(); renderer.destroy();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Connect") && selected_port >= 0)
-                (void)session->connect_control(ports[selected_port].name, config.serial_baud_rate, config.serial_address);
-            ImGui::SameLine(); if (ImGui::Button("Disconnect")) (void)session->disconnect_control();
-            }
-            if (ImGui::RadioButton("Absolute", config.mouse_mode == MouseMode::absolute)) {
-                config.mouse_mode = MouseMode::absolute; (void)session->set_mouse_mode(config.mouse_mode);
-            }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Relative", config.mouse_mode == MouseMode::relative)) {
-                config.mouse_mode = MouseMode::relative; (void)session->set_mouse_mode(config.mouse_mode);
-            }
-            ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
-            float sensitivity = static_cast<float>(config.sensitivity);
-            if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.1F, 4.F)) config.sensitivity = sensitivity;
-            session->set_relative_gain(config.sensitivity);
-            ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session->send_special(SpecialKeys::control_alt_delete);
-            ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session->send_special(SpecialKeys::alt_tab);
-            ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
-            ImGui::SetNextItemWidth(150.F);
-            const char* aspect_names[] = {"Full frame", "16:9", "16:10", "4:3"};
-            int aspect = static_cast<int>(config.target_aspect);
-            if (ImGui::Combo("Target aspect", &aspect, aspect_names, 4))
-                config.target_aspect = static_cast<TargetAspect>(aspect);
-            ImGui::EndDisabled();
-            ImGui::Checkbox("VSync", &config.vsync);
-            ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
-            const char* color_names[] = {"Color: automatic", "Color: BT.601 limited", "Color: BT.601 full", "Color: BT.709 limited", "Color: BT.709 full"};
-            int color = static_cast<int>(config.color_override);
-            if (ImGui::Combo("##color", &color, color_names, 5)) config.color_override = static_cast<ColorOverride>(color);
-            ImGui::SameLine(); ImGui::SetNextItemWidth(190.F);
+                    ImGui::EndDisabled();
+                    if (!remote) {
+                    if (ImGui::BeginTable("connections", 4, ImGuiTableFlags_SizingStretchProp)) {
+                        ImGui::TableSetupColumn("setting", ImGuiTableColumnFlags_WidthFixed, 120.F);
+                        ImGui::TableSetupColumn("choice", ImGuiTableColumnFlags_WidthStretch, 2.F);
+                        ImGui::TableSetupColumn("setting2", ImGuiTableColumnFlags_WidthFixed, 100.F);
+                        ImGui::TableSetupColumn("choice2", ImGuiTableColumnFlags_WidthStretch, 1.F);
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Capture device");
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::BeginCombo("##capture_device", selected_device >= 0 ? devices[selected_device].display_name.c_str() : "Select device")) {
+                            for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
+                                if (ImGui::Selectable(devices[i].display_name.c_str(), i == selected_device)) {
+                                    selected_device = i; modes.clear(); selected_mode = -1;
+                                    modes_future = session->enumerate_capture_modes(devices[i].stable_id);
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted("Serial port");
+                        ImGui::TableSetColumnIndex(3);
+                        if (ImGui::BeginCombo("##serial_port", selected_port >= 0 && selected_port < static_cast<int>(ports.size()) ? ports[selected_port].name.c_str() : "Select port")) {
+                            for (int i = 0; i < static_cast<int>(ports.size()); ++i)
+                                if (ImGui::Selectable(ports[i].name.c_str(), i == selected_port)) selected_port = i;
+                            ImGui::EndCombo();
+                        }
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Capture mode");
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::BeginCombo("##capture_mode", selected_mode >= 0 ? mode_text(modes[selected_mode]).c_str() : "Select mode")) {
+                            for (int i = 0; i < static_cast<int>(modes.size()); ++i)
+                                if (ImGui::Selectable(mode_text(modes[i]).c_str(), i == selected_mode)) selected_mode = i;
+                            ImGui::EndCombo();
+                        }
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted("Baud rate");
+                        ImGui::TableSetColumnIndex(3); ImGui::InputInt("##baud", &config.serial_baud_rate);
+                        config.serial_baud_rate = std::max(1200, config.serial_baud_rate);
+                        ImGui::EndTable();
+                    }
+                    if (ImGui::Button("Start preview") && selected_device >= 0 && selected_mode >= 0) {
+                        close_connections_when_ready = true;
+                        (void)session->select_capture(devices[selected_device], modes[selected_mode]);
+                        current_frame.reset(); renderer.destroy();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Connect") && selected_port >= 0) {
+                        close_connections_when_ready = true;
+                        (void)session->connect_control(ports[selected_port].name, config.serial_baud_rate, config.serial_address);
+                    }
+                    ImGui::SameLine(); if (ImGui::Button("Disconnect")) (void)session->disconnect_control();
+                    }
+                    if (ImGui::RadioButton("Absolute", config.mouse_mode == MouseMode::absolute)) {
+                        config.mouse_mode = MouseMode::absolute; (void)session->set_mouse_mode(config.mouse_mode);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("Relative", config.mouse_mode == MouseMode::relative)) {
+                        config.mouse_mode = MouseMode::relative; (void)session->set_mouse_mode(config.mouse_mode);
+                    }
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
+                    float sensitivity = static_cast<float>(config.sensitivity);
+                    if (ImGui::SliderFloat("Sensitivity", &sensitivity, 0.1F, 4.F)) config.sensitivity = sensitivity;
+                    session->set_relative_gain(config.sensitivity);
+                    ImGui::SameLine(); if (ImGui::Button("Send Ctrl+Alt+Del")) (void)session->send_special(SpecialKeys::control_alt_delete);
+                    ImGui::SameLine(); if (ImGui::Button("Send Alt+Tab")) (void)session->send_special(SpecialKeys::alt_tab);
+                    ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
+                    ImGui::SetNextItemWidth(150.F);
+                    const char* aspect_names[] = {"Full frame", "16:9", "16:10", "4:3"};
+                    int aspect = static_cast<int>(config.target_aspect);
+                    if (ImGui::Combo("Target aspect", &aspect, aspect_names, 4))
+                        config.target_aspect = static_cast<TargetAspect>(aspect);
+                    ImGui::EndDisabled();
+                    ImGui::Checkbox("VSync", &config.vsync);
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(180.F);
+                    const char* color_names[] = {"Color: automatic", "Color: BT.601 limited", "Color: BT.601 full", "Color: BT.709 limited", "Color: BT.709 full"};
+                    int color = static_cast<int>(config.color_override);
+                    if (ImGui::Combo("##color", &color, color_names, 5)) config.color_override = static_cast<ColorOverride>(color);
+                    ImGui::SameLine(); ImGui::SetNextItemWidth(190.F);
 #if defined(__APPLE__)
-            const char* host_names[] = {"Host: Right Command", "Host: Right Control"};
-            int host = config.host_scancode == 228 ? 1 : 0;
-            if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 231 : 228;
+                    const char* host_names[] = {"Host: Right Command", "Host: Right Control"};
+                    int host = config.host_scancode == 228 ? 1 : 0;
+                    if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 231 : 228;
 #else
-            const char* host_names[] = {"Host: Right Control", "Host: Right GUI"};
-            int host = config.host_scancode == 231 ? 1 : 0;
-            if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 228 : 231;
+                    const char* host_names[] = {"Host: Right Control", "Host: Right GUI"};
+                    int host = config.host_scancode == 231 ? 1 : 0;
+                    if (ImGui::Combo("##host", &host, host_names, 2)) config.host_scancode = host == 0 ? 228 : 231;
 #endif
-            session->set_host_key(config.host_scancode);
-            ImGui::EndDisabled();
+                    session->set_host_key(config.host_scancode);
+                    ImGui::EndDisabled();
+                    ImGui::EndPopup();
+                }
+                ImGui::EndMenuBar();
+            }
+            ImGui::End();
         }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.F, 0.F});
+        ImGui::SetNextWindowPos(viewport->Pos);
+        ImGui::SetNextWindowSize(viewport->Size);
+        ImGui::Begin("KVMuxRoot", nullptr, overlay_flags | ImGuiWindowFlags_NoInputs |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
         SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
-        if (captured) ImGui::TextUnformatted("Control captured. Host key releases control.");
-        ImGui::Separator();
-        const ImVec2 available = ImGui::GetContentRegionAvail();
-        const float status_height = ImGui::GetTextLineHeightWithSpacing();
-        const ImVec2 status_pos{ImGui::GetCursorScreenPos().x,
-            ImGui::GetCursorScreenPos().y + available.y - status_height};
-        // ImGui and SDL use logical pixels; only glViewport uses framebuffer pixels.
-        // Keep the display fit unchanged and map input inside the target desktop.
-        const ImVec2 video_size{available.x, std::max(1.F, available.y - status_height - ImGui::GetStyle().ItemSpacing.y)};
-        const ImVec2 start = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##video_surface", video_size);
+        // Chrome overlays never change the video fit or the remote input mapping.
+        const ImVec2 video_size = viewport->Size;
+        const ImVec2 start = viewport->Pos;
         ImGui::GetWindowDrawList()->AddRectFilled(start, {start.x + video_size.x, start.y + video_size.y}, IM_COL32(0, 0, 0, 255));
         if (renderer.texture_id() && renderer.width() > 0) {
             const auto fit = fit_video_rect({start.x, start.y, video_size.x, video_size.y}, renderer.width(), renderer.height());
@@ -404,9 +471,19 @@ int main(int argc, char** argv) {
             ImGui::GetWindowDrawList()->AddText(warning_pos, IM_COL32(255, 100, 80, 255),
                 "VIDEO UNAVAILABLE - control disabled");
         }
-        ImGui::SetCursorScreenPos(status_pos);
-        ImGui::BeginChild("Status", {available.x, status_height}, ImGuiChildFlags_None,
-            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        if (captured) {
+            const float alpha = static_cast<float>(std::clamp(3.0 - (now - captured_at), 0.0, 1.0));
+            const char* hint = config.host_scancode == 231 ? "Captured - Right GUI/Command releases control" :
+                "Captured - Right Control releases control";
+            const auto size = ImGui::CalcTextSize(hint);
+            const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F}, {pos.x + size.x + 8.F, pos.y + size.y + 4.F},
+                IM_COL32(0, 0, 0, static_cast<int>(180.F * alpha)), 4.F);
+            draw->AddText(pos, IM_COL32(255, 255, 255, static_cast<int>(255.F * alpha)), hint);
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
         const auto d = diagnostics.snapshot();
         char rates[64];
         if (video_bytes_per_second && control_bytes_per_second)
@@ -433,30 +510,41 @@ int main(int argc, char** argv) {
         std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s",
             remote ? "LAN" : "Local", resolution.c_str(), d.decode_fps, d.unique_present_fps,
             rates, input_state(snapshot.input_state), pointer, submitted);
-        const auto origin = ImGui::GetCursorScreenPos();
-        const float line_height = ImGui::GetTextLineHeight();
-        const bool connected = snapshot.video_fresh && snapshot.control.state == ControlConnectionState::ready;
-        const ImU32 state_color = connected ? IM_COL32(80, 210, 120, 255) : IM_COL32(230, 155, 70, 255);
-        auto* draw = ImGui::GetWindowDrawList();
-        draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F, state_color);
-        const float text_width = ImGui::CalcTextSize(line).x;
-        const float room = std::max(1.F, ImGui::GetContentRegionAvail().x - 14.F);
-        const float font_size = ImGui::GetFontSize() * std::min(1.F, room / std::max(1.F, text_width));
-        draw->AddText(ImGui::GetFont(), font_size,
-            {origin.x + 14.F, origin.y + (line_height - font_size) * .5F},
-            ImGui::GetColorU32(ImGuiCol_Text), line);
-        ImGui::InvisibleButton("##status_details", {ImGui::GetContentRegionAvail().x, line_height});
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Video: %s | Control: %s | USB: %s\n%s\n%s",
-                capture_state(snapshot.capture.state), control_state(snapshot.control.state),
-                snapshot.control.target_usb_ready ? "ready" : "not ready",
-                snapshot.capture.error.c_str(), snapshot.control.error.c_str());
-        ImGui::EndChild();
-        ImGui::End();
+        if (show_status) {
+            const float status_height = ImGui::GetTextLineHeight() + 8.F;
+            ImGui::SetNextWindowPos({viewport->Pos.x, viewport->Pos.y + viewport->Size.y - status_height});
+            ImGui::SetNextWindowSize({viewport->Size.x, status_height});
+            ImGui::SetNextWindowBgAlpha(.65F);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6.F, 4.F});
+            ImGui::Begin("Status", nullptr, overlay_flags | ImGuiWindowFlags_NoFocusOnAppearing |
+                (remote_input ? ImGuiWindowFlags_NoInputs : 0));
+            if (!remote_input) record_local_region();
+            const auto origin = ImGui::GetCursorScreenPos();
+            const float line_height = ImGui::GetTextLineHeight();
+            const bool connected = snapshot.video_fresh && snapshot.control.state == ControlConnectionState::ready;
+            const ImU32 state_color = connected ? IM_COL32(80, 210, 120, 255) : IM_COL32(230, 155, 70, 255);
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F, state_color);
+            const float text_width = ImGui::CalcTextSize(line).x;
+            const float room = std::max(1.F, ImGui::GetContentRegionAvail().x - 14.F);
+            const float font_size = ImGui::GetFontSize() * std::min(1.F, room / std::max(1.F, text_width));
+            draw->AddText(ImGui::GetFont(), font_size,
+                {origin.x + 14.F, origin.y + (line_height - font_size) * .5F},
+                ImGui::GetColorU32(ImGuiCol_Text), line);
+            ImGui::Dummy({ImGui::GetContentRegionAvail().x, line_height});
+            if (!remote_input && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Video: %s | Control: %s | USB: %s\n%s\n%s",
+                    capture_state(snapshot.capture.state), control_state(snapshot.control.state),
+                    snapshot.control.target_usb_ready ? "ready" : "not ready",
+                    snapshot.capture.error.c_str(), snapshot.control.error.c_str());
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
         ImGui::PopStyleVar(2);
-        if (diagnostics_open) {
+        if (diagnostics_open && !remote_input) {
             const auto d = diagnostics.snapshot();
             ImGui::Begin("Diagnostics", &diagnostics_open);
+            record_local_region();
             ImGui::Text("Decoded video resolution: %s", resolution.c_str());
             if (remote_client) {
                 const auto video = remote_client->video_snapshot();
@@ -503,6 +591,7 @@ int main(int argc, char** argv) {
             ImGui::TextWrapped("%s", d.recent_error.c_str());
             ImGui::End();
         }
+        popup_open = !remote_input && ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(.05F,.05F,.06F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
     }
     session->shutdown(); if (pref) { int w{}, h{}; SDL_GetWindowSize(window, &w, &h); config.window.width = w; config.window.height = h; try { save_config(*pref, config); } catch (...) {} }
