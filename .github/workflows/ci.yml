@@ -20,7 +20,7 @@ jobs:
         run: brew install ninja ffmpeg
       - name: Install host dependencies (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavutil-dev libswscale-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev
       - name: Install host dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavutil-dev libswscale-dev libgl1-mesa-dev
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev
       - run: cmake --preset linux-sanitizers
       - run: cmake --build --preset linux-sanitizers --parallel
       - run: ctest --preset linux-sanitizers --output-on-failure
