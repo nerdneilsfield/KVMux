@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+ <linearGradient id="screen" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#202A33"/><stop offset="1" stop-color="#BFC5C9"/></linearGradient>
+ <linearGradient id="front" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#F3F1EB"/><stop offset="1" stop-color="#BFC5C9"/></linearGradient>
+ <linearGradient id="copper" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#ED9464"/><stop offset="1" stop-color="#C45F3C"/></linearGradient>
+ <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#202A33"/><stop offset="0.5" stop-color="#0B1823"/><stop offset="1" stop-color="#08121B"/></linearGradient>
+</defs>
+<path d="M 347,156 Q 329,150 329,171 L 329,842 Q 329,861 348,854 L 696,728 Q 708,723 708,707 L 708,296 Q 708,280 693,274 Z" fill="url(#screen)" stroke="#BFC5C9" stroke-width="5"/>
+<path d="M 180,283 Q 163,278 163,297 L 163,727 Q 163,749 183,743 L 520,631 Q 537,626 537,610 L 537,407 Q 537,392 521,388 Z" fill="#0B1823" stroke="#F3F1EB" stroke-width="19" stroke-linejoin="round"/>
+<path d="M 472,509 L 850,509" fill="none" stroke="#C45F3C" stroke-width="19" stroke-linecap="round"/>
+<circle cx="859" cy="509" r="58" fill="url(#copper)"/>
+</svg>
