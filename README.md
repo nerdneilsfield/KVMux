@@ -24,8 +24,11 @@ Open **Connections** in the top menu to select local devices or a relay. The
 popup closes once fresh video and ready control are available. Click the video
 to capture input; press the configured Host key to release it.
 
-The menu hides while input is captured or recovering. In fullscreen, release
-with Host first, then move to the top edge to show the menu. **Status overlay**
+The top menu hides while input is captured or recovering. Click the translucent
+three-line icon to release control and open its menu; drag it to move it without
+sending mouse input to the target. Its position stays within the window and is
+not saved. In relative mouse mode, press Host to unlock the pointer first.
+In fullscreen, moving to the top edge after release also shows the top menu. **Status overlay**
 toggles the bottom metrics; hover it in preview for connection details.
 Menus and status sit over the video without changing its input mapping. The
 Host-key reminder fades after capture. These display choices are not saved.

@@ -73,6 +73,62 @@ std::optional<std::uint16_t> usb_usage_from_sdl(const SDL_Scancode scancode) {
     if (index >= table.size() || table[index] == 0) return std::nullopt;
     return table[index];
 }
+// Own pointer gestures before ImGui and remote routing. Keyboard and lifecycle events
+// must still reach the session, even while the icon is being dragged.
+struct FloatingMenuIcon {
+    ImVec2 pos{16.F, 64.F}, press{}, origin{};
+    static constexpr float size = 32.F;
+    Uint32 buttons{}, abandoned_buttons{};
+    bool dragged{}, cancelled{}, clicked{};
+
+    void clamp(float width, float height) {
+        pos.x = std::clamp(pos.x, 0.F, std::max(0.F, width - size));
+        pos.y = std::clamp(pos.y, 0.F, std::max(0.F, height - size));
+    }
+    bool contains(float x, float y) const {
+        return x >= pos.x && x < pos.x + size && y >= pos.y && y < pos.y + size;
+    }
+    bool consume(const SDL_Event& event, bool enabled, float width, float height) {
+        clamp(width, height);
+        if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST || event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+            event.type == SDL_EVENT_WINDOW_HIDDEN) {
+            abandoned_buttons |= buttons; buttons = 0; cancelled = true;
+        }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && (abandoned_buttons & SDL_BUTTON_MASK(event.button.button))) {
+            abandoned_buttons &= ~SDL_BUTTON_MASK(event.button.button);
+            return true;
+        }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+            abandoned_buttons &= ~SDL_BUTTON_MASK(event.button.button);
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && (buttons ||
+            (enabled && contains(event.button.x, event.button.y)))) {
+            if (!buttons) {
+                press = {event.button.x, event.button.y}; origin = pos;
+                dragged = false; cancelled = event.button.button != SDL_BUTTON_LEFT;
+            } else cancelled = true;
+            buttons |= SDL_BUTTON_MASK(event.button.button);
+            return true;
+        }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && (buttons & SDL_BUTTON_MASK(event.button.button))) {
+            buttons &= ~SDL_BUTTON_MASK(event.button.button);
+            clicked = !buttons && !dragged && !cancelled && contains(event.button.x, event.button.y);
+            return true;
+        }
+        if (event.type == SDL_EVENT_MOUSE_MOTION) {
+            if (buttons) {
+                const float dx = event.motion.x - press.x, dy = event.motion.y - press.y;
+                if (dx * dx + dy * dy >= 25.F) dragged = true;
+                if (dragged && !cancelled) { pos = {origin.x + dx, origin.y + dy}; clamp(width, height); }
+                return true;
+            }
+            return enabled && contains(event.motion.x, event.motion.y);
+        }
+        if (event.type == SDL_EVENT_MOUSE_WHEEL)
+            return buttons || (enabled && contains(event.wheel.mouse_x, event.wheel.mouse_y));
+        return false;
+    }
+};
+
 InputEvent to_input(const SDL_Event& event) {
     if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
         const auto usage = usb_usage_from_sdl(event.key.scancode);
@@ -159,7 +215,9 @@ int main(int argc, char** argv) {
     bool close_connections_when_ready = false;
     bool popup_open = false;
     std::vector<ImVec4> local_regions;
-    Uint32 local_buttons = 0;
+    Uint32 local_buttons = 0, remote_buttons = 0;
+    FloatingMenuIcon menu_icon;
+    bool open_floating_menu = false, open_connections = false;
     auto next_serial_scan = std::chrono::steady_clock::now();
     std::optional<VideoFrame> current_frame;
     std::string last_status;
@@ -173,13 +231,30 @@ int main(int argc, char** argv) {
             const auto event_state = session->snapshot().input_state;
             const bool remote_input = event_state == InputState::captured ||
                 event_state == InputState::recovering || event_state == InputState::arming;
+            int event_width{}, event_height{};
+            SDL_GetWindowSize(window, &event_width, &event_height);
+            const bool icon_enabled = !popup_open && !remote_buttons &&
+                !(remote_input && config.mouse_mode == MouseMode::relative);
+            if (menu_icon.consume(event, icon_enabled, static_cast<float>(event_width), static_cast<float>(event_height))) {
+                if (menu_icon.clicked) {
+                    session->release_control();
+                    open_floating_menu = true;
+                    menu_icon.clicked = false;
+                }
+                continue;
+            }
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST || event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                event.type == SDL_EVENT_WINDOW_HIDDEN) {
+                remote_buttons = 0;
+                open_floating_menu = false;
+            }
             // Local overlays must not activate capture through the video underneath.
             // Once armed, never let ImGui consume remote edges (including Host release).
             bool local_click = false;
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 const Uint32 bit = SDL_BUTTON_MASK(event.button.button);
                 if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event_state == InputState::preview) {
-                    local_click = popup_open || std::any_of(local_regions.begin(), local_regions.end(), [&](const ImVec4& r) {
+                    local_click = popup_open || open_floating_menu || std::any_of(local_regions.begin(), local_regions.end(), [&](const ImVec4& r) {
                         return event.button.x >= r.x && event.button.x < r.z &&
                             event.button.y >= r.y && event.button.y < r.w;
                     });
@@ -191,6 +266,8 @@ int main(int argc, char** argv) {
             }
             if (!remote_input) ImGui_ImplSDL3_ProcessEvent(&event);
             if (local_click && !remote_input) continue;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
             if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
             if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session->minimized();
@@ -263,7 +340,7 @@ int main(int argc, char** argv) {
         const bool at_top = mouse.x >= viewport->Pos.x && mouse.x < viewport->Pos.x + viewport->Size.x &&
             mouse.y >= viewport->Pos.y && mouse.y < viewport->Pos.y + 8.F;
         if (!remote_input && at_top) chrome_until = now + 1.0;
-        chrome_visible = !remote_input && (!fullscreen || now < chrome_until ||
+        chrome_visible = !remote_input && (!fullscreen || open_floating_menu || open_connections || now < chrome_until ||
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId));
         const auto overlay_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings;
@@ -279,7 +356,22 @@ int main(int argc, char** argv) {
             record_local_region();
             if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) chrome_until = now + 1.0;
             if (ImGui::BeginMenuBar()) {
-                if (ImGui::MenuItem("Connections")) ImGui::OpenPopup("Connections");
+                if (open_floating_menu) { ImGui::OpenPopup("Floating menu"); open_floating_menu = false; }
+                if (ImGui::MenuItem("Connections") || open_connections) {
+                    ImGui::OpenPopup("Connections"); open_connections = false;
+                }
+                ImGui::SetNextWindowPos({viewport->Pos.x + menu_icon.pos.x,
+                    viewport->Pos.y + menu_icon.pos.y + FloatingMenuIcon::size}, ImGuiCond_Appearing);
+                if (ImGui::BeginPopup("Floating menu")) {
+                    record_local_region();
+                    if (ImGui::MenuItem("Connections / settings")) open_connections = true;
+                    ImGui::MenuItem("Status overlay", nullptr, &show_status);
+                    if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
+                        fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
+                    }
+                    if (ImGui::MenuItem("Diagnostics")) diagnostics_open = !diagnostics_open;
+                    ImGui::EndPopup();
+                }
                 if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
                     fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
                 }
@@ -593,6 +685,15 @@ int main(int argc, char** argv) {
             ImGui::Text("Pixel path: %s", d.pixel_path.c_str());
             ImGui::TextWrapped("%s", d.recent_error.c_str());
             ImGui::End();
+        }
+        menu_icon.clamp(viewport->Size.x, viewport->Size.y);
+        if (!relative_capture && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+            const ImVec2 pos{viewport->Pos.x + menu_icon.pos.x, viewport->Pos.y + menu_icon.pos.y};
+            auto* draw = ImGui::GetForegroundDrawList();
+            draw->AddRectFilled(pos, {pos.x + FloatingMenuIcon::size, pos.y + FloatingMenuIcon::size},
+                IM_COL32(35, 40, 48, 155), 8.F);
+            for (float y : {10.F, 16.F, 22.F})
+                draw->AddLine({pos.x + 8.F, pos.y + y}, {pos.x + 24.F, pos.y + y}, IM_COL32(240, 240, 245, 220), 2.F);
         }
         popup_open = !remote_input && ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(.05F,.05F,.06F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
