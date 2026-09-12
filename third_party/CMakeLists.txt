@@ -1,5 +1,10 @@
 # All dependencies in this file are local repository sources. Do not add FetchContent.
 
+add_library(kvmux_kcp STATIC kcp/ikcp.c)
+target_include_directories(kvmux_kcp SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/kcp")
+add_library(kvmux::kcp ALIAS kvmux_kcp)
+install(FILES kcp/LICENSE DESTINATION share/kvmux/licenses/kcp)
+
 if(KVMUX_BUILD_GUI)
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
     set(SDL_STATIC OFF CACHE BOOL "" FORCE)

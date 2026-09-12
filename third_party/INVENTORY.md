@@ -18,3 +18,14 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 - SHA-256: `8850669c1867e466d87edfbd2120bac5b35f8e6df2c330b0e77e083a52249b28`
 - License: LGPL-3.0-or-later, retained as `libserialport/COPYING`
 - Local changes: none to upstream sources; KVMux supplies its CMake build.
+
+## KCP
+
+- Source: https://github.com/skywind3000/kcp
+- Commit: `32da082e529a26730aea3eb19922f80634ee6dea`
+- License: MIT, retained as `kcp/LICENSE`
+- Local changes: none; only `ikcp.c`, `ikcp.h`, and `LICENSE` vendored.
+- File SHA-256 (unchanged upstream bytes):
+  - `kcp/ikcp.c`: `dfd4a9a1c0c928238b10be2b0f10d178b314bccc67ca577f9da8455a1fa0b77d`
+  - `kcp/ikcp.h`: `531991aa43f1055d6e9ddf233214bce9e66d63fd55fe95b55a65f295252f6692`
+  - `kcp/LICENSE`: `6587fd02a924b97dbd6758b0573ddec056fb494a84f3709c5aaa33ce1f7f029c`

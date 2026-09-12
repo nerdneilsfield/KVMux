@@ -30,6 +30,8 @@ add_library(kvmux_core STATIC
     src/network/relay_client.cpp
     src/network/relay_protocol.cpp
     src/network/tcp_socket.cpp
+    src/network/udp_socket.cpp
+    src/network/kcp_channel.cpp
     src/support/build_info.cpp
     src/support/config.cpp
     src/support/diagnostics.cpp
@@ -82,6 +84,8 @@ endif()
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
+
+target_link_libraries(kvmux_core PRIVATE kvmux::kcp)
 
 if(WIN32)
     target_link_libraries(kvmux_core PRIVATE ws2_32)
@@ -187,6 +191,11 @@ if(BUILD_TESTING)
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)
+
+    add_executable(kvmux_udp_kcp_test tests/udp_kcp_test.cpp)
+    target_link_libraries(kvmux_udp_kcp_test PRIVATE kvmux::core)
+    add_test(NAME udp_kcp COMMAND kvmux_udp_kcp_test)
+    set_tests_properties(udp_kcp PROPERTIES TIMEOUT 15)
 
     add_executable(kvmux_tcp_socket_test tests/tcp_socket_test.cpp)
     target_link_libraries(kvmux_tcp_socket_test PRIVATE kvmux::core)
