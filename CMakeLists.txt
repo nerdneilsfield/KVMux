@@ -85,7 +85,7 @@ if(KVMUX_BUILD_GUI)
 endif()
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
+target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
 
 target_link_libraries(kvmux_core PRIVATE kvmux::kcp)
 
@@ -171,6 +171,15 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_ffmpeg_encoder_test PRIVATE kvmux::core)
     add_test(NAME ffmpeg_encoder COMMAND kvmux_ffmpeg_encoder_test)
     set_tests_properties(ffmpeg_encoder PROPERTIES SKIP_RETURN_CODE 77)
+
+    if(KVMUX_BUILD_GUI)
+    add_executable(kvmux_recording_test tests/recording_test.cpp src/app/recording.cpp)
+    target_compile_features(kvmux_recording_test PRIVATE cxx_std_20)
+    target_include_directories(kvmux_recording_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(kvmux_recording_test PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale SDL3::SDL3)
+    add_test(NAME recording COMMAND kvmux_recording_test)
+
+    endif()
 
     add_executable(kvmux_ffmpeg_decoder_test tests/ffmpeg_decoder_test.cpp)
     target_link_libraries(kvmux_ffmpeg_decoder_test PRIVATE kvmux::core)
