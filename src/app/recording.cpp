@@ -76,18 +76,17 @@ void Recording::fail(std::string message) noexcept { std::lock_guard lock(mutex_
 RecordingStatus Recording::status() const { std::lock_guard lock(mutex_); return status_; }
 
 bool Recording::snapshot_now(const VideoFrame& input) {
-    { std::lock_guard lock(mutex_); status_.error.clear(); status_.output_path.clear(); }
-    if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.error="snapshot requires a valid CPU VideoFrame"; return false; }
+    if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.snapshot_error="snapshot requires a valid CPU VideoFrame"; return false; }
     const auto directory=downloads_directory();
     std::error_code ec;
     std::filesystem::create_directories(directory,ec);
-    if (ec) { { std::lock_guard lock(mutex_); status_.error="create Downloads directory: "+ec.message(); } return false; }
+    if (ec) { { std::lock_guard lock(mutex_); status_.snapshot_error="create Downloads directory: "+ec.message(); } return false; }
     const auto path=timestamped(directory,".jpeg");
     const auto* encoder=avcodec_find_encoder(AV_CODEC_ID_MJPEG);
-    if (!encoder) { { std::lock_guard lock(mutex_); status_.error="FFmpeg MJPEG encoder unavailable"; } return false; }
+    if (!encoder) { { std::lock_guard lock(mutex_); status_.snapshot_error="FFmpeg MJPEG encoder unavailable"; } return false; }
     AVCodecContext* context=avcodec_alloc_context3(encoder);
     AVFrame* image=av_frame_alloc(); AVPacket* packet=av_packet_alloc();
-    if (!context || !image || !packet) { avcodec_free_context(&context); av_frame_free(&image); av_packet_free(&packet); { std::lock_guard lock(mutex_); status_.error="allocate JPEG encoder"; } return false; }
+    if (!context || !image || !packet) { avcodec_free_context(&context); av_frame_free(&image); av_packet_free(&packet); { std::lock_guard lock(mutex_); status_.snapshot_error="allocate JPEG encoder"; } return false; }
     context->width=input.frame->width; context->height=input.frame->height;
     context->pix_fmt=AV_PIX_FMT_YUVJ420P; context->time_base={1,1};
     int result=avcodec_open2(context,encoder,nullptr);
@@ -103,8 +102,8 @@ bool Recording::snapshot_now(const VideoFrame& input) {
     if (result>=0) { std::error_code rename_error; std::filesystem::rename(temporary,path,rename_error); if (rename_error) result=AVERROR(EIO); }
     if (result<0) { std::error_code remove_error; std::filesystem::remove(temporary,remove_error); }
     sws_freeContext(convert); av_packet_free(&packet); av_frame_free(&image); avcodec_free_context(&context);
-    if (result<0) { { std::lock_guard lock(mutex_); status_.error="write JPEG: "+av_error(result); } return false; }
-    { std::lock_guard lock(mutex_); status_.output_path=path; } return true;
+    if (result<0) { { std::lock_guard lock(mutex_); status_.snapshot_error="write JPEG: "+av_error(result); } return false; }
+    { std::lock_guard lock(mutex_); status_.last_snapshot_path=path; status_.snapshot_error.clear(); } return true;
 }
 
 bool Recording::start_now(const VideoFrame& first) {
@@ -161,8 +160,8 @@ bool Recording::append(const VideoFrame& input) {
     wake_.notify_one(); return true;
 }
 bool Recording::snapshot(const VideoFrame& input) {
-    if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.error="snapshot requires a valid CPU VideoFrame"; return false; }
-    ensure_worker(); { std::lock_guard lock(mutex_); snapshot_=input; } wake_.notify_one(); return true;
+    if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.snapshot_error="snapshot requires a valid CPU VideoFrame"; return false; }
+    ensure_worker(); { std::lock_guard lock(mutex_); status_.snapshot_error.clear(); snapshot_=input; } wake_.notify_one(); return true;
 }
 bool Recording::start(const VideoFrame& input) {
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.error="recording requires a valid CPU VideoFrame"; return false; }

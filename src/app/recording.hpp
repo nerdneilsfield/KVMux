@@ -16,6 +16,8 @@ struct RecordingStatus {
     RecordingState state{RecordingState::idle};
     std::filesystem::path output_path;
     std::string error;
+    std::filesystem::path last_snapshot_path;
+    std::string snapshot_error;
     unsigned width{}, height{};
 };
 
