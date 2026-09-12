@@ -1,6 +1,56 @@
 #include "relay_integration_fakes.hpp"
+#include "network/source_admission.hpp"
+void admission_policy_test() {
+    using namespace kvmux::relay;
+    const auto start = MediaTime{} + 10s;
+    SourceAdmission policy(7, 20ms);
+    MediaStats stats;
+    assert(!policy.feedback(8, stats, start));
+    assert(policy.feedback(7, stats, start));
+    stats.received_frames = 10;
+    assert(policy.feedback(7, stats, start + 100ms));
+    stats.lost_frames = stats.age_losses = 1;
+    assert(policy.feedback(7, stats, start + 200ms));
+    policy.poll(start + 499ms); assert(policy.interval() == 20ms);
+    policy.poll(start + 500ms); assert(policy.interval() == 25ms);
+    assert(policy.delta().lost_frames == 1);
+    assert(!policy.feedback(7, stats, start + 600ms));
+    auto regressed = stats; regressed.received_frames = 9;
+    assert(!policy.feedback(7, regressed, start + 600ms));
+    assert(!policy.feedback(8, stats, start + 600ms));
+    policy.poll(start + 1000ms); assert(policy.interval() == 25ms);
+    // Missing feedback causes one reduction per outage, never repeated compounding.
+    policy.poll(start + 1200ms); assert(policy.interval() == 31250us);
+    policy.poll(start + 4000ms); assert(policy.interval() == 31250us);
+    for (int n = 0; n <= 4; ++n) {
+        ++stats.received_frames;
+        assert(policy.feedback(7, stats, start + 4500ms + n * 500ms));
+        policy.poll(start + 4500ms + n * 500ms);
+    }
+    assert(policy.interval() == 28125us); // Two seconds healthy, then ten percent.
+    ++stats.received_frames; policy.feedback(7, stats, start + 7000ms);
+    policy.poll(start + 7000ms); assert(policy.interval() == 28125us);
+    ++stats.received_frames; policy.feedback(7, stats, start + 7500ms);
+    policy.poll(start + 7500ms); assert(policy.interval() == 25312us);
+    for (int n = 0; n < 30; ++n) {
+        ++stats.lost_frames; policy.feedback(7, stats, start + 8000ms + n * 500ms);
+        policy.poll(start + 8000ms + n * 500ms);
+    }
+    assert(policy.interval() == 200ms);
+    for (int n = 0; n < 70; ++n) {
+        ++stats.received_frames; policy.feedback(7, stats, start + 23000ms + n * 500ms);
+        policy.poll(start + 23000ms + n * 500ms);
+    }
+    assert(policy.interval() == 20ms);
+    SourceAdmission slow(9, 300ms); MediaStats waiting; waiting.waiting_idr = true;
+    slow.feedback(9, {}, start); slow.feedback(9, waiting, start + 500ms);
+    slow.poll(start + 500ms); assert(slow.interval() == 300ms);
+    SourceAdmission reset(10, 20ms); assert(reset.interval() == 20ms && !reset.latest());
+}
+
 int main(int argc, char** argv) {
     assert(argc > 1);
+    admission_policy_test();
     {
         RelayFixture capped(argv[1], 24000);
         GuiFixture gui(capped.options()); gui.activate();

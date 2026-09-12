@@ -4,8 +4,9 @@ Run `kvmux-relay` on the Windows or Linux computer connected to the capture
 card and CH340/CH341/CH343 host serial adapter connected to CH9329. Run the desktop GUI on your Mac.
 The relay does not need a desktop session.
 
-This version uses two unencrypted, unauthenticated TCP connections, as requested
-for a controlled LAN. Do not forward these ports to the Internet. Anyone with
+This version uses unencrypted, unauthenticated UDP v3 on two server ports and
+one client socket. KCP carries reliable control; media uses bounded UDP fragments
+with XOR parity. Use this only on a trusted LAN. Do not forward these ports to the Internet. Anyone with
 access to the ports can attempt to control the attached computer.
 
 ## Build the hardware-side relay
@@ -121,7 +122,7 @@ build/windows-debug-headless/kvmux-relay.exe --serve --device "DEVICE_ID" --mode
 ```
 
 The defaults are `0.0.0.0:17000` for control and `0.0.0.0:17001` for video.
-Allow inbound TCP on both ports in the relay computer's firewall, restricted to
+Allow inbound UDP on both ports in the relay computer's firewall, restricted to
 the intended LAN. To bind a particular interface, add `--bind 192.168.1.20`.
 Use `--control-port` and `--video-port` to change the ports. Press Ctrl+C to stop.
 
@@ -152,7 +153,7 @@ information. See [building.md](building.md) for dependency and packaging details
 
 ### Jetson raw-to-H.265 example
 
-After updating both ends to protocol v2, build the relay with its backend enabled:
+After updating both ends to protocol v3, build the relay with its backend enabled:
 
 ```sh
 cmake --preset linux-release-headless -DKVMUX_JETSON_ENCODER=ON
@@ -166,12 +167,48 @@ HEVC mode chooses a supported raw capture mode. For a specific raw mode, retain
 listing. A mode index used for MJPEG may not be valid for raw capture. Check the
 printed selected dimensions, rate and pixel format; 1080p60 raw is available only
 if the capture device actually advertises it. Both applications must be updated:
-protocol v1 and v2 are intentionally not compatible.
+UDP v3 does not support the old TCP v1/v2 protocols.
 
 On the Mac, use **Connections → Decode → Auto** or explicitly choose
 **VideoToolbox**. Software is available explicitly; Auto reports a CPU fallback
 reason if hardware startup fails. See Diagnostics for actual negotiated codec,
 decoder output and hardware verification status. No zero-copy claim is implied.
+
+## Transport cap and source admission
+
+`--transport-rate BYTES_PER_SECOND` sets the media ceiling. Its default is
+`12000000`; valid values are `1..1000000000`. Zero, overflow and malformed
+values fail during argument parsing, before device enumeration. This cap counts
+UDP envelopes, media payload and XOR parity. It excludes IP/UDP headers and
+control traffic. It is a pacing ceiling, not measured link capacity.
+
+For example, add `--transport-rate 3000000` to `--serve` to cap media at
+3,000,000 bytes/s. HEVC `--bitrate 8000000` separately requests an encoder rate
+of 8,000,000 bits/s. Neither setting guarantees useful video for every capture
+mode or amount of motion.
+
+Receiver feedback adjusts the interval between source admissions, not codec
+bitrate. It starts at the capture mode's nominal interval. New loss, age,
+capacity or gap pressure increases it by 25%, at most once per 500 ms, up to
+200 ms (or the nominal interval if longer). Waiting for IDR without new frame
+completions also counts as pressure. After two seconds of healthy completions,
+the interval decreases by 10% at most once per second, down to nominal.
+Cumulative counters are compared as deltas; repeated samples do not repeatedly
+slow the source. Missing progress for one second after initial feedback causes
+one slowdown per outage. Control service and codec output polling continue.
+
+An individual frame can still exceed the 100 ms rate budget. Persistent
+`frame_exceeds_rate_budget` means video is blocked, not recovered. Lower the
+configured `--bitrate` for HEVC or raise `--transport-rate`, restart the relay,
+and connect a new session. Source admission cannot shrink an individual JPEG
+or oversized HEVC IDR. The relay does not reconfigure the encoder in-session
+or reset access-unit sequence numbers to hide gaps.
+
+With `--debug`, periodic relay logs show cap, source interval, receiver feedback
+counters, paced bytes and named media reason. Diagnostics in the GUI shows
+receiver loss, XOR recovery, age/capacity/gap counts, waiting-IDR state and the
+last named recovery reason. These receiver-local fields do not claim to show
+the server's current cap or bitrate.
 
 ## Connect the GUI
 
@@ -196,21 +233,27 @@ see the negotiated codec, actual decoder backend, hardware-active state,
 recovery count and decoder error. A selected backend is not proof that hardware
 decoding is active; the diagnostic uses the decoder's runtime state.
 
-Only one controller is supported. Reconnection starts in Preview and never
-restores held keys. The relay pairs the video connection with the control
-session; this pairing is not authentication.
+Only one controller is supported. A new session starts in Preview. A short
+network interruption keeps focused capture intent, but revokes input when its
+250 ms lease expires. Fresh presented video and an acknowledged current-state
+snapshot are required before input resumes. Completed clicks and stale relative
+motion are not replayed. Host exit or focus loss cancels that intent. The session
+expires after 10 seconds without peer liveness. Pairing is not authentication.
 
 ## Limits and verification
 
-Video and control use separate TCP sockets, but share the network's bandwidth.
-The sender replaces only unsent frames. Bytes already queued in TCP cannot be
-retracted; a slow video connection is closed on its write deadline.
+Video and control share network bandwidth. The sender checks control before
+sending at most two media datagrams. Capture remains latest-value, with one
+ordered encoded-output slot; source admission occurs before conversion and
+encoding. Media has a 100 ms send budget and a 250 ms source-age limit. Missing
+HEVC references require a fresh IDR; dropping an access unit does not renumber
+later units. Challenges and cancellation bypass reliable KCP ordering.
 
 A missing GUI heartbeat, disconnected channel or stale capture requests serial
 ReleaseAll. If the serial connection itself is lost, software cannot guarantee
 that the target received the release. Reconnect the target HID if needed.
 
-Local automated tests use loopback TCP and fake capture/serial boundaries.
+Local automated tests use real loopback UDP/KCP and fake capture/serial boundaries.
 They are not real capture-card or CH9329 hardware acceptance. Windows/Linux
 native relay operation and two-host hardware behavior still need measurements
 on those hosts. See `acceptance.md` for the existing local-KVM evidence.
@@ -380,7 +423,7 @@ before a disconnect. Do not treat that image as a working control session.
    new supplementary groups when `usermod` changes the account.
 4. If the port is accessible but control is still not ready, check the selected
    baud rate, CH9329 target-end USB connection and the GUI's serial error. A
-   listening TCP server is not evidence of a successful CH9329 handshake.
+   listening UDP server is not evidence of a successful CH9329 handshake.
 
 ### Read the disconnect reason
 
@@ -482,11 +525,10 @@ means the current packet made no send progress within 100 ms. It does not by
 itself establish insufficient LAN bandwidth. Previously this ended both relay
 channels; the client then reported `peer closed` while reading control status.
 
-The relay now drops a completely unsent video packet on that deadline and takes
-the latest available frame. A partially sent packet cannot be dropped without
-breaking TCP framing, so partial-send deadlines and socket errors still close
-the session. Input freshness and release checks remain enabled. Update and
-rebuild the relay to use this change; updating only the GUI is not sufficient.
+That TCP workaround is historical. UDP v3 expires overdue media without
+closing an otherwise live session. HEVC then requires a fresh reference point.
+Input freshness and release checks remain enabled. Update both applications;
+old TCP logs are not evidence about the current UDP path.
 
 The user subsequently reported green video after reconnecting without exiting
 the updated GUI. The earlier texture allocation fix therefore does not establish
@@ -510,9 +552,10 @@ an MJPEG stream; the displayed resolution belongs to the decoded video.
 | `HID(x,y)` | Most recent absolute coordinates accepted by the control queue, in the CH9329 range 0–4095. |
 | `d(dx,dy)` | Most recent accepted relative movement report. If movement was split into reports, this is the last report, not their sum. |
 
-Bandwidth is sampled about once per second. It includes the 12-byte relay packet
-header for complete packets, but excludes TCP/IP headers, retransmissions and
-incomplete packets. `--` means unavailable, including local capture or the first
+Bandwidth is sampled about once per second. It counts accepted UDP datagrams,
+including the 32-byte envelope, parity and control retransmissions, but excludes
+IP/UDP headers. These are client-lifetime totals; the sender's `paced-bytes`
+counts packets pulled from the pacer, not confirmed socket delivery. `--` means unavailable, including local capture or the first
 sampling interval. Reconnecting resets the displayed rate baseline.
 
 Accepted coordinates are not device acknowledgements. Pointer values clear on
@@ -550,12 +593,11 @@ next packet. A reply delayed beyond the server's 250 ms heartbeat lease could
 therefore disconnect a healthy GUI, even in Preview. A loopback test reproduced
 this dependency with a fragmented status reply delayed by 280 ms.
 
-The client now reads status independently of its heartbeat sender. The 250 ms
-GUI freshness and server lease limits are unchanged. Stale status disables input
-and clears queued events; a later reply does not restore the old input authority.
-The existing 350 ms status-read deadline still applies. Rebuild and restart the
-Mac GUI to use this change. This fixes the reproduced scheduling dependency,
-not every possible reason for delayed network traffic.
+This status-read incident was on the old TCP transport. UDP v3 services raw
+challenges independently of KCP status and input messages. Stale status disables
+input; a later reply alone cannot restore authority. Fresh video and exact
+current-state acknowledgement are also required. The old 350 ms TCP read
+deadline does not apply to UDP v3.
 
 The status bar uses one line. `LAN` identifies remote mode; the status dot is
 green when video is fresh and control is ready, and amber otherwise. Hover for
@@ -570,12 +612,13 @@ are rounded to whole logical pixels. HID coordinates are integers.
 
 ### Background Preview
 
-Pausing GUI progress no longer closes an otherwise healthy relay session solely
-because the GUI is inactive. The client sends inactive transport heartbeats.
-The 250 ms input freshness limit still applies: a stalled captured GUI loses
-input authority, queued input is cleared and release is requested. Returning to
-the window does not restore the old capture; click again to take control.
-Network, video and status failures can still end the session.
+Pausing GUI progress does not close an otherwise live relay session solely
+because the GUI is inactive. The 250 ms input freshness limit still applies:
+a stalled captured GUI loses input authority, queued input is cleared and
+release is requested. Focus loss cancels capture intent, so returning after
+focus loss requires another activation click. A network-only interruption can
+resume retained focused intent after fresh video and current-state ACKs.
+Peer liveness expires after 10 seconds; a new session starts in Preview.
 
 ### Jetson hardware encoding investigation
 

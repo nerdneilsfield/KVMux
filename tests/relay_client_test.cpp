@@ -95,7 +95,23 @@ void hevc_test(const char* path) {
     kvmux::relay::RelayServer server(capture, sink, [units](CodecBackend, std::string&) { return std::make_unique<FixtureEncoder>(units); });
     kvmux::relay::ServerOptions options; options.bind_address = "127.0.0.1"; options.control_port = options.video_port = 0;
     options.codec = VideoCodec::hevc;
-    std::string error; assert(server.start(options,error));
+    std::string error;
+    options.transport_bytes_per_second = 1;
+    assert(server.start(options,error));
+    {
+        kvmux::relay::ClientOptions blocked_options;
+        blocked_options.control_port = server.control_port(); blocked_options.video_port = server.video_port();
+        GuiFixture blocked(blocked_options);
+        assert(blocked.wait([&] { return server.snapshot().last_reason == kvmux::relay::MediaReason::frame_exceeds_rate_budget; }));
+        blocked.run_for(200ms);
+        assert(!blocked.session.snapshot().video_fresh);
+        assert(server.snapshot().pacer.rejected_frames > 0);
+        assert(std::string(kvmux::relay::media_reason_name(server.snapshot().last_reason)) == "frame_exceeds_rate_budget");
+    }
+    server.stop();
+    options.transport_bytes_per_second = 12'000'000;
+    assert(server.start(options,error)); // New generation and fresh IDR, no in-session configure.
+
     kvmux::relay::ClientOptions client_options; client_options.control_port = server.control_port(); client_options.video_port = server.video_port();
     UdpProxy proxy(client_options);
     client_options = proxy.options(); client_options.decoder_backend = CodecBackend::ffmpeg_software;
@@ -105,11 +121,22 @@ void hevc_test(const char* path) {
     gui.activate();
     assert(gui.client->video_snapshot().codec == VideoCodec::hevc);
     assert(proxy.last_presented > 0 && proxy.last_presented < capture.sequence * 10);
+    assert(gui.wait([&] { return server.snapshot().feedback_samples >= 2; }));
+    const auto before_loss = server.snapshot();
     const auto recovered = gui.client->video_snapshot().recoveries;
     proxy.drop_media_sequence = proxy.last_media_sequence + 3;
     assert(gui.wait([&] { return gui.client->video_snapshot().recoveries > recovered; }));
     assert(gui.wait([&] { return gui.session.snapshot().input_state == InputState::captured; }));
-    gui.run_for(100ms);
+    assert(gui.wait([&] {
+        const auto sender = server.snapshot();
+        return sender.feedback.lost_frames > before_loss.feedback.lost_frames &&
+            sender.admission_interval > sender.nominal_interval;
+    })); // Actual receiver -> KCP -> server policy, not a policy-only fixture.
+    assert(gui.client->video_snapshot().media.lost_frames > 0);
+    const auto slowed = server.snapshot();
+    gui.run_for(600ms);
+    const auto admitted = server.snapshot().source_admissions - slowed.source_admissions;
+    assert(admitted > 0 && admitted <= static_cast<std::uint64_t>(600000 / slowed.admission_interval.count()) + 2);
     // A forged/stale GUI ID must not move the proof high-water to that value.
     gui.client->video_presented(gui.client->capture_snapshot().generation, 99999999);
     gui.run_for(80ms); assert(proxy.last_presented < 99999999);

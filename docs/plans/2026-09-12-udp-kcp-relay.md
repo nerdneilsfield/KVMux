@@ -641,3 +641,118 @@ Full-suite execution exposed a previous-cancel/new-macro intent race; implementa
 worker fixed generation/admission ordering and added actual serial Host-macro and
 relative-mode synchronization assertions. Final full-suite result/commit pending;
 do not classify this task complete from earlier targeted passes.
+
+T3c completed and locally committed. Final exact-tree native macos-debug full
+build and20/20 CTest passed (33.63s). Real UDP proxy blackout100/300/800/2000ms,
+same-session/no-reclick held-state convergence, stale action fencing, focus/Host
+cancellation, delayed serial ACK, HEVC reference recovery/capture-ID mapping,
+slow encoder/control independence, wrong-source/tuple rejection, handshake loss,
+limited-rate video and native OpenGL/ImGui tests passed. Old TCP runtime and wire
+removed. Synthetic CaptureSource/SerialIo are not real target input acceptance.
+T4 discovery pending: final parameters/diagnostics/docs, required load behavior,
+Linux native and isolated cross-host evidence. No push performed.
+
+## T4 remaining implementation and acceptance
+
+## Scope decision
+
+The existing plan requires feedback consumption and T4 adaptive bitrate/source-rate tuning (T2 Sender and pacing API), not a new congestion-control framework or mandatory dynamic codec API. Existing pre-encode credit and fixed MediaPacer satisfy bounded offered-load admission, but **do not finish T4 adaptation**: they depend only on local pacing/output occupancy and do not react to receiver feedback. They cannot make an oversized HEVC IDR fit the fixed 100ms budget.
+
+Smallest compliant choice: receiver-feedback-driven source admission rate, before encoding/serialization, preserving all VideoEncoder methods. Apply bounded reduction after new loss/age/capacity/gap pressure and gradual recovery on sustained healthy samples; never treat cumulative counters as per-sample losses. Keep fixed transport cap as ceiling. Tune source rate only, do not claim codec bitrate changed or bandwidth estimation. Explicitly report persistent frame_exceeds_rate_budget and advice to lower configured HEVC bitrate or raise cap. MJPEG admission cannot shrink an individual JPEG. Plan explicitly acknowledges this limitation. Exact sample window, step sizes, minimum/maximum interval and recovery hysteresis remain design choices to record before readiness; no numbers are silently authorized by this report.
+
+Actual codec bitrate feedback is absent. It is not necessary if parent selects the source-rate option already in the plan. If parent instead chooses bitrate reconfiguration: configure resets encoded_sequence to 1, while reset preserves it, and current negotiated media generation is fixed for session. Reconfigure under unchanged generation can retire fresh frames as old. Therefore do NOT casually call configure with a new bitrate, add a backend setter, or renumber dropped AUs. This would be a larger contract change than source admission tuning.
+
+## Current wiring and exact edits needed
+
+- src/network/relay_server.hpp: ServerOptions.transport_bytes_per_second exists, uint64, default 12,000,000. Only nonzero checked in RelayServer::start. No server snapshot API.
+- src/app/relay_main.cpp: --bitrate exists (bits/s); --transport-rate does not. Numeric parser currently uses int. Add a named transport-cap option with explicit bytes/s unit, nonzero/overflow validation before device enumeration, help and startup output. Distinguish encoder bitrate from UDP media budget. Existing help incorrectly says LAN TCP.
+- src/network/relay_server.cpp: constructs MediaPacer from cap at establishment; grants credit only with empty pacer/no pending datagram/no offer; media worker polls encoder and pulls latest capture before conversion. One ordered HEVC output slot. This is correct place for a tiny next-source-admission deadline; keep codec polling/draining independent so delayed AUs are not stranded. Network-owner receives feedback and publishes only bounded/latest admission settings to worker under existing mutex, not codec calls from network thread.
+- src/network/relay_client.cpp: MediaReceiver feedback events become latest optional wire::MediaFeedback, reliably submitted through KCP. RefreshRequest is likewise wired. Server reliable dispatch handles Cancel/Sync/Edge/RefreshRequest but has NO MediaFeedback branch: feedback is decoded and discarded. Add current-generation gate and delta tracking; first sample establishes baseline, reset at session establishment/expiry, ignore regressed counters rather than unsigned underflow. No per-peer map or new queue.
+- src/network/relay_wire.hpp/.cpp: MediaFeedback already carries generation, cumulative frame/loss/recovery counters and waiting_idr. No wire expansion needed for source tuning.
+- src/network/udp_media.hpp/.cpp: MediaStats and MediaPacerStats exist, but sender reason is only numeric debug output and receiver stats are not exposed in GUI. MediaPacerStats.sent_bytes charges pulled packets, not verified successful socket delivery: label accurately, especially EAGAIN expiry.
+- src/network/relay_client.hpp/.cpp: ClientVideoSnapshot contains only codec/backend/hardware fields, recoveries and error. Add bounded current-session media stats/last named recovery reason for diagnostics using existing mutex snapshot mechanism.
+- src/network/relay_server.hpp/.cpp and src/app/relay_main.cpp: expose or log configured cap, effective source admission, received feedback deltas/counters and named sender rejection/recovery reason. Prefer change/periodic logging over per-datagram logs. A small snapshot fits existing ownership; no metrics subsystem.
+- src/app/main.cpp Diagnostics window near current Decoder recoveries field: add UDP-v3/KCP identity, receiver loss/XOR/age/capacity/gap/waiting-IDR and last recovery reason. Preserve single-line status-bar layout. Server tuning state need not be invented as new remote wire fields: show server-local state in relay logs, receiver-local state in GUI.
+- src/support/config.hpp/.cpp, tests/config_test.cpp: retain saved capture/serial/host/ports/decoder selections; transport cap belongs to server CLI, which currently has no persisted server configuration. No new protocol selector, TCP fallback, old-schema migration, or unnecessary GUI cap knob. Verify existing round-trip tests, rather than invent a config version requirement.
+
+## Tests and smallest sequential units
+
+Start ONLY after T3c passing commit.
+
+1. T4a: feedback-driven pre-encode source admission + CLI cap + diagnostics, with focused tests and current usage documentation in the same coherent commit. Use tests/relay_server_test.cpp and tests/relay_recovery_test.cpp, current tests/relay_integration_fakes.hpp. Add deterministic clock-driven policy tests only if needed for stable timing (a small internal helper, not a framework). Cover loss deltas slowing raw admission, healthy recovery, wrong generation/regressed counters ignored, no repeated reduction from same cumulative sample, bounded latest source/output, low-cap oversized reason, HEVC sequence/reference recovery unchanged. The actual relay test must show feedback reaching and changing sender admission, not just a pure helper test. CLI invalid zero/overflow and --help should run without opening hardware. CMakeLists.txt only if registering new tests.
+
+Commands:
+```
+cmake --preset macos-debug
+cmake --build --preset macos-debug -j 8
+ctest --preset macos-debug -R '^(relay_server|relay_client|relay_recovery|relay_wire|relay_session|udp_media|udp_kcp|config|input_router)$' --output-on-failure
+ctest --preset macos-debug --output-on-failure
+build/macos-debug/kvmux-relay --help
+cmake --preset macos-release
+cmake --build --preset macos-release -j 8
+```
+CLI added-option checks need final spelling before exact commands. No --serve test that can reach real capture/serial enumeration without a guaranteed early parse error.
+
+2. T4b: native Linux/headless and isolated cross-host synthetic acceptance; update acceptance/build/design documentation and plan with actual results, then commit. Do not defer the passing T4a commit while waiting for remote availability. Native Linux commands (on Linux, not a forced host setting on macOS):
+```
+cmake --preset linux-debug-headless
+cmake --build --preset linux-debug-headless -j 8
+ctest --preset linux-debug-headless --output-on-failure
+```
+Backend ON/OFF choices must match real installed dependencies and be recorded. Current presets exist for these exact names; GUI OFF avoids SDL/ImGui/glad/OpenGL. No native Linux execution was performed in discovery.
+
+## Cross-host synthetic reuse
+
+/tmp/kvmux-hevc-e2e/probe.cpp and /tmp/kvmux-hevc-e2e-report.md exist. Old probe uses synthetic NV12 1920x1080, FakeSerial, actual RelayServer/RelayClient/VideoPipeline, two 120-frame sessions, server bounded 60s/client 15s per session. Old source/CMakeLists.txt appended kvmux_hevc_e2e_probe linked to kvmux::core. Report records jetson-hy / 192.168.14.32 and ports18700/18701, but availability and free ports are UNKNOWN now. Do not assume old builds/source trees contain UDP. Never execute old binaries as v3 evidence.
+
+Rebuild against a fresh archive of final current tree; keep temporary probe source/CMake additions in an isolated /tmp source copy. Update video_presented(last) to video_presented(frame.generation, frame.sequence), as current API requires. Current server/client API handles UDP internally, so no second transport probe is needed. Inspect pipeline generation startup/restart against current relay_client_test before reuse. Add MJPEG mode using current FakeCapture and red16.jpg fixture, rather than claiming HEVC qualifies both. If using current integration fake, do not accidentally start an embedded loopback server in cross-host client mode. Reserve/check UDP ports, not TCP only; record fresh-generation reconnect and increasing local traffic totals (totals persist across restart). Keep synthetic capture/serial and bounded deadlines. No hardware capture, actual CH9329, user relay stop, tc/netem or network-wide interruption. Old /tmp/kvmux-reconnect-probe.cpp is a GL upload test, NOT a network reconnect fixture despite its filename.
+
+## Stale documentation inventory
+
+- README.md line13: unencrypted TCP claim.
+- docs/lan-relay.md: lines7 dual TCP,124 TCP firewall,155 protocol v2,205-213 TCP queues/test claims,383 listening TCP wording,487 TCP framing/deadline explanation,514 traffic excludes retransmissions/TCP headers. Replace current-behavior claims with v3 two-server-UDP-port/one-client-socket, reliable KCP controls/raw freshness exceptions, bounded media/FEC, 250ms input vs10s session, recovery intent, transport cap units, current counters. Old historical failures around463 can remain explicitly historical, not portrayed as current.
+- docs/acceptance.md: line14 obsolete dev preset, line84 old LAN TCP hardware/synthetic evidence. Preserve as dated prior evidence and add new UDP results; do not relabel old TCP logs as v3 acceptance.
+- docs/building.md: presets already current; update relevant test/backend/native qualification sections only.
+- docs/design/kvm-technical-design-v1.md: historical design rather than silently rewriting all v1. Link current v3 transport/state contract or clearly mark superseded transport sections if any; no need to rewrite unrelated capture/render design.
+- docs/hardware-validation.md: preserve real-device limitations, add no unperformed hardware claims.
+- Parent-owned docs/plans/2026-09-12-udp-kcp-relay.md: reconcile stale summary statuses and record precise T4 policy before implementation, then acceptance outcomes.
+
+Unknowns: T3c final diff/test outcome, desired source-rate policy constants, current remote availability/dependencies/free UDP ports, effectiveness on real moving high-detail video, Apple hardware-session verification. Source tuning cannot fix permanently oversized frames; document rather than falsely assert useful video at arbitrary caps.
+
+### T4a selected executable policy
+
+Status: in_progress. T3c committed, final20/20 accepted. No parallel implementation.
+Server source-admission interval starts at the capture mode's nominal interval.
+Use one current-session feedback baseline, accept only currentgeneration and
+nonregressing cumulative counters. Evaluate deltas at most once per500ms; pressure
+is any positive lost/age/capacity/gap delta or waiting-IDR with no newly completed
+frames. Repeated identical cumulative feedback cannot repeatedly reduce the rate.
+On new pressure multiply interval by1.25 capped at max(nominal,200ms). After2s of
+healthy new completions with no new pressure, reduce interval by10 percent no more
+than once persecond, floored at nominal. Missing feedback for1s after initial
+feedback: one reduction peroutage, no perpetual compounding without evidence;
+reset outage latch on newer progress. This controls source admission only, never
+codec output polling, raw challenges, KCP updates or user input. No bandwidth
+estimator or claim of dynamic encoded bitrate is introduced.
+
+Expose --transport-rate BYTES_PER_SECOND, positive uint64 in bounded practical
+range1..1,000,000,000; rejectzero/overflow/malformed at parse before devices open.
+Default remains12,000,000. Startup/help distinguish this UDP envelope+payload+FEC
+cap from --bitrate encoder bits/s and excludeIP/UDP headers. Add current sender
+snapshot for feedback/admission interval/rejectionreason, and receivermedia stats
+in existingDiagnostics only; single-linebarunchanged. Use namedMediaReason labels.
+
+Persistent frame_exceeds_rate_budget reports blocked reason, not restoredvideo.
+Document lower --bitrate or higher --transport-rate followed by a new session;
+no in-session encoderconfigure, sequence reset or hidden renumbering. Verify a
+newsessionwithsuitablecap restoresfreshIDR after an intentionally impossiblecap.
+This is not a promise to sustain arbitrary resolution/motion at arbitrarycap.
+
+T4a owns relayserver/client snapshot+feedback/admission, relaymain CLI, mainGUI
+Diagnostics, tests and relevant README/lan docs. Parent owns thisplan. May add a
+small deterministic policy helper only if required for time-basedchecks. Existing
+realrelaytest must show feedback actuallychanges admission; helpertestaloneisnot
+acceptance. Run discoverycommands fullDebug/Release and CLI invalidchecks
+`build/macos-debug/kvmux-relay --transport-rate 0` and overflow (expectnonzero
+beforehardware). No realdevice/remote/push. Inspectcommitpassingunit immediately,
+then T4b isolatednative/crosshost qualification. Include parentplanunchanged.

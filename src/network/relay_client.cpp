@@ -183,7 +183,7 @@ struct RelayClient::Impl {
                 } else if (action.kind == SessionAction::Kind::established) {
                     kcp = std::make_unique<KcpChannel>(session.tuple().conversation);
                     receiver = std::make_unique<MediaReceiver>(session.welcome().codec, session.welcome().generation);
-                    { std::lock_guard lock(mutex); generation = session.welcome().generation; video.codec = session.welcome().codec; }
+                    { std::lock_guard lock(mutex); generation = session.welcome().generation; video.codec = session.welcome().codec; video.media = {}; video.last_recovery_reason = MediaReason::none; }
                     if (session.welcome().codec == VideoCodec::hevc) decoder_worker = std::thread([this] { decoder_loop(); });
                 } else if (action.kind == SessionAction::Kind::expired) {
                     if (closing) stopped = true;
@@ -195,6 +195,10 @@ struct RelayClient::Impl {
         };
         auto media_events = [&](std::vector<MediaEvent> batch) {
             for (auto& event : batch) {
+                { std::lock_guard lock(mutex);
+                    video.media = receiver->stats();
+                    if (event.reason != MediaReason::none) video.last_recovery_reason = event.reason;
+                }
                 if (event.kind == MediaEvent::Kind::reset) {
                     std::lock_guard lock(mutex);
                     ++marker; ++capture.generation;

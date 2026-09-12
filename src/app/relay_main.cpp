@@ -31,13 +31,15 @@ void print_help(std::ostream& out) {
            "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
            "       [--codec mjpeg|hevc] [--encoder auto|jetson|software] [--bitrate 8000000]\n"
+           "       [--transport-rate 12000000] (UDP envelope+payload+FEC bytes/s; excludes IP/UDP headers)\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
            "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including 59.94/29.97),\n"
            "then descending pixel area, width, height and fps; ties use first index.\n"
            "HEVC requires native and delivered raw video. Auto tries hardware, then CPU.\n"
            "Explicit choices never fall back. Bitrate is in bits/s.\n"
-           "Unauthenticated LAN TCP: trusted networks only.\n";
+           "Transport rate: 1..1000000000 bytes/s. Encoder bitrate: bits/s (not transport cap).\n"
+           "Unauthenticated LAN UDP v3 / KCP control: trusted networks only.\n";
 }
 
 volatile std::sig_atomic_t interrupted=0;
@@ -61,6 +63,12 @@ int serve(int argc,char** argv) {
             else if(value=="jetson")options.encoder_backend=kvmux::CodecBackend::jetson_gstreamer;
             else if(value=="software")options.encoder_backend=kvmux::CodecBackend::ffmpeg_software;
             else throw std::runtime_error("--encoder must be auto, jetson, or software");
+        } else if (key=="--transport-rate") {
+            std::uint64_t number{};
+            const auto result=std::from_chars(value.data(),value.data()+value.size(),number);
+            if(result.ec!=std::errc{}||result.ptr!=value.data()+value.size()||!number||number>1'000'000'000)
+                throw std::runtime_error("--transport-rate must be 1..1000000000 bytes/s");
+            options.transport_bytes_per_second=number;
         } else {
             int number{};const auto result=std::from_chars(value.data(),value.data()+value.size(),number);
             if(result.ec!=std::errc{}||result.ptr!=value.data()+value.size()||number<0)throw std::runtime_error("Invalid numeric option");
@@ -85,6 +93,8 @@ int serve(int argc,char** argv) {
               << " native-format=" << selected.device_format_name
               << " delivered-format=" << static_cast<int>(selected.delivered_format)
               << " codec=" << (options.codec==kvmux::VideoCodec::hevc ? "hevc" : "mjpeg")
+              << " encoder-bitrate-bits/s=" << options.bitrate
+              << " UDP-media-cap-bytes/s=" << options.transport_bytes_per_second
               << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
     if (!serial_request)
         std::cout << "USB adapter VID/PID match only; CH9329 handshake not yet verified.\n";
@@ -95,8 +105,9 @@ int serve(int argc,char** argv) {
     kvmux::relay::RelayServer server(*capture,sink);std::string error;
     if(!server.start(options,error))throw std::runtime_error(error);
     std::signal(SIGINT,interrupt);std::signal(SIGTERM,interrupt);
-    std::cout<<"Listening on "<<options.bind_address<<":"<<server.control_port()<<" (control), "<<server.video_port()<<" (video). Trusted LAN only.\n";
+    std::cout<<"Listening on "<<options.bind_address<<":"<<server.control_port()<<" (control), "<<server.video_port()<<" (video), UDP v3 / KCP. Cap includes envelope+payload+FEC, excludes IP/UDP headers. Trusted LAN only.\n";
     std::string last_status;
+    auto media_log_at = std::chrono::steady_clock::time_point{};
     while(!interrupted) {
         if (spdlog::should_log(spdlog::level::debug)) {
             const auto capture_status = capture->snapshot();
@@ -105,6 +116,18 @@ int serve(int argc,char** argv) {
                 " error=" + capture_status.error + " control-state=" +
                 std::to_string(static_cast<int>(control_status.state)) + " error=" + control_status.error;
             if (status != last_status) { spdlog::debug("Relay {}", status); last_status = status; }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - media_log_at >= std::chrono::seconds(2)) {
+            const auto media = server.snapshot();
+            spdlog::info("UDP media cap={} bytes/s source-interval={} us feedback={} completed={} lost={} age={} capacity={} gap={} paced-bytes={} reason={}",
+                media.transport_bytes_per_second, media.admission_interval.count(), media.feedback_samples,
+                media.feedback.received_frames, media.feedback.lost_frames, media.feedback.age_losses,
+                media.feedback.capacity_losses, media.feedback.gap_losses, media.pacer.sent_bytes,
+                kvmux::relay::media_reason_name(media.last_reason));
+            if (media.last_reason == kvmux::relay::MediaReason::frame_exceeds_rate_budget)
+                spdlog::warn("Video blocked: frame_exceeds_rate_budget. Lower --bitrate (HEVC) or raise --transport-rate, then start a new session.");
+            media_log_at = now;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

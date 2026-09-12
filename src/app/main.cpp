@@ -460,6 +460,7 @@ int main(int argc, char** argv) {
             ImGui::Text("Decoded video resolution: %s", resolution.c_str());
             if (remote_client) {
                 const auto video = remote_client->video_snapshot();
+                ImGui::TextUnformatted("Relay transport: UDP v3 / KCP control");
                 ImGui::Text("Relay codec: %s", video.codec == VideoCodec::hevc ? "H.265" : "MJPEG");
                 ImGui::Text("Decoder backend: %s", video.decoder_backend
                     ? decoder_backend_label(*video.decoder_backend) : "-- (not active)");
@@ -468,6 +469,14 @@ int main(int argc, char** argv) {
                 if (!video.decoder_diagnostic.empty())
                     ImGui::TextWrapped("Decoder detail: %s", video.decoder_diagnostic.c_str());
                 ImGui::Text("Decoder recoveries: %llu", static_cast<unsigned long long>(video.recoveries));
+                const auto& media = video.media;
+                ImGui::Text("Media completed: %llu  lost: %llu  XOR fragments/frames: %llu/%llu",
+                    static_cast<unsigned long long>(media.received_frames), static_cast<unsigned long long>(media.lost_frames),
+                    static_cast<unsigned long long>(media.recovered_fragments), static_cast<unsigned long long>(media.recovered_frames));
+                ImGui::Text("Media age/capacity/gap: %llu/%llu/%llu  waiting IDR: %s",
+                    static_cast<unsigned long long>(media.age_losses), static_cast<unsigned long long>(media.capacity_losses),
+                    static_cast<unsigned long long>(media.gap_losses), media.waiting_idr ? "yes" : "no");
+                ImGui::Text("Media recovery reason: %s", relay::media_reason_name(video.last_recovery_reason));
                 if (!video.error.empty()) ImGui::TextWrapped("Decoder error: %s", video.error.c_str());
             }
             int logical_width{}, logical_height{}, pixel_width{}, pixel_height{};

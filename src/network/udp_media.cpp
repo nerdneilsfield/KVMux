@@ -8,6 +8,26 @@
 #include <map>
 
 namespace kvmux::relay {
+const char* media_reason_name(MediaReason reason) noexcept {
+    switch (reason) {
+    case MediaReason::none: return "none";
+    case MediaReason::malformed: return "malformed";
+    case MediaReason::conflict: return "conflict";
+    case MediaReason::invalid_body: return "invalid_body";
+    case MediaReason::age: return "age";
+    case MediaReason::capacity: return "capacity";
+    case MediaReason::gap: return "gap";
+    case MediaReason::ingress_overflow: return "ingress_overflow";
+    case MediaReason::decoder_failure: return "decoder_failure";
+    case MediaReason::sender_abort: return "sender_abort";
+    case MediaReason::refresh_point: return "refresh_point";
+    case MediaReason::sender_deadline: return "sender_deadline";
+    case MediaReason::source_stale: return "source_stale";
+    case MediaReason::frame_exceeds_rate_budget: return "frame_exceeds_rate_budget";
+    case MediaReason::skipped_access_unit: return "skipped_access_unit";
+    }
+    return "unknown";
+}
 namespace {
 using namespace std::chrono_literals;
 constexpr std::size_t payload = kMediaPayloadBytes;

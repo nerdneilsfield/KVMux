@@ -1,5 +1,6 @@
 #pragma once
 #include "control/control_sink.hpp"
+#include "network/udp_media.hpp"
 #include "video/codec/video_codec.hpp"
 #include "video/capture/capture_source.hpp"
 #include <memory>
@@ -17,6 +18,8 @@ struct ClientVideoSnapshot {
     bool hardware_verified{};
     std::string decoder_diagnostic;
     std::uint64_t recoveries{};
+    MediaStats media{};
+    MediaReason last_recovery_reason{MediaReason::none};
     std::string error;
 };
 // Per-client lifetime totals for accepted UDP datagrams, including the 32-byte

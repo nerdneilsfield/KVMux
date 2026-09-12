@@ -9,6 +9,11 @@ video and forwards captured input.
 - [Hardware identification and validation](docs/hardware-validation.md)
 - [Acceptance evidence and remaining checks](docs/acceptance.md)
 
-The LAN relay currently requires native MJPEG and uses unauthenticated,
-unencrypted TCP for a controlled network. Hardware validation is incomplete;
-software tests are not a claim that every platform/device combination works.
+The LAN relay sends native MJPEG or encodes raw capture as H.265. It uses two
+server UDP ports, KCP control, and bounded media with XOR recovery. It has no
+authentication or encryption; use a trusted LAN only. `--transport-rate` caps
+UDP media bytes/s separately from the H.265 `--bitrate` in bits/s. Receiver
+feedback slows source admission; it does not change codec bitrate at runtime.
+See the [LAN guide](docs/lan-relay.md#transport-cap-and-source-admission) for
+limits and blocked-frame recovery. Hardware validation is incomplete; software
+tests do not establish that every platform/device combination works.

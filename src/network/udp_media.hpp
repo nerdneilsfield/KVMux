@@ -25,6 +25,7 @@ enum class MediaReason {
     ingress_overflow, decoder_failure, sender_abort, refresh_point,
     sender_deadline, source_stale, frame_exceeds_rate_budget, skipped_access_unit
 };
+[[nodiscard]] const char* media_reason_name(MediaReason) noexcept;
 struct MediaStats {
     std::uint64_t received_frames{}, recovered_fragments{}, recovered_frames{}, lost_frames{};
     std::uint64_t age_losses{}, capacity_losses{}, gap_losses{}, unrecoverable{};

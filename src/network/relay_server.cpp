@@ -1,5 +1,6 @@
 #include "network/relay_server.hpp"
 #include "network/relay_session.hpp"
+#include "network/source_admission.hpp"
 #include "network/kcp_channel.hpp"
 #include "network/media_codec_wire.hpp"
 #include "network/relay_selection.hpp"
@@ -47,6 +48,7 @@ struct RelayServer::Impl {
     std::uint64_t media_generation{};
     bool credit{}, keyframe{};
     std::string media_error;
+    ServerSnapshot snapshot;
 
     Impl(CaptureSource& c, Ch9329ControlSink& s, EncoderFactory f)
         : capture(c), sink(s), encoder_factory(std::move(f)) {}
@@ -57,11 +59,13 @@ struct RelayServer::Impl {
         std::unique_ptr<SwsContext, decltype(&sws_freeContext)> scaler(nullptr, sws_freeContext);
         std::uint64_t generation{};
         bool waiting_idr = true;
+        Clock::time_point next_source{};
         auto reset_codec = [&] { if (codec) { codec->shutdown(); codec.reset(); } };
         try {
             while (!stopping) {
                 std::uint64_t wanted{};
                 bool work{}, refresh{};
+                std::chrono::microseconds interval;
                 {
                     std::unique_lock lock(media_mutex);
                     media_wake.wait_for(lock, 2ms, [&] { return stopping || generation != media_generation || keyframe; });
@@ -69,9 +73,10 @@ struct RelayServer::Impl {
                     wanted = media_generation;
                     refresh = std::exchange(keyframe, false);
                     work = credit && !offer;
+                    interval = snapshot.admission_interval;
                 }
                 if (generation != wanted) {
-                    reset_codec(); generation = wanted; waiting_idr = true;
+                    reset_codec(); generation = wanted; waiting_idr = true; next_source = {};
                     if (generation && options.codec == VideoCodec::hevc) {
                         std::string error;
                         codec = encoder_factory(options.encoder_backend, error);
@@ -114,8 +119,12 @@ struct RelayServer::Impl {
                     }
                     if (result.status != CodecStatus::again) throw std::runtime_error(result.message);
                 }
+                // Drain delayed codec output above even when source admission is slow.
+                if (Clock::now() < next_source) continue;
                 auto sample = capture.take_latest_sample();
                 if (!sample || Clock::now() - sample->arrival >= 250ms) { std::this_thread::sleep_for(2ms); continue; }
+                next_source = Clock::now() + interval;
+                { std::lock_guard lock(media_mutex); ++snapshot.source_admissions; }
                 if (!codec) {
                     auto bytes = encode_mjpeg(*sample);
                     if (bytes.empty()) throw std::runtime_error("Invalid MJPEG capture");
@@ -164,6 +173,7 @@ struct RelayServer::Impl {
         ServerSession session(options.codec);
         std::unique_ptr<KcpChannel> kcp;
         std::unique_ptr<MediaPacer> pacer;
+        std::optional<SourceAdmission> admission;
         udp::Endpoint peer;
         std::optional<wire::StateAck> ack;
         std::optional<wire::Status> status;
@@ -189,6 +199,13 @@ struct RelayServer::Impl {
                 case SessionAction::Kind::established:
                     kcp = std::make_unique<KcpChannel>(session.tuple().conversation);
                     pacer = std::make_unique<MediaPacer>(options.codec, session.welcome().generation, options.transport_bytes_per_second, Clock::now());
+                    { std::lock_guard lock(media_mutex);
+                        const auto nominal = snapshot.nominal_interval;
+                        snapshot = {}; snapshot.nominal_interval = snapshot.admission_interval = nominal;
+                        snapshot.generation = session.welcome().generation;
+                        snapshot.transport_bytes_per_second = options.transport_bytes_per_second;
+                        admission.emplace(snapshot.generation, nominal);
+                    }
                     history.clear(); sending.reset(); pending.reset(); pending_proof.reset(); ack.reset(); status_at = {};
                     control_output.clear(); control_index = 0;
                     revoke();
@@ -198,9 +215,15 @@ struct RelayServer::Impl {
                 case SessionAction::Kind::revoke_input: revoke(); break;
                 case SessionAction::Kind::state_ack: ack = action.ack; break;
                 case SessionAction::Kind::expired:
+                    admission.reset();
                     revoke(); kcp.reset(); pacer.reset(); pending.reset(); pending_proof.reset(); sending.reset(); history.clear(); ack.reset(); status.reset();
                     control_output.clear(); control_index = 0;
-                    { std::lock_guard lock(media_mutex); media_generation = 0; offer.reset(); credit = false; }
+                    { std::lock_guard lock(media_mutex);
+                        media_generation = 0; offer.reset(); credit = false;
+                        const auto nominal = snapshot.nominal_interval;
+                        snapshot = {}; snapshot.nominal_interval = snapshot.admission_interval = nominal;
+                        snapshot.transport_bytes_per_second = options.transport_bytes_per_second;
+                    }
                     media_wake.notify_one();
                     break;
                 default: break;
@@ -295,6 +318,10 @@ struct RelayServer::Impl {
                     if (gate == InputGate::allowed) actions(session.edge_submitted(*value,
                         sink.submit({value->epoch, value->sequence, now, value->payload}), now));
                     else if (gate == InputGate::recovery_required) actions(session.edge_submitted(*value, kvmux::SubmitResult::not_ready, now));
+                } else if (auto value = std::get_if<wire::MediaFeedback>(&*message)) {
+                    if (admission && admission->feedback(value->generation, value->stats, now)) {
+                        std::lock_guard lock(media_mutex); ++snapshot.feedback_samples;
+                    }
                 } else if (auto value = std::get_if<wire::RefreshRequest>(&*message)) {
                     if (value->generation == session.welcome().generation) request_refresh();
                 }
@@ -325,11 +352,25 @@ struct RelayServer::Impl {
             }
             if (!pacer) continue;
             now = Clock::now();
+            admission->poll(now);
+            { std::lock_guard lock(media_mutex);
+                snapshot.admission_interval = admission->interval();
+                if (admission->latest()) snapshot.feedback = *admission->latest();
+                snapshot.feedback_delta = admission->delta();
+                snapshot.pacer = pacer->stats();
+            }
+            auto record_reason = [&](MediaReason reason) {
+                std::lock_guard lock(media_mutex);
+                if (snapshot.last_reason != reason)
+                    spdlog::debug("Relay media reason={}", media_reason_name(reason));
+                snapshot.last_reason = reason;
+            };
             while (!history.empty() && (history.size() > 512 || now - history.front().arrival >= 500ms)) history.pop_front();
             auto expired = pacer->poll(now);
-            if (expired.reason != MediaReason::none) { sending.reset(); if (expired.needs_idr) request_refresh(); }
+            if (expired.reason != MediaReason::none) { record_reason(expired.reason); sending.reset(); if (expired.needs_idr) request_refresh(); }
             if (pending && now >= pending->deadline) {
                 auto result = pacer->discard(MediaReason::sender_deadline);
+                record_reason(result.reason);
                 pending.reset(); sending.reset(); if (result.needs_idr) request_refresh();
             }
             if (!pending && pacer->can_start(now)) {
@@ -338,9 +379,9 @@ struct RelayServer::Impl {
                 if (frame) {
                     Sent candidate{frame->sequence, frame->first_arrival, {}};
                     auto result = pacer->submit(std::move(*frame), now);
-                    if (result.accepted) sending = candidate;
+                    if (result.accepted) { sending = candidate; record_reason(MediaReason::none); }
                     else {
-                        spdlog::debug("Relay media admission rejected: reason={}", static_cast<int>(result.reason));
+                        record_reason(result.reason);
                         if (result.needs_idr) request_refresh();
                     }
                 }
@@ -381,8 +422,8 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
     auto& p = *impl_;
     if (p.network_worker.joinable()) { error = "Relay already running"; return false; }
     error.clear();
-    if ((options.control_port && options.control_port == options.video_port) || !options.transport_bytes_per_second) {
-        error = "UDP ports must differ and transport rate must be nonzero"; return false;
+    if ((options.control_port && options.control_port == options.video_port) || !options.transport_bytes_per_second || options.transport_bytes_per_second > 1'000'000'000) {
+        error = "UDP ports must differ and transport rate must be 1..1000000000 bytes/s"; return false;
     }
     const auto mode = p.capture.snapshot().actual_mode;
     try { select_mode(std::span<const CaptureMode>(&mode, 1), 0, options.codec); }
@@ -391,6 +432,12 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
         error = "HEVC bitrate must be 1..100000000 bits/s"; return false;
     }
     p.options = options;
+    { std::lock_guard lock(p.media_mutex);
+        p.snapshot = {};
+        p.snapshot.transport_bytes_per_second = options.transport_bytes_per_second;
+        p.snapshot.nominal_interval = p.snapshot.admission_interval = std::chrono::microseconds(
+            std::max<std::int64_t>(1, 1'000'000LL * mode.frame_rate.denominator / mode.frame_rate.numerator));
+    }
     p.control_socket = udp::Socket::bind(options.bind_address, options.control_port, error);
     if (!p.control_socket) return false;
     p.video_socket = udp::Socket::bind(options.bind_address, options.video_port, error);
@@ -408,6 +455,7 @@ void RelayServer::stop() noexcept {
     p.sink.set_control_active(false); p.sink.release_all();
     p.control_socket.reset(); p.video_socket.reset();
 }
+ServerSnapshot RelayServer::snapshot() const { std::lock_guard lock(impl_->media_mutex); return impl_->snapshot; }
 std::uint16_t RelayServer::control_port() const { return impl_->control_socket ? impl_->control_socket->local_port().value_or(0) : 0; }
 std::uint16_t RelayServer::video_port() const { return impl_->video_socket ? impl_->video_socket->local_port().value_or(0) : 0; }
 } // namespace kvmux::relay
