@@ -31,6 +31,7 @@ add_library(kvmux_core STATIC
     src/network/relay_protocol.cpp
     src/network/tcp_socket.cpp
     src/network/udp_socket.cpp
+    src/network/udp_media.cpp
     src/network/kcp_channel.cpp
     src/support/build_info.cpp
     src/support/config.cpp
@@ -191,6 +192,11 @@ if(BUILD_TESTING)
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)
+
+    add_executable(kvmux_udp_media_test tests/udp_media_test.cpp)
+    target_link_libraries(kvmux_udp_media_test PRIVATE kvmux::core)
+    add_test(NAME udp_media COMMAND kvmux_udp_media_test)
+    set_tests_properties(udp_media PROPERTIES TIMEOUT 30)
 
     add_executable(kvmux_udp_kcp_test tests/udp_kcp_test.cpp)
     target_link_libraries(kvmux_udp_kcp_test PRIVATE kvmux::core)
