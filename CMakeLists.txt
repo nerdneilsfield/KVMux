@@ -29,6 +29,8 @@ add_library(kvmux_core STATIC
     src/network/relay_server.cpp
     src/network/relay_client.cpp
     src/network/relay_protocol.cpp
+    src/network/relay_wire.cpp
+    src/network/relay_session.cpp
     src/network/tcp_socket.cpp
     src/network/udp_socket.cpp
     src/network/udp_media.cpp
@@ -192,6 +194,14 @@ if(BUILD_TESTING)
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)
     add_test(NAME input_router COMMAND kvmux_input_router_test)
+
+    add_executable(kvmux_relay_wire_test tests/relay_wire_test.cpp)
+    target_link_libraries(kvmux_relay_wire_test PRIVATE kvmux::core)
+    add_test(NAME relay_wire COMMAND kvmux_relay_wire_test)
+
+    add_executable(kvmux_relay_session_test tests/relay_session_test.cpp)
+    target_link_libraries(kvmux_relay_session_test PRIVATE kvmux::core)
+    add_test(NAME relay_session COMMAND kvmux_relay_session_test)
 
     add_executable(kvmux_udp_media_test tests/udp_media_test.cpp)
     target_link_libraries(kvmux_udp_media_test PRIVATE kvmux::core)

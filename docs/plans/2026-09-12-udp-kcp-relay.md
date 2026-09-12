@@ -317,7 +317,7 @@ session freshness; T3c relay replacement plus router intent recovery. No paralle
 implementation. T3b/T3c exact protocol remains blocked until specified below.
 
 ### T3a: Immutable serial state synchronization
-Status: in_progress. Depends on: T2. Acceptance: A4 (serial subset).
+Status: done. Depends on: T2. Acceptance: A4 (serial subset).
 Modify src/control/control_sink.hpp, serial_worker.hpp/.cpp and tests/serial_worker_test.cpp.
 New DesiredInputState: uint8 modifiers, array<uint8_t,6> keys, uint8 buttons
 (bits0..2), MouseMode mode, uint16 absolute_x/y (0..4095). No deltas/wheel.
@@ -366,3 +366,140 @@ epoch/readiness failure or explicit cancellation resets the synchronization barr
 A narrow serial-worker prerequisite moves thread launch to the constructor body,
 after all members initialize; this fixes observed construction-order UB, not a
 proven cause of the historical network timeout.
+
+T3a accepted and committed: targeted native build and serial_worker/ch9329_control
+CTest passed 2/2. Immutable two-report ACK, cancellation/epoch fencing, relative
+zero-delta synchronization, sparse keyboard slots, heartbeat expiry and serial
+stall/hard-timeout invalidation verified. Constructor thread launch now occurs
+after member initialization. Only chip command acknowledgement is established,
+not USB target readback. T3b exact wire contract is next; no push/hardware use.
+
+## T3b executable protocol and session unit
+
+## Files and transition
+
+Add src/network/relay_wire.hpp/.cpp (namespace kvmux::relay::wire) and relay_session.hpp/.cpp (namespace kvmux::relay), tests/relay_wire_test.cpp and relay_session_test.cpp; register core sources and CTests relay_wire, relay_session. Keep old relay_protocol untouched and unused by new primitives: its current TCP callers and T2 codec serialization still build. This is staged source replacement, NOT v2 negotiation or runtime fallback. T3c moves reusable encode/decode_mjpeg/hevc into media_codec_wire.hpp/.cpp (or other clearly media-only file), changes udp_media and relay callers, then deletes old TCP framing, old session/control codecs and superseded tests. Do not change kProtocolVersion in old file mid-transition. New wire accepts version3 only.
+
+## Exact outer datagram header
+
+All integers big endian; serialize fieldwise, no sizeof(struct), packing or C++ enum casts. Exactly32 bytes:
+ offset0 magic[4]='KVMX'; 4 version/u8=3; 5 kind/u8; 6 body_bytes/u16;
+ 8 session/u64; 16 client_nonce/u64; 24 conversation/u32; 28 reserved/u32=0.
+Datagram length must equal32+body_bytes and be<=1200. Kinds:1 hello,2 welcome,3 confirm,4 ready,5 busy,6 kcp,7 media,8 challenge,9 proof,10 cancel,11 cancel_ack. Unknown kind/version/reserved, extra/truncated bytes, bad per-kind lengths rejected before allocation/KCP/media dispatch. kcp bodies1..1168 additionally validated by existing KcpChannel (including inner conversation); media bodies40..1168 additionally validated by MediaReceiver. All post-welcome packets carry exact nonzero tuple(session,nonce,conversation) and must match pinned peer Endpoint. No endpoint migration. Hello/busy rules below are the only zero-session exception. IDs are pairing/fencing tokens, not authentication.
+
+## Handshake and one controller
+
+Client creates nonzero random64 nonce per attempt. Hello: session=conversation=0, nonce nonzero; body codec/u8 (0 MJPEG,1 HEVC), reserved[3]=0. One server pending OR established slot. On free hello server allocates random nonzero session/u64, conversation/u32 and generation/u64; body welcome: codec/u8,reserved[3]=0,generation/u64 (12 bytes). Pin source endpoint and nonce. Same pending hello repeats identical welcome; other hello receives busy with zero session/conv, echoed nonce and empty body, without allocation or lease refresh. Pending slot expires at exactly2s since first hello; duplicates never extend it.
+
+Confirm echoes full tuple and same12-byte welcome body. Server establishes on exact confirm, emits ready with same body; client establishes only on exact ready from configured server. Repeated confirm for established tuple repeats ready but does not extend liveness. Client retries hello/confirm each100ms, attempt deadline2s; a new attempt uses a new nonce. Client must not submit KCP/media before ready; server must not emit application traffic before confirm. Generation is negotiated independently of serial epoch, nonzero and constant for media receiver lifetime. Unknown tuple or prior attempt welcome/ready ignored. Established slot is never preempted by hello; clear it on explicit disconnect or10s freshness-probe expiry. Allocate KCP only for selected tuple (server on confirm/client on ready). Loss of ready is repaired by repeated confirm. Pending slot is one bounded object, no source-address map.
+
+## Session liveness vs execution freshness: server clock only
+
+Use explicit steady_clock::time_point in every primitive call, not system clock or transmitted monotonic timestamps. Server emits raw challenge every50ms after establishment: body challenge_id/u64 (nonzero increasing). Keep bounded ring of200 {id,issued_at}; IDs never wrap within session. Proof is raw/unordered to bypass KCP backlog: challenge_id/u64,intent_generation/u64,flags/u8,reserved[7]=0,presented_video_sequence/u64 (32 bytes). Flags bit0 capture-intent active, bit1 locally fresh presented video, all others zero. Active requires nonzero intent and nonzero presented sequence when fresh; client builds flags from CURRENT UI intent at reply time, never echoes cached active state.
+
+Server accepts proof only for issued ID, exact peer/tuple, age<10s and ID newer than latest accepted proof. Session deadline=max(existing, issued_at+10s), NOT receipt+10s. Initial session deadline=confirm_time+10s. Client liveness advances only on strictly newer valid challenge IDs, deadline=local_receive+10s (a bounded delayed burst is not input authorization). KCP ACK, video, old proof and duplicate handshake do not renew server liveness. At deadline equality expire. Never treat an idle UDP poll or input expiry as session destruction.
+
+Execution deadline can advance only with active+fresh proof, current noncanceled intent, ready/release-confirmed current serial epoch and proof age<250ms. Deadline=issued_at+250ms, not receipt+250ms. Active proof does not by itself complete synchronization. Every sync/edge also names a challenge ID and must arrive before that challenge's issue+250ms AND current execution deadline. This prevents an old KCP edge executing after a new proof reopens the lease. Expiry produces revoke-input once, invalidates barrier, discards unsent/queued uncertain actions; intent remains desired for network-only interruption. T3c calls release_all/set_control_active(false), then synchronizes latest eligible held state after fresh proof, neutral release and new epoch. No historical edge replay. Server loop must revoke explicitly at server deadline; calling sink.update_ui_heartbeat on delayed proof alone is insufficient because sink's own250ms clock would otherwise extend permission past server deadline.
+
+Cancellation raw body intent_generation/u64,reason/u8,reserved[7]=0 (16 bytes); reason1 focus,2 Host,3 explicit release,4 disconnect. Accept for current or newer generation immediately, without freshness proof, before KCP dispatch. Track maximum canceled generation; delayed proof/sync/edge at or below it cannot reenable input. Duplicate cancel idempotently repeats cancel_ack with same body; never repeatedly increments serial epoch. Cancellation ACK confirms revocation recorded, NOT physical neutral state. New capture requires strictly newer intent generation. Client sends cancellation immediately and retries each50ms until ACK/session closes; also queues same cancel payload as reliable control, bounded/coalesced one outstanding cancellation. Disconnect closes slot after revoke; raw disconnect ACK loss need not keep slot alive (client bounded local timeout). No-cancel delivery still expires execution by250ms. Server emits neutral-complete status only after actual release_confirmed of resulting epoch.
+
+## Reliable control binary messages
+
+Each KCP message begins type/u8, flags/u8=0, payload_bytes/u16 then exact payload. Total4..1024, no text/native struct serialization; reject unknown fields, noncanonical bool, unknown enum, trailing bytes. Direction validated. Session tuple belongs to envelope, not repeated inside messages. Types and payloads:
+
+1 Status (S->C): serial_epoch/u64, connection/u8 (explicit0..8 matching named disconnected/opening/monitoring/clearing/ready/stalled/reconnecting/fault/stopping), flags/u8(bit0 USB-ready,bit1 release-confirmed), reserved/u16=0, canceled_through/u64 (20). Diagnostics strings remain local/T4; no unbounded remote error string.
+2 Sync (C->S): epoch/u64,intent/u64,revision/u64,challenge/u64,edge_floor/u64,state[13] (53).
+3 StateAck (S->C): epoch/u64,intent/u64,revision/u64,edge_floor/u64,state[13] (45). ONLY emitted when AppliedInputState.known and all identifiers/state match the immutable admitted sync after both serial ACKs. edge_floor belongs to the server-held sync request because T3a AppliedInputState lacks it. Unknown state is expressed by Status/recovery, not fabricated StateAck. Do not ACK synchronize(accepted), KCP delivery or GET_INFO as application.
+4 Edge (C->S): epoch/u64,intent/u64,sequence/u64,challenge/u64,kind/u8,variant bytes below.
+5 Cancel (C->S): same16-byte body as raw cancel, same tombstone rules.
+6 RefreshRequest (C->S): generation/u64,reason/u8,reserved[7]=0 (16); reason explicit MediaReason mapping0..14 in header order; use named validation table, not implicit enum serialization.
+7 MediaFeedback (C->S): generation/u64,received_frames/u64,recovered_fragments/u64,recovered_frames/u64,lost_frames/u64,last_completed/u64,age_losses/u64,capacity_losses/u64,gap_losses/u64,unrecoverable/u64,flags/u8(bit0 waiting_idr),reserved[7]=0 (88). Cumulative current-generation values, not ACK; sender ignores wrong generation. Coalesce to latest unsent sample, <=10Hz. No adaptive controller in T3b.
+
+State[13]: modifiers/u8,keys[6]/u8,buttons/u8,mode/u8(0 absolute,1 relative),absolute_x/u16,absolute_y/u16. Coordinates0..4095 even in relative mode; relative synchronization emits zero delta/wheel. Fixed12-bit coordinates are deliberate: this is exactly T3a/chip absolute desired-state domain, not reduced edge precision. Six sparse slots allowed; zeros allowed repeatedly; nonzero unique supported usages exactly04..73,7f..82,85..87,89..8f hex; modifiers never in keys; buttons0..7.
+
+Edge variants:1 key usage/u8,pressed/u8;2 absolute x/f64,y/f64;3 relative dx/f64,dy/f64;4 button button/u8,pressed/u8,x/f64,y/f64;5 wheel steps/f64,x/f64,y/f64. f64 is IEEE754 binary64 bit pattern big endian; preserve finite doubles bit-for-bit (including signed zero), not float32, text or fixed point. Reject NaN/infinity; absolute/button/wheel coordinates0..1; button explicit0..2 (verified InputRouter emits number-1 and serial_worker uses 1<<button); pressed0/1. Key usages supported state set plus modifier usages e0..e7; no zero key edge. Relative/wheel finite doubles preserved; bounds/aggregation at existing serial queue, do not silently clamp wire. Event.timestamp is receipt-local, never transmit a host steady_clock representation.
+
+All epoch/intent/revision/sequence/challenge/generation nonzero; edge_floor may be0. Revisions and sequence increase without wrapping per intent. Sequence<=floor/last accepted is duplicate and never resubmitted. Following a successful sync, first healthy edge must equal floor+1; a sequence gap or sink overload revokes barrier and requires new sync, not retry of possibly applied relative/wheel/click events. StateAck confirms snapshot only, never an ordinary edge's physical execution. Ordinary accepted input invalidates T3a applied.known but does NOT invalidate the previously completed sync barrier. A sync establishes desired state and retires all historical sequences<=floor. Client serializes one outstanding snapshot at a time; later desired changes remain a latest local state, never relabel in-flight revision. On epoch, freshness or cancellation transition late StateAck is ignored.
+
+## Primitive ownership/API
+
+wire: typed EnvelopeKind/Envelope, typed control variant and functions encode_envelope/decode_envelope, encode_control/decode_control plus typed raw-body codecs. Decode returns optional/error without side effects; enforce all byte/domain bounds in both encode and decode. Borrowed body span is allowed only for synchronous envelope dispatch; control values owned.
+relay_session: deterministic ServerSession and ClientSession, explicit peer endpoint, supplied random nonzero identifiers and explicit time. API on_datagram(peer,bytes,now), tick(now), server update_control_snapshot(snapshot,now), client set_intent(generation,active,video_fresh,presented_sequence). Return bounded actions (send raw datagram, established, expired, revoke_input, lease_changed); no threads, sockets, callbacks, serial calls or KCP queue inside. Expose validation gate for sync/edge using tuple/current challenge/epoch/intent/barrier. Fixed one slot,200 challenges, one cancellation tombstone; per-call <=8 actions; no accumulating internal action queue. T3c owns consuming actions and maps actual sink applied snapshot to wire StateAck. If this API is split into handshake and FreshnessGate classes, keep the same observable tests; no generic transport framework.
+
+## Named focused tests and commands
+
+CTest relay_wire:
+- envelope_golden_offsets_and_1200_ceiling: exact32 header; KCP1168/body media1168; malformed sizes, magic/version/reserved/kinds, tuple zeros.
+- control_golden_vectors_and_exact_lengths: all seven types/raw bodies, all truncation points, extra byte, max1024 guard, bad enums/bools/reserved and direction.
+- desired_state_matches_serial_domain: sparse keys, duplicates/modifier rejection,4095/4096, buttons7/8.
+- edge_binary64_roundtrip: values distinguishable from float32, fractional deltas/wheel, negative/signed zero; NaN/inf rejected, coordinate/key/button bounds.
+CTest relay_session:
+- handshake_loss_duplicate_and_single_controller: dropped welcome/ready, retries, foreign endpoint/nonce/conv, busy cannot preempt, pending2s hard bound, old-attempt fencing.
+- server_issue_time_not_receipt_lease: proof arriving at249ms expires at250, at250 rejected; old reliable edges rejected after a newer proof; stale/duplicate proof cannot renew.
+- session_10s_input_250ms_separation: virtual100/300/800/2000ms blackouts preserve tuple, input suspends when necessary;10s boundary expires; KCP/video do not count as proof.
+- cancellation_overtakes_kcp_and_tombstones: raw cancel before delayed active/sync/edge, duplicate no repeated release, lower generation fenced; new generation needs fresh proof and sync.
+- immutable_state_ack_and_barrier: accepted sync alone no ACK; one-report ACK insufficient (feed snapshot fixture), exact AppliedInputState required; late epoch/revision ignored; ordinary applied.known=false does not force recovery.
+- edge_floor_gap_and_no_uncertain_replay: duplicates retired, gap/overload recovery, new snapshot floor discards old motion/wheel/clicks.
+- challenge_ring_and_actions_bounded: long virtual run, invalid floods cannot allocate peer map or extend time; exact boundary deadlines and bounded outputs.
+Use no hardware, real clocks or sleeps. T3b does not claim end-to-end serial/network acceptance. Run cmake --preset macos-debug; cmake --build --preset macos-debug --target kvmux_relay_wire_test kvmux_relay_session_test -j8; ctest --preset macos-debug -R '^(relay_wire|relay_session|udp_kcp|udp_media|relay_protocol|serial_worker|ch9329_control)$' --output-on-failure. Existing relay_protocol remains passing until T3c removes it. Parent merges decisions into plan before implementation. Stop discovery here.
+
+### T3b readiness refinements
+
+Status: in_progress. T3a committed and accepted. Parent approved the concrete
+handshake/probe exception to reliable payload transport: application input,
+synchronization and status use KCP; raw challenge/proof avoids stale reliable
+heartbeats extending permission; raw cancel is repeated and also sent reliably.
+No second generic transport or protocol fallback. All controls remain bound to
+one exact peer/session tuple, without claiming authentication.
+
+Codec selection follows existing CLI authority: server configured codec is
+selected in Welcome; Hello advertises a supported codec bitmask (bit0 MJPEG,
+bit1 HEVC), not a mandatory client codec. Reject zero/unknown bits and report
+no-common-codec via a typed rejection (busy body reason/u8 with bounded known
+values busy/no_common_codec), never silently change server codec. Update golden
+vectors accordingly. Client GUI does not need a new encoder/codec selector.
+
+Fix cancellation semantics: a cancel generation below the currently active newer
+intent advances only the tombstone through that older generation; it must NOT
+revoke the newer intent. Duplicates must not repeatedly request release. Higher
+intent during active prior intent revokes old barrier before synchronizing new.
+A proof with active=false for the current intent revokes permission immediately;
+video_fresh=false likewise suspends permission, preserving intent. Neither waits
+for250ms when the signal is already received.
+
+Do not claim a presented sequence is sufficient proof of video freshness here.
+T3c must gate against bounded sender frame history and current-generation actual
+client consumption/presentation. Expose an explicit caller-provided video-valid
+boolean when applying proof; missing validation defaults false. Raw probe can
+renew session liveness without authorizing input. The250ms permission gate is
+anchored to server-issued challenge times. This LAN-specific policy is not a
+promise of usable input at arbitrarily high RTT.
+
+Input event gap/recovery rules must match existing adjacent motion merging:
+wire sequence is assigned after merging immediately before reliable admission;
+never reuse router source sequence directly if coalescing skipped it. Keep source
+sequence diagnostic separate if needed. Only edges actually admitted to KCP get
+consecutive wire IDs. On expiry retire old sequence floor through next snapshot.
+
+Single-owner session primitive may own admission/barrier metadata but not serial
+I/O. Successful sync admission is not AppliedInputState; only exact immutable
+applied identity+state can open barrier and emit StateAck. Serial request rejection
+must not advance applied state. Preserve a completed barrier across ordinary
+snapshot-known invalidation. Bound externally dispatched reliable message results
+like raw packet results. Encode/decode strictly named enum mappings, static_assert
+IEC559 double/sizeof8 where binary64 used. No extra host timestamp wire field.
+
+Files owned by this unit: new relay_wire.hpp/.cpp, relay_session.hpp/.cpp,
+new tests/relay_wire_test.cpp and relay_session_test.cpp, root CMake registration.
+Parent owns plan, authorizes include it unchanged in passing unit commit. Existing
+relay_protocol survives only until T3c replaces callers; no new code calls its
+old control/TCP messages. Test commands above are the T3b acceptance.
+
+T3b acceptance: declared relay_wire/relay_session/udp_kcp/udp_media/
+relay_protocol/serial_worker/ch9329_control CTests passed 7/7 (8.34s),
+with native configure and targeted build successful. Explicit binary envelope and
+control validation, 200-entry challenge history, server-issue-time permission,
+cancellation generation fences and immutable state-ACK barrier implemented.
+Client cancellation retries every50ms; lost disconnect ACK ends locally within2s.
+Diff inspection and coherent local commit pending. No actual relay replacement,
+router integration, hardware or weak-network end-to-end claim at this checkpoint.
