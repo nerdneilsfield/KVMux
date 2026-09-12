@@ -156,6 +156,13 @@ void immutable_state_ack_and_barrier() {
     Fixture slow; slow.establish(); slow.proof(0,0); auto pending=slow.sync();
     slow.s.sync_submitted(pending,kvmux::SubmitResult::accepted,at(0));
     slow.proof(200,200); slow.apply(pending,300); // Fresh lease, original admission challenge aged out.
+    Fixture expired; expired.establish(); expired.proof(0,0); auto abandoned=expired.sync();
+    expired.s.sync_submitted(abandoned,kvmux::SubmitResult::accepted,at(0));
+    check(count(expired.s.tick(at(250)),Kind::revoke_input)==1);
+    expired.proof(300,300);
+    expired.snapshot.applied={true,7,1,1,abandoned.state};
+    check(count(expired.s.update_control_snapshot(expired.snapshot,at(301)),Kind::state_ack)==0);
+    check(!expired.s.barrier_complete()); // New proof cannot resurrect expired sync.
     Fixture late; late.establish(); late.proof(0,0); auto canceled=late.sync();
     late.s.sync_submitted(canceled,kvmux::SubmitResult::accepted,at(0));
     late.s.cancel({1,w::CancelReason::focus},at(1));
