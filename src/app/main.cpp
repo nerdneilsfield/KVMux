@@ -1,4 +1,5 @@
 #include "app/kvm_session.hpp"
+#include "app/recording.hpp"
 #include "network/relay_client.hpp"
 #include "render/video_renderer.hpp"
 #include "support/config.hpp"
@@ -108,6 +109,17 @@ const char* capture_state(CaptureState state) {
 }
 const char* control_state(ControlConnectionState state) {
     switch (state) { case ControlConnectionState::disconnected: return "Disconnected"; case ControlConnectionState::opening: return "Opening"; case ControlConnectionState::monitoring: return "USB not ready"; case ControlConnectionState::clearing: return "Clearing input"; case ControlConnectionState::ready: return "Ready"; case ControlConnectionState::stalled: return "Stalled"; case ControlConnectionState::reconnecting: return "Reconnecting"; case ControlConnectionState::fault: return "Fault"; case ControlConnectionState::stopping: return "Stopping"; }
+    return "Unknown";
+}
+const char* recording_state(RecordingState state) {
+    switch (state) {
+    case RecordingState::idle: return "Idle";
+    case RecordingState::starting: return "Starting";
+    case RecordingState::recording: return "Recording";
+    case RecordingState::paused: return "Paused";
+    case RecordingState::stopping: return "Stopping";
+    case RecordingState::failed: return "Failed";
+    }
     return "Unknown";
 }
 const char* input_state(InputState state) {
@@ -249,7 +261,9 @@ int main(int argc, char** argv) {
     const GLuint brand_texture = load_brand_texture();
     ImGui_ImplSDL3_InitForOpenGL(window, context); ImGui_ImplOpenGL3_Init("#version 150");
 
-    auto session = std::make_unique<KvmSession>(); (void)session->set_mouse_mode(config.mouse_mode); session->set_host_key(config.host_scancode); session->set_relative_gain(config.sensitivity);
+    auto session = std::make_unique<KvmSession>();
+    Recording recording;
+    (void)session->set_mouse_mode(config.mouse_mode); session->set_host_key(config.host_scancode); session->set_relative_gain(config.sensitivity);
     bool remote = false;
     std::shared_ptr<relay::RelayClient> remote_client;
     std::optional<relay::TrafficSnapshot> traffic_baseline;
@@ -283,6 +297,8 @@ int main(int argc, char** argv) {
     bool open_floating_menu = false, open_connections = false;
     auto next_serial_scan = std::chrono::steady_clock::now();
     std::optional<VideoFrame> current_frame;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> recorded_frame;
+    std::string media_message;
     std::string last_status;
 
     while (running) {
@@ -345,6 +361,11 @@ int main(int argc, char** argv) {
         if (current_frame && current_frame->generation != session->snapshot().capture.generation) current_frame.reset();
         if (current_frame && renderer.upload(*current_frame, config.color_override)) { session->video_presented(current_frame->generation, current_frame->sequence); diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
         const auto snapshot = session->snapshot();
+        if (current_frame && snapshot.video_fresh && current_frame->generation == snapshot.capture.generation &&
+            recorded_frame != std::pair{current_frame->generation, current_frame->sequence}) {
+            recorded_frame = std::pair{current_frame->generation, current_frame->sequence};
+            if (recording.status().state == RecordingState::recording) (void)recording.append(*current_frame);
+        }
         if (debug) {
             const auto status = std::string("capture=") + capture_state(snapshot.capture.state) +
                 " error=" + snapshot.capture.error + " control=" + control_state(snapshot.control.state) +
@@ -397,6 +418,36 @@ int main(int argc, char** argv) {
         }
         was_captured = captured;
         const bool relative_capture = captured && config.mouse_mode == MouseMode::relative;
+        const auto media_actions = [&] {
+            const auto status = recording.status();
+            const bool valid_visible_cpu_frame = current_frame && current_frame->frame &&
+                !current_frame->frame->hw_frames_ctx && current_frame->generation == snapshot.capture.generation &&
+                snapshot.video_fresh && renderer.texture_id() != 0;
+            ImGui::BeginDisabled(!valid_visible_cpu_frame);
+            if (ImGui::MenuItem("Save screenshot"))
+                media_message = recording.snapshot(*current_frame) ? "Screenshot queued." : "Could not queue screenshot.";
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(!valid_visible_cpu_frame || status.state != RecordingState::idle);
+            if (ImGui::MenuItem("Start recording"))
+                media_message = recording.start(*current_frame) ? "Recording start queued." : "Could not start recording.";
+            ImGui::EndDisabled();
+            if (status.state == RecordingState::recording) {
+                if (ImGui::MenuItem("Pause recording")) (void)recording.pause();
+            } else if (status.state == RecordingState::paused) {
+                if (ImGui::MenuItem("Resume recording")) (void)recording.resume();
+            }
+            ImGui::BeginDisabled(status.state != RecordingState::recording && status.state != RecordingState::paused);
+            if (ImGui::MenuItem("Stop recording")) (void)recording.stop();
+            ImGui::EndDisabled();
+            ImGui::Separator();
+            ImGui::Text("Recording: %s", recording_state(status.state));
+            if (!status.output_path.empty()) {
+                ImGui::TextUnformatted(status.output_path.filename().string().c_str());
+                ImGui::TextWrapped("%s", status.output_path.string().c_str());
+            }
+            if (!status.error.empty()) ImGui::TextWrapped("Error: %s", status.error.c_str());
+            else if (!media_message.empty()) ImGui::TextUnformatted(media_message.c_str());
+        };
         if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
             SDL_SetWindowRelativeMouseMode(window, relative_capture);
         const auto mouse = ImGui::GetIO().MousePos;
@@ -423,11 +474,13 @@ int main(int argc, char** argv) {
                 if (ImGui::MenuItem("Connections") || open_connections) {
                     ImGui::OpenPopup("Connections"); open_connections = false;
                 }
+                if (ImGui::BeginMenu("Media")) { media_actions(); ImGui::EndMenu(); }
                 ImGui::SetNextWindowPos({viewport->Pos.x + menu_icon.pos.x,
                     viewport->Pos.y + menu_icon.pos.y + FloatingMenuIcon::size}, ImGuiCond_Appearing);
                 if (ImGui::BeginPopup("Floating menu")) {
                     record_local_region();
                     if (ImGui::MenuItem("Connections / settings")) open_connections = true;
+                    ImGui::Separator(); media_actions(); ImGui::Separator();
                     ImGui::MenuItem("Status overlay", nullptr, &show_status);
                     if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
                         fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
@@ -662,9 +715,10 @@ int main(int argc, char** argv) {
                 pointer_snapshot.submitted_relative->first, pointer_snapshot.submitted_relative->second);
         else std::snprintf(submitted, sizeof(submitted), "H:--");
         char line[320];
-        std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s",
+        const auto recording_status = recording.status();
+        std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s | Rec:%s",
             remote ? "LAN" : "Local", resolution.c_str(), d.decode_fps, d.unique_present_fps,
-            rates, input_state(snapshot.input_state), pointer, submitted);
+            rates, input_state(snapshot.input_state), pointer, submitted, recording_state(recording_status.state));
         if (show_status) {
             const float status_height = ImGui::GetTextLineHeight() + 8.F;
             ImGui::SetNextWindowPos({viewport->Pos.x, viewport->Pos.y + viewport->Size.y - status_height});
@@ -695,6 +749,11 @@ int main(int argc, char** argv) {
                     capture_state(snapshot.capture.state), control_state(snapshot.control.state),
                     snapshot.control.target_usb_ready ? "ready" : "not ready",
                     snapshot.capture.error.c_str(), snapshot.control.error.c_str());
+            if (!recording_status.error.empty()) ImGui::SetTooltip("Recording error: %s", recording_status.error.c_str());
+            else if (!recording_status.output_path.empty()) ImGui::SetTooltip("Recording: %s\n%s\n%s",
+                recording_state(recording_status.state), recording_status.output_path.filename().string().c_str(),
+                recording_status.output_path.string().c_str());
+            else if (!media_message.empty()) ImGui::SetTooltip("%s", media_message.c_str());
             ImGui::End();
             ImGui::PopStyleVar();
         }
@@ -776,6 +835,7 @@ int main(int argc, char** argv) {
         popup_open = !remote_input && ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(11.F/255.F,24.F/255.F,35.F/255.F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
     }
+    recording.shutdown();
     session->shutdown(); if (pref) { int w{}, h{}; SDL_GetWindowSize(window, &w, &h); config.window.width = w; config.window.height = h; try { save_config(*pref, config); } catch (...) {} }
     glDeleteTextures(1, &brand_texture);
     renderer.destroy(); ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL3_Shutdown(); ImGui::DestroyContext(); SDL_GL_DestroyContext(context); SDL_DestroyWindow(window); SDL_Quit(); return 0;
