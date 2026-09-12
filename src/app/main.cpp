@@ -27,6 +27,72 @@
 namespace {
 using namespace kvmux;
 
+// Keep these base colors aligned with assets/branding/logo.svg.
+constexpr ImVec4 brand_color(unsigned rgb, float alpha = 1.F) {
+    return {static_cast<float>((rgb >> 16) & 255) / 255.F,
+        static_cast<float>((rgb >> 8) & 255) / 255.F,
+        static_cast<float>(rgb & 255) / 255.F, alpha};
+}
+void apply_brand_style() {
+    ImGui::StyleColorsDark();
+    auto& style = ImGui::GetStyle();
+    style.WindowRounding = 6.F; style.PopupRounding = 6.F;
+    style.FrameRounding = 4.F; style.GrabRounding = 3.F;
+    style.WindowBorderSize = 1.F; style.PopupBorderSize = 1.F;
+    style.FramePadding = {6.F, 3.F}; style.ItemSpacing = {6.F, 4.F};
+    auto& c = style.Colors;
+    const auto navy = brand_color(0x0B1823), panel = brand_color(0x202A33);
+    const auto silver = brand_color(0xBFC5C9), white = brand_color(0xF3F1EB);
+    const auto copper = brand_color(0xC45F3C), highlight = brand_color(0xED9464);
+    // Dark copper fills keep small warm-white labels readable in every state.
+    const auto hover = brand_color(0x633A2E), active = brand_color(0x84442E);
+    c[ImGuiCol_Text] = white; c[ImGuiCol_TextDisabled] = silver;
+    c[ImGuiCol_WindowBg] = navy; c[ImGuiCol_ChildBg] = navy;
+    c[ImGuiCol_PopupBg] = navy; c[ImGuiCol_MenuBarBg] = panel;
+    c[ImGuiCol_Border] = brand_color(0x576570); c[ImGuiCol_BorderShadow] = brand_color(0, 0.F);
+    c[ImGuiCol_FrameBg] = panel; c[ImGuiCol_FrameBgHovered] = hover; c[ImGuiCol_FrameBgActive] = active;
+    c[ImGuiCol_TitleBg] = navy; c[ImGuiCol_TitleBgActive] = panel; c[ImGuiCol_TitleBgCollapsed] = navy;
+    c[ImGuiCol_Button] = panel; c[ImGuiCol_ButtonHovered] = hover; c[ImGuiCol_ButtonActive] = active;
+    c[ImGuiCol_Header] = panel; c[ImGuiCol_HeaderHovered] = hover; c[ImGuiCol_HeaderActive] = active;
+    c[ImGuiCol_CheckMark] = highlight; c[ImGuiCol_SliderGrab] = copper; c[ImGuiCol_SliderGrabActive] = highlight;
+    c[ImGuiCol_ScrollbarBg] = navy; c[ImGuiCol_ScrollbarGrab] = brand_color(0x576570);
+    c[ImGuiCol_ScrollbarGrabHovered] = silver; c[ImGuiCol_ScrollbarGrabActive] = copper;
+    c[ImGuiCol_Separator] = brand_color(0x576570); c[ImGuiCol_SeparatorHovered] = copper; c[ImGuiCol_SeparatorActive] = highlight;
+    c[ImGuiCol_ResizeGrip] = brand_color(0xBFC5C9, .3F); c[ImGuiCol_ResizeGripHovered] = copper; c[ImGuiCol_ResizeGripActive] = highlight;
+    c[ImGuiCol_Tab] = panel; c[ImGuiCol_TabHovered] = hover; c[ImGuiCol_TabSelected] = active;
+    c[ImGuiCol_TabSelectedOverline] = copper; c[ImGuiCol_TabDimmed] = navy;
+    c[ImGuiCol_TabDimmedSelected] = panel; c[ImGuiCol_TabDimmedSelectedOverline] = silver;
+    c[ImGuiCol_TextSelectedBg] = active; c[ImGuiCol_NavCursor] = highlight;
+    c[ImGuiCol_PlotLines] = silver; c[ImGuiCol_PlotLinesHovered] = highlight;
+    c[ImGuiCol_PlotHistogram] = copper; c[ImGuiCol_PlotHistogramHovered] = highlight;
+    c[ImGuiCol_TableHeaderBg] = panel; c[ImGuiCol_TableBorderStrong] = brand_color(0x576570);
+    c[ImGuiCol_TableBorderLight] = panel;
+}
+
+// Load once while the main-thread GL context is current. SDL supplies PNG decoding.
+GLuint load_brand_texture() {
+    const char* base = SDL_GetBasePath();
+    if (!base) return 0;
+    const std::string path = std::string(base) + "assets/branding/logo.png";
+    SDL_Surface* loaded = SDL_LoadPNG(path.c_str());
+    if (!loaded) { spdlog::warn("Cannot load brand icon: {}", SDL_GetError()); return 0; }
+    SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(loaded);
+    if (!rgba) { spdlog::warn("Cannot convert brand icon: {}", SDL_GetError()); return 0; }
+    GLuint texture{};
+    glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, rgba->pitch / 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rgba->w, rgba->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); glBindTexture(GL_TEXTURE_2D, 0);
+    SDL_DestroySurface(rgba);
+    return texture;
+}
+
 const char* decoder_backend_label(CodecBackend backend) {
     switch (backend) {
     case CodecBackend::automatic: return "Auto";
@@ -179,11 +245,8 @@ int main(int argc, char** argv) {
     SDL_GLContext context = SDL_GL_CreateContext(window);
     if (!context || !gladLoadGL(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress))) { if (context) SDL_GL_DestroyContext(context); SDL_DestroyWindow(window); SDL_Quit(); return 1; }
     SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
-    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::GetIO().IniFilename = nullptr; ImGui::StyleColorsDark();
-    ImGui::GetStyle().WindowRounding = 6.F;
-    ImGui::GetStyle().FrameRounding = 4.F;
-    ImGui::GetStyle().FramePadding = {6.F, 3.F};
-    ImGui::GetStyle().ItemSpacing = {6.F, 4.F};
+    IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::GetIO().IniFilename = nullptr; apply_brand_style();
+    const GLuint brand_texture = load_brand_texture();
     ImGui_ImplSDL3_InitForOpenGL(window, context); ImGui_ImplOpenGL3_Init("#version 150");
 
     auto session = std::make_unique<KvmSession>(); (void)session->set_mouse_mode(config.mouse_mode); session->set_host_key(config.host_scancode); session->set_relative_gain(config.sensitivity);
@@ -571,8 +634,8 @@ int main(int argc, char** argv) {
             const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
             auto* draw = ImGui::GetWindowDrawList();
             draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F}, {pos.x + size.x + 8.F, pos.y + size.y + 4.F},
-                IM_COL32(0, 0, 0, static_cast<int>(180.F * alpha)), 4.F);
-            draw->AddText(pos, IM_COL32(255, 255, 255, static_cast<int>(255.F * alpha)), hint);
+                IM_COL32(11, 24, 35, static_cast<int>(225.F * alpha)), 4.F);
+            draw->AddText(pos, IM_COL32(243, 241, 235, static_cast<int>(255.F * alpha)), hint);
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -606,7 +669,7 @@ int main(int argc, char** argv) {
             const float status_height = ImGui::GetTextLineHeight() + 8.F;
             ImGui::SetNextWindowPos({viewport->Pos.x, viewport->Pos.y + viewport->Size.y - status_height});
             ImGui::SetNextWindowSize({viewport->Size.x, status_height});
-            ImGui::SetNextWindowBgAlpha(.65F);
+            ImGui::SetNextWindowBgAlpha(.88F);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6.F, 4.F});
             ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, {0.F, 0.F});
             ImGui::Begin("Status", nullptr, overlay_flags | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -696,14 +759,24 @@ int main(int argc, char** argv) {
         if (!relative_capture && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
             const ImVec2 pos{viewport->Pos.x + menu_icon.pos.x, viewport->Pos.y + menu_icon.pos.y};
             auto* draw = ImGui::GetForegroundDrawList();
-            draw->AddRectFilled(pos, {pos.x + FloatingMenuIcon::size, pos.y + FloatingMenuIcon::size},
-                IM_COL32(35, 40, 48, 155), 8.F);
-            for (float y : {10.F, 16.F, 22.F})
-                draw->AddLine({pos.x + 8.F, pos.y + y}, {pos.x + 24.F, pos.y + y}, IM_COL32(240, 240, 245, 220), 2.F);
+            const ImVec2 end{pos.x + FloatingMenuIcon::size, pos.y + FloatingMenuIcon::size};
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const bool hovered = menu_icon.contains(mouse.x - viewport->Pos.x, mouse.y - viewport->Pos.y);
+            draw->AddRectFilled(pos, end, ImGui::GetColorU32(menu_icon.buttons ? ImGuiCol_ButtonActive :
+                hovered ? ImGuiCol_ButtonHovered : ImGuiCol_WindowBg), 8.F);
+            draw->AddRect(pos, end, ImGui::GetColorU32(hovered || menu_icon.buttons ? ImGuiCol_NavCursor : ImGuiCol_Border), 8.F);
+            if (brand_texture) {
+                draw->AddImage(static_cast<ImTextureID>(brand_texture), {pos.x + 3.F, pos.y + 3.F}, {end.x - 3.F, end.y - 3.F});
+            } else {
+                // Keep the menu discoverable if an installation is missing its icon.
+                for (float y : {10.F, 16.F, 22.F})
+                    draw->AddLine({pos.x + 8.F, pos.y + y}, {pos.x + 24.F, pos.y + y}, ImGui::GetColorU32(ImGuiCol_Text), 2.F);
+            }
         }
         popup_open = !remote_input && ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
-        ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(.05F,.05F,.06F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
+        ImGui::Render(); int dw{}, dh{}; SDL_GetWindowSizeInPixels(window, &dw, &dh); glViewport(0,0,dw,dh); glClearColor(11.F/255.F,24.F/255.F,35.F/255.F,1); glClear(GL_COLOR_BUFFER_BIT); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); const auto before = std::chrono::steady_clock::now(); SDL_GL_SwapWindow(window); diagnostics.record_present_blocking(std::chrono::steady_clock::now() - before);
     }
     session->shutdown(); if (pref) { int w{}, h{}; SDL_GetWindowSize(window, &w, &h); config.window.width = w; config.window.height = h; try { save_config(*pref, config); } catch (...) {} }
+    glDeleteTextures(1, &brand_texture);
     renderer.destroy(); ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL3_Shutdown(); ImGui::DestroyContext(); SDL_GL_DestroyContext(context); SDL_DestroyWindow(window); SDL_Quit(); return 0;
 }
