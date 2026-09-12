@@ -1,6 +1,7 @@
 #include "network/relay_client.hpp"
 #include "app/kvm_session.hpp"
 #include "network/relay_protocol.hpp"
+#include "network/media_codec_wire.hpp"
 #include "video/video_pipeline.hpp"
 #include "video/video_processor.hpp"
 #include "relay_test_fakes.hpp"

@@ -28,6 +28,7 @@ add_library(kvmux_core STATIC
     src/network/relay_selection.cpp
     src/network/relay_server.cpp
     src/network/relay_client.cpp
+    src/network/media_codec_wire.cpp
     src/network/relay_protocol.cpp
     src/network/relay_wire.cpp
     src/network/relay_session.cpp
@@ -222,6 +223,10 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_relay_server_test PRIVATE kvmux::core)
     add_test(NAME relay_server COMMAND kvmux_relay_server_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
     set_tests_properties(relay_server PROPERTIES TIMEOUT 15)
+
+    add_executable(kvmux_media_codec_wire_test tests/media_codec_wire_test.cpp)
+    target_link_libraries(kvmux_media_codec_wire_test PRIVATE kvmux::core)
+    add_test(NAME media_codec_wire COMMAND kvmux_media_codec_wire_test)
 
     add_executable(kvmux_relay_protocol_test tests/relay_protocol_test.cpp)
     target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)

@@ -503,3 +503,133 @@ cancellation generation fences and immutable state-ACK barrier implemented.
 Client cancellation retries every50ms; lost disconnect ACK ends locally within2s.
 Diff inspection and coherent local commit pending. No actual relay replacement,
 router integration, hardware or weak-network end-to-end claim at this checkpoint.
+
+T3b committed and accepted: final native targeted CTests7/7 passed. Exact wire,
+handshake and freshness contracts live in relay_wire.hpp and relay_session.hpp.
+Slow serial completion is allowed only while newer valid proofs continuously
+maintain permission; expiry or cancellation permanently invalidates that pending
+sync. T3c discovery now resolves actual endpoint pairing, media presentation IDs,
+worker scheduling and router intent integration before implementation. No source
+compatibility commitment to v2; removal occurs with all affected callers/tests.
+
+## T3c executable integration contract
+
+## Recommended task boundary
+
+Use one coherent T3c replacement commit, including client/server, router/session/GUI callers, codec extraction and test migration. Splitting network replacement from router intent leaves a buildable but behaviorally unsafe intermediate: current KvmSession forcibly releases on stale video/non-ready control, current InputRouter faults on submit rejection, and NetworkControlSink has no synchronize override. A small media-only extraction can be a prior independently checked commit if useful, but is not required. Do not split a second transport implementation or keep a TCP compatibility path.
+
+## 1. Two configured server ports; one client endpoint
+
+Keep existing ClientOptions/ServerOptions control_port and video_port and configuration selections. Server binds two UDP sockets; client binds ONE ephemeral UDP socket. Client sends hello/confirm/proof/cancel/KCP from this socket to the configured server control endpoint. Server sends media FROM its configured video socket TO the exact endpoint pinned by ServerSession's control handshake. Client receives both on its one socket, accepting raw/session/KCP only from the resolved control endpoint and media only from the separately resolved video endpoint plus the established exact tuple. No media hello, inferred client port+1, peer-address-only match, or new pairing packet is needed. Server ignores inbound media-port traffic; nothing received there grants ownership or freshness. Endpoint currently exposes equality only; this design needs no new Endpoint mutation/get-port API. Resolve the server host once consistently for both ports (adapter is currently IPv4-only). Bind failures unwind both sockets. Reject equal nonzero server control/video ports; port 0 tests bind independently and read actual ports.
+
+Do not pass media-source endpoints to ClientSession::on_datagram (it deliberately pins the control endpoint). Decode and validate media envelope explicitly against ClientSession::tuple(), phase and expected media endpoint before MediaReceiver::input. KCP path validates peer/tuple before KcpChannel::input. New random nonzero IDs go through existing SessionIds and ClientSession::start; do not retain increment-only old session IDs.
+
+## 2. Owner loops and codec scheduling
+
+One network owner per client/server owns sockets, session primitive, KCP, and receiver/pacer. Every turn: bounded raw/control receives (cancel before reliable input when both are available), session tick + deadline revocation, latest sink snapshot/session actions, KCP update at <=10ms scheduling intervals, bounded reliable dispatch/output, then at most two media sends before returning to control. Flood ingress must not prevent tick. Idle receive is not disconnection. Socket waits are bounded by nearest session/KCP/pacer deadline, never old 350/500/600ms TCP receive timeouts.
+
+Server conversion, VideoProcessor, swscale, encoder configure/reset/shutdown and serialization stay on a dedicated media worker. Never move old hevc_video work directly into the network loop: even lifecycle codec calls may wait, and conversion/serialization have real CPU cost. Worker owns codec throughout; network sends coalesced keyframe requests and admission credit, not cross-thread codec calls. Keep capture's latest raw sample replaceable BEFORE encode. Grant new encode work only when pacer has no active/pending datagram and ordered output slot has capacity. Bound worker-to-network ordered HEVC output explicitly (one output slot is sufficient if worker stops polling/admitting input when occupied). Never overwrite that slot as a latest-value mailbox. Codec-internal delayed output is still drained in order; any AU intentionally skipped gets an encoded sequence and forces IDR recovery. Reuse encoder output encoded_sequence if it satisfies the codec contract; old server redundantly assigned its own sequence. Never renumber around drops. MJPEG has one latest source and one serialized offer, with stale admission rejected.
+
+Network owns MediaPacer. Save active_deadline BEFORE next_datagram. On would_block retain ONLY body+saved deadline, block further submit/pull; expire with discard(sender_deadline), including final packet. poll even without traffic. Every needs_idr result coalesces a worker request; drain/discard dependents until fresh IDR. Keep generation fixed for session. Capture absence/media loss suspends freshness, not 10s session liveness. Fatal codec/device errors are distinct from ordinary media gaps.
+
+Specify a new ServerOptions transport byte/s cap independently of encoder bitrate; proposed default 12,000,000 bytes/s (envelope+payload+FEC, excluding IP/UDP). This is an explicit initial cap, not adaptive control or evidence that every source fits. Expose frame_exceeds_rate_budget rather than failing the session or reporting successful recovery. CLI exposure/adaptive tuning may remain T4, but integration tests set the cap directly.
+
+KCP output would_block handling must also be bounded: retain at most the existing bounded output batch, service it before collecting more output; unrecoverable local send errors close transport. Do not let repeated take_datagrams append an unbounded secondary queue. Status/feedback/refresh have latest-unsent slots; synchronization/ACK are immutable, not replaceable. Keep at most one pending synchronization and its required ACK; if KCP full, retry admission without changing identifiers. Healthy edges receive consecutive wire sequence only after adjacent motion merge and successful KCP admission.
+
+## 3. MediaReceiver, decoder and presentation
+
+Consume every bounded MediaEvent batch synchronously. Reset clears ordered compressed ingress and latest unpublished decoded output and advances a marker before any subsequent frame enqueue. Decoder worker observes marker, calls reset/reconfigure on its own thread, and fences every in-flight output by both marker and generation. Ingress retains existing explicit 8 AU/32MiB/250ms limits; overflow or stale AU reports to the NETWORK owner, which calls receiver.recover(ingress_overflow/decoder_failure, now). Do not call single-owner MediaReceiver from decoder thread. A bounded coalesced recovery flag is sufficient. Network converts refresh/feedback events to current-generation KCP controls. Preserve reset-before-frame ordering when a new IDR bypasses a gap. Decoder failure is media recovery, not immediate global disconnect.
+
+For MJPEG decode_mjpeg(frame.bytes, local_capture_generation); for HEVC decode_hevc(frame.bytes). Restore MediaFrame.first_arrival onto decoded sample/AU after these helpers, because they currently stamp a fresh local time. Preserve it through VideoPipeline and decoded output; don't rejuvenate stale data on dequeuing.
+
+Actual sequence facts: MediaFrame.sequence is MJPEG capture sequence but HEVC encoded_sequence. ffmpeg_decoder.cpp sets output VideoFrame.sequence from au.capture_sequence. Existing RelayServer sent_sequence also used capture_sequence. Therefore a raw comparison to encoded sequence is wrong.
+
+Minimal mapping: retain capture sequence as the public VideoFrame/GUI ID. Client maintains a bounded current-generation table of published capture sequence -> {media sequence, first_arrival, marker}. On actual GUI consumption/presentation, look up this exact entry, reject wrong generation/retired marker and translate to media sequence for Proof.presented_video_sequence. Server keeps a bounded sent-frame history keyed by media sequence with source arrival and completion time. Admit only entries whose entire data/parity send completed successfully (conservative if parity is lost locally), still current-generation and source age <500ms. Proof video_valid requires exact history membership, not sequence <= high-water. Proposed bound 512 entries, age-pruned at 500ms on server; client bound 512 with generation/reset clearing. Client fresh flag requires a newly consumed valid entry and its first-arrival age <500ms, plus recent GUI progress; duplicates do not renew consumption time. The number is a fixed memory bound, not an assumption about FPS.
+
+Current KvmSession::take_latest_frame calls video_presented BEFORE renderer.upload. Either explicitly define this as actual GUI consumption (allowed by the prior contract), or preferably move acknowledgement to a new KvmSession::video_presented(generation,sequence) call after successful renderer.upload in main.cpp. The latter is this recommendation; add a generation-aware ControlSink/NetworkControlSink hook and update all callers/fakes. It proves upload/GUI consumption, not physical display scanout. Never acknowledge only because take_sample or capture.received_samples advanced.
+
+## 4. Server input and ACK dispatch
+
+On established: allocate KCP and media generation state; deactivate and neutralize serial once. Feed sink.snapshot into ServerSession::update_control_snapshot on changes and every relevant turn; consume returned state_ack only via reliable wire::StateAck. Session revoke_input means set_control_active(false), release_all ONCE for the transition, discard queued application work. Session tick is the authoritative 250ms expiry; receipt-local sink heartbeat is not its replacement.
+
+Provisional execution_deadline permits sink activation + heartbeat only while now < deadline and ready/USB/release conditions still hold. This is needed BEFORE synchronize, otherwise the sink rejects the barrier. For wire::Sync, call check_sync, then sink.synchronize(InputSync{epoch,intent,revision,state}), then sync_submitted with actual result. edge_floor remains in admitted wire::Sync held by ServerSession. ACK only arises from exact immutable applied snapshot after both serial reports ACK; acceptance and GET_INFO are not ACK. For Edge, allowed -> submit receipt-local ControlEvent and edge_submitted; recovery_required -> edge_submitted(not_ready) WITHOUT sink submission; duplicate/rejected -> discard. Do not re-enter recovery merely because ordinary accepted edges set applied.known=false.
+
+wire has no mouse_mode command: mode travels in DesiredInputState during synchronization. NetworkControlSink::set_mouse_mode updates next local desired mode; do not invent a new wire message or silently call server set_mouse_mode without a synchronization boundary. Verify serial synchronize's mode handling in implementation tests. Raw/KCP cancel share session.cancel tombstone behavior; cancel_ack is not neutral-complete status. Session expiry clears media, KCP, pending sync/ACK and history, and releases serial; brief impairment does none of the connection teardown.
+
+## 5. Router intent and new Recovering state
+
+Add InputState::recovering plus a capture_intended() accessor distinct from captured() execution. Intent spans arming/captured/recovering as appropriate after activation click release; preserve OS relative mouse capture in recovering. main.cpp currently uses equality captured to gate SDL and controls, so inspect/update every use and the state-name switch. Explicit release/focus/minimize/Host/disconnect revokes intent in recovering too. Network-only stale video, freshness expiry, changed remote epoch/readiness and queue admission failure suspend to recovering without requiring another activation click. Irrecoverable local faults remain fault/releasing. KvmSession's current request_release on video stale/non-ready must not erase recoverable intent.
+
+Minimal explicit distinction proposed: add a ControlSnapshot flag for network recovery capability/state (name chosen in implementation, default false) so local serial behavior is not silently altered. No RTT heuristic or dynamic_cast. NetworkControlSink overrides synchronize and delegates to a new RelayClient synchronization admission method; the default ControlSink::synchronize(not_ready) is NOT sufficient. Client snapshot.applied is populated only from exact current StateAck; Status cannot fabricate applied state. Client provisional network readiness and completed input barrier must be represented separately; don't overload ready to mean both, which deadlocks synchronization.
+
+Router owns intent generation, desired state and revision. Initial captured admission and every recovery require one immutable synchronization snapshot. Track latest eligible physical held keys (exclude Host, activation-isolated keys, and unsupported usages), modifiers, held buttons and latest absolute position. Keep changes made while waiting in latest desired state, never mutate in-flight snapshot. After exact ACK, if desired changed, submit a NEW revision before healthy edges; do not replay stale edges. Canonical key order, <=6 ordinary keys; define rollover deterministically using existing serial policy rather than creating invalid wire states. Tracking key releases must also remove isolation while recovering (current handle_key returns too early). Track button releases while recovering; relative/wheel residuals and pending special macro steps are discarded on recovery. No historical click/down+up or uncertain delta replay. A still-held eligible key/button may reappear via the current snapshot, as state reconciliation, not replay. New presses/releases completed entirely during outage vanish from latest state.
+
+Router synchronization barrier remains complete across ordinary snapshot-known invalidation; only actual recovery/epoch/cancel clears it. Client adds wire challenge and edge_floor when admitting immutable InputSync; client owns wire sequence independent of router source sequence. Client rejects late StateAck after epoch, local freshness or intent changes. UI thread must not wait for network or serial ACKs.
+
+Existing special keys run from Preview without persistent capture and include an explicit Host-key macro. Preserve the explicit macro feature separately from the physical local-only Host exit, but require the same fresh proof/synchronization barrier before scheduling macro edges. Cancel the rest of a macro on impairment; never restart it automatically. This caller cannot be ignored or special_keys will stop working after mandatory barriers are added.
+
+## 6. Remove old TCP without losing media tests
+
+Extract only encode/decode_mjpeg and encode/decode_hevc plus their private validation/byte helpers into media_codec_wire.hpp/.cpp. Update udp_media.cpp, tests/udp_media_test.cpp and new client/server includes. Migrate codec payload tests from relay_protocol_test to a media_codec_wire target. Delete old relay_protocol.hpp/.cpp, tcp_socket.hpp/.cpp, tcp_socket_test and obsolete framing/control tests after replacing relay_client_test and relay_server_test fixtures with v3 UDP behavior. CMake must remove old sources/targets and register new codec test. Do not delete entire protocol test coverage merely because framing changed. Preserve existing encoder fallback, software decoder and codec tests. Update stale 12-byte/TCP traffic comments/counters now: count actual accepted UDP datagram bytes including 32-byte envelope; define whether retries are included (recommended actual sent/received bytes). Broad docs/diagnostics tuning remains T4.
+
+## 7. Focused integrated regression and acceptance
+
+Keep relay_wire/relay_session/udp_media/udp_kcp primitive tests. Add one end-to-end regression using REAL RelayClient, RelayServer, InputRouter/KvmSession and Ch9329ControlSink with tests/relay_test_fakes.hpp SerialIo + synthetic capture. A test-only UDP proxy uses two front sockets: client sends to front control; proxy forwards all control to backend from ONE stable backend socket, and forwards backend video via front VIDEO socket. This preserves the exact one-peer/two-port contract. Proxy delays/drops/reorders whole datagrams with bounded queue; no generic production transport injection layer. Test production loops under short real timeouts, not only virtual session primitive actions.
+
+Required trace for 100/300/800/2000ms blackouts: establish video and neutral; activation click; sync both ACKs; key down; blackout; key release while unavailable; resume fresh picture and same tuple; exact current state sync ACK; no stale relative/wheel/completed click; router returns Captured without new activation click. 100ms may avoid revocation if deadlines never expired; larger gaps must revoke input but not session. Include Host/focus during blackout -> Preview intent and no delayed reactivation; separately a >10s primitive expiry already exists, so no need for every integrated test to wait ten seconds.
+
+Additional focused cases: lost welcome/ready; wrong media source/tuple ignored; two-controller busy; one serial ACK held back cannot unlock edges; late ACK after cancel cannot restore barrier; HEVC missing P -> reset before fresh IDR, no old marker publication; capture sequence gaps with consecutive encoded IDs; actual presentation mapping rejects unsent/stale ID; media worker deliberately slow configure/conversion with challenge/control sentinel progressing independently; cap below offered load has bounded buffers and fresh recovery. Use existing EncoderFactory fake for slow encoder; adding a concrete DecoderFactory seam is optional only if the existing real software HEVC fixture cannot exercise marker fencing deterministically.
+
+Run native Debug configure and full build (all callers), focused CTests including relay_client, relay_server, relay_wire, relay_session, udp_kcp, udp_media, input_router, serial_worker, ch9329_control, new media codec and integrated test; then full Debug CTest. Full GUI target compile is required even though no hardware is used. Release/native Linux/cross-host/performance remain T4 unless parent elects earlier checks. Report synthetic evidence as such; no hardware claims.
+
+## Remaining explicit choices, not invented existing APIs
+
+Parent should record proposed cap, snapshot recovery flag, generation-aware presentation hook and special-macro admission before implementation readiness. Current headers do not provide these. The inspected APIs are sufficient for two-port pairing without ANY wire change. Unknown until focused implementation checks: exact serial mode transition behavior during synchronize, native GUI tests available for presentation callback, and whether codec's internal bounded output can yield more than one AU per accepted input on every supported backend. These require direct code/test confirmation, not new protocol design or external research. Discovery can stop here.
+
+### T3c selected decisions and readiness
+
+Status: in_progress. Depends on T3a/T3b/T2, all committed and verified.
+Select the one coherent all-callers replacement boundary described above. Retain
+server ports17000/17001 as UDP; one client endpoint, no protocol extensions.
+Set ServerOptions::transport_bytes_per_second default12,000,000 (envelope+FEC,
+not IP headers). This is pacing, not advertised achievable network capacity.
+Adaptive behavior/user-facing rate diagnostics remain required in T4.
+
+Add ControlSnapshot::recoverable_transport bool defaultfalse; NetworkControlSink
+sets true even during transient control unavailability. Local serial semantics
+remain unchanged except explicit supported synchronize calls. InputRouter uses
+this typed capability for Recovering; no dynamic_cast. Add capture_intended()
+to distinguish retained UI capture from execution readiness. Store state in router
+using existing HidKeyboardState to preserve rollover and isolation semantics.
+Network initial capture and recovery synchronize; local old activation behavior
+may continue, since local serial has no network freshness barrier.
+
+Presentation hook: add ControlSink::video_presented(generation,sequence) replacing
+the old one-argument hook at all callers; add KvmSession::video_presented with
+samearguments. Remove automatic notification in take_latest_frame. main calls
+notification only after successful renderer upload. Synthetic tests explicitly
+consume/upload-confirm frames via that method. This proves GUI acceptance, not
+physical display scanout. Maintain a bounded mapping from GUIcapturesequence to
+mediaencodedsequence, including marker/generation; no equality assumption.
+
+Special macros from Preview must first acquire a temporary intent and exact
+sync barrier under existing freshvideo conditions; schedule steps only after ACK.
+Physical Host exit remains local, explicit Host macro remains supported. Cancel
+macro on any interruption and returnPreview; never automatically replay it.
+No background automatic capture: only retained focused capture intent resumes.
+
+Worker owns all actual source/caller/test edits for this one sequential unit;
+parent owns plan. May commit an independently passing media-codec extraction
+before replacement if useful, but no commits with knowingly broken callers.
+Mandatory actual integrated impairment cases are given above; primitive tests
+alone cannot mark T3c complete. Network/session loops mustremain active during
+100/300/800/2000ms interruptions; no manualreclick afternetwork-only pause.
+No real devices, remote production changes or push. Sourcepaths and existing
+CTest names verified in discovery. New integrated test name relay_recovery,
+new media codec test media_codec_wire, both registered under existing BUILD_TESTING.
+Run cmake --preset macos-debug; cmake --build --preset macos-debug -j8;
+ctest --preset macos-debug --output-on-failure. If testtimeouts need increasing for
+actual2s blackout traces set boundedpertestlimits, never remove behavior checks.
+No new uncertain protocol decision blocks this task; actual implementation bugs
+must be fixed and verified before marking it done. T4 native cross-host and
+loadadaptation acceptance are not implied by T3c success.

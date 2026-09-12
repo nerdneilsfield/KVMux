@@ -1,5 +1,6 @@
 #include "network/relay_client.hpp"
 #include "network/relay_protocol.hpp"
+#include "network/media_codec_wire.hpp"
 #include <atomic>
 #include <spdlog/spdlog.h>
 #include <deque>

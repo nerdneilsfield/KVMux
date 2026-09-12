@@ -1,5 +1,6 @@
 #include "network/relay_server.hpp"
 #include "network/relay_protocol.hpp"
+#include "network/media_codec_wire.hpp"
 #include "network/relay_selection.hpp"
 #include "video/video_processor.hpp"
 extern "C" {
