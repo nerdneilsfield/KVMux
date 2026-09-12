@@ -516,8 +516,11 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowSize({viewport->Size.x, status_height});
             ImGui::SetNextWindowBgAlpha(.65F);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6.F, 4.F});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, {0.F, 0.F});
             ImGui::Begin("Status", nullptr, overlay_flags | ImGuiWindowFlags_NoFocusOnAppearing |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                 (remote_input ? ImGuiWindowFlags_NoInputs : 0));
+            ImGui::PopStyleVar();
             if (!remote_input) record_local_region();
             const auto origin = ImGui::GetCursorScreenPos();
             const float line_height = ImGui::GetTextLineHeight();
