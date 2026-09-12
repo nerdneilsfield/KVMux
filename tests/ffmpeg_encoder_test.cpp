@@ -108,9 +108,25 @@ int main() {
     require(units.size()==13 && units.back().idr && units.back().encoded_sequence==13 &&
         units.back().capture_sequence==121,"reset drops pending, preserves output sequence and starts IDR");
     // A forced IDR must be independently decodable after discarding references.
-    check(decoder->reset()); check(decoder->submit(units[5])); check(decoder->finish());
-    VideoFrame recovered; check(decoder->poll(recovered));
-    require(recovered.sequence==105,"forced IDR includes VPS/SPS/PPS");
+    check(decoder->reset()); check(decoder->submit(units[5]));
+    VideoFrame recovered;
+    std::size_t recovered_count=0;
+    auto recover_receive=[&]() {
+        for (;;) {
+            const auto result=decoder->poll(recovered);
+            if (result.status==CodecStatus::again || result.status==CodecStatus::end_of_stream) return result.status;
+            check(result);
+            require(recovered.sequence==105,"forced IDR includes VPS/SPS/PPS");
+            ++recovered_count;
+        }
+    };
+    for (int retry=0;;++retry) {
+        require(retry<3,"recovery finish makes progress");
+        const auto result=decoder->finish();
+        if (result.status==CodecStatus::again) { recover_receive(); continue; }
+        check(result); break;
+    }
+    require(recover_receive()==CodecStatus::end_of_stream && recovered_count==1,"forced IDR drains once");
     encoder->shutdown(); decoder->shutdown();
     require(retained && retained->data[0] && !units[0].bytes.empty(),"owned outputs survive shutdown");
     std::cout<<"libx265 CPU encode/decode: 12 synthetic 64x64 frames, EAGAIN, forced IDR, reset, EOS passed; no throughput claim\n";

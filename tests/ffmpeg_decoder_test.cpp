@@ -57,6 +57,14 @@ int main(int argc, char** argv) {
     require(bool(decoder),error);
     CodecConfig config; config.width=1920; config.height=1080; config.generation=7;
     check(decoder->configure(config));
+    VideoFrame frame;
+    check(decoder->finish());
+    check(decoder->finish());
+    require(decoder->poll(frame).status==CodecStatus::end_of_stream,"empty configured decoder drains");
+    check(decoder->reset());
+    check(decoder->finish());
+    require(decoder->poll(frame).status==CodecStatus::end_of_stream,"empty reset decoder drains");
+    check(decoder->reset());
     EncodedAccessUnit invalid; invalid.width=1920; invalid.height=1080; invalid.generation=7;
     invalid.bytes={0,0,1,2,1,0x80};
     require(decoder->submit(invalid).status==CodecStatus::invalid_input,"initial non-IDR rejected");
@@ -66,7 +74,6 @@ int main(int argc, char** argv) {
     require(decoder->submit(invalid).status==CodecStatus::invalid_input,"malformed Annex B rejected");
     check(decoder->reset());
     decoder->shutdown();
-    VideoFrame frame;
     require(decoder->poll(frame).status==CodecStatus::failed,"poll after shutdown rejected");
     if (argc<2) { std::cout<<"decoder lifecycle checks passed; native stream not supplied\n"; return 0; }
     auto units=read_units(argv[1]);

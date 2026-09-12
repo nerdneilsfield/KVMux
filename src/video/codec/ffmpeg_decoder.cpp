@@ -116,7 +116,7 @@ public:
     void shutdown() noexcept override {
         avcodec_free_context(&context_);
         pending_.clear();
-        needs_idr_=true; finishing_=false; failed_=false; hardware_active_=false; next_token_=0;
+        needs_idr_=true; finishing_=false; receive_drained_=true; failed_=false; hardware_active_=false; next_token_=0;
         diagnostic_="not configured";
     }
     CodecResult submit(const EncodedAccessUnit& au) override {
@@ -141,12 +141,16 @@ public:
         Metadata meta{au.pts_ns, au.capture_sequence, au.generation, au.arrival,
             au.color_range, au.color_space, au.color_primaries, au.color_transfer, au.sample_aspect_ratio};
         pending_.emplace(next_token_++, meta);
+        receive_drained_=false;
         needs_idr_=false;
         return {};
     }
     CodecResult finish() override {
         if (!context_ || failed_) return failure("decoder is not configured or needs reset");
         if (finishing_) return {};
+        // FFmpeg 58 can discard its buffered packet on NULL send. Consume input
+        // through receive EAGAIN first; delayed pictures may still be pending.
+        if (!receive_drained_) return {CodecStatus::again, "poll before finish"};
         const int result=avcodec_send_packet(context_, nullptr);
         if (result==AVERROR(EAGAIN)) return {CodecStatus::again, "poll before finish"};
         if (result<0) { failed_=true; return failure("finish HEVC: "+av_error(result)); }
@@ -158,7 +162,10 @@ public:
         auto frame=own(av_frame_alloc());
         if (!frame) return failure("allocate HEVC output");
         const int result=avcodec_receive_frame(context_, frame.get());
-        if (result==AVERROR(EAGAIN)) return {CodecStatus::again, {}};
+        if (result==AVERROR(EAGAIN)) {
+            receive_drained_=true;
+            return {CodecStatus::again, {}};
+        }
         if (result==AVERROR_EOF) {
             if (!pending_.empty()) { failed_=true; return failure("HEVC ended with accepted AUs missing output"); }
             return {CodecStatus::end_of_stream, {}};
@@ -237,7 +244,7 @@ private:
     AVCodecContext* context_{};
     std::map<std::int64_t, Metadata> pending_;
     std::int64_t next_token_{};
-    bool needs_idr_{true}, finishing_{}, failed_{}, hardware_active_{};
+    bool needs_idr_{true}, finishing_{}, receive_drained_{true}, failed_{}, hardware_active_{};
     std::string diagnostic_{"not configured"};
 };
 }  // namespace
