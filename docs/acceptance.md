@@ -1,8 +1,42 @@
-# KVMux v1 acceptance record
+# KVMux acceptance record
 
 This record distinguishes source/build evidence from hardware evidence. A
 software build, CI result, fake transport, camera device or UVC-like device is
 not evidence that a CH9329 KVM hardware combination passed.
+
+## UDP/KCP v3 acceptance
+
+The current relay uses UDP video and KCP control. The older TCP results below
+are historical; they do not establish v3 behavior.
+
+- Native macOS Debug: 20/20 CTests passed; Release GUI and relay built.
+- Native Jetson Linux headless: backend-ON and backend-OFF suites passed 19/19.
+  FFmpeg 58 required draining available decoder input before sending EOF; the
+  original 60-frame plus reset-30-frame test passed after the decoder fix.
+- Real loopback UDP tests covered 100/300/800/2000 ms interruptions, retained
+  session and capture intent, held-key release during interruption, no stale
+  relative/wheel/click replay, and Host/focus cancellation. Synthetic SerialIo
+  confirms command reports, not physical target actions.
+- Video tests covered fragment loss/reordering, XOR single-erasure repair,
+  unrecoverable HEVC dependencies, fresh-IDR recovery, bounded pacing and actual
+  receiver feedback changing source admission. Source tuning is not dynamic
+  encoder bitrate control. An oversized frame can still exceed the rate budget.
+- Jetson-to-Mac MJPEG passed two sessions of 120 consumed frames each,
+  including a rerun with the final fixes.
+- Jetson NVIDIA HEVC to Mac VideoToolbox passed two sessions of 120 consumed
+  1920×1080 frames each, including same-process stop/start. The sessions reported
+  two and one media recoveries respectively, with no pipeline rejection/error.
+  A native startup force-IDR crash was fixed by deferring requests until encoder
+  output establishes readiness; startup, dynamic IDR and reset checks passed.
+
+The cross-host fixture used synthetic capture and serial I/O on reserved UDP
+ports, with current RelayServer, RelayClient and VideoPipeline. It updates the
+pipeline generation when capture recovery changes it, and acknowledges only
+consumed current-generation frames. No real camera, serial device or user relay
+was stopped. This establishes functional delivery/recovery, not sustained 60 fps,
+capture-to-display latency, long-duration stability or Windows hardware support.
+VideoToolbox returned hardware-format frames and CPU NV12 transfer; the Apple
+session hardware-use property remains unverified. No zero-copy claim is made.
 
 ## Earlier local-KVM software evidence
 

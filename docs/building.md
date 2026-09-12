@@ -101,3 +101,17 @@ ctest --preset linux-debug-headless
 
 The former `dev`, `headless`, `release` and `sanitizers` names are removed.
 Existing build directories are not migrated; configure the new preset once.
+
+## UDP/KCP relay builds
+
+Build both relay and GUI from the current source. Protocol v3 does not negotiate
+with the former TCP relay. KCP is pinned under `third_party/kcp`; configuring the
+project does not download it. The relay uses two server UDP ports, not TCP ports.
+See [LAN relay usage](lan-relay.md) for firewall rules, `--transport-rate`, and
+recovery diagnostics. Encoder `--bitrate` uses bits/s; the transport cap uses
+bytes/s including the application envelope and parity, excluding UDP/IP headers.
+
+`ctest --preset macos-debug --output-on-failure` includes the UDP/KCP components,
+state synchronization and real loopback relay recovery with synthetic capture and
+serial I/O. These tests do not open the user's capture card or CH9329 device.
+Platform-specific and cross-host results are recorded in [acceptance.md](acceptance.md).

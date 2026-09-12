@@ -756,3 +756,52 @@ acceptance. Run discoverycommands fullDebug/Release and CLI invalidchecks
 `build/macos-debug/kvmux-relay --transport-rate 0` and overflow (expectnonzero
 beforehardware). No realdevice/remote/push. Inspectcommitpassingunit immediately,
 then T4b isolatednative/crosshost qualification. Include parentplanunchanged.
+
+T4a completed and locally committed. Exact-tree macos-debug fullCTest20/20 and
+macos-release all-target build passed. ActualHEVC/KCP feedback changes admission;
+impossiblecap reportsblocked andnewsessionwithsuitablecap restoresfreshIDR.
+CLI range/error handling andDiagnostics verified withoutopeninghardware. T4b now
+in_progress: freshcommittedsnapshot isolatednativeLinux andcrosshostMJPEG/HEVC;
+no remoteproduction changes, nohardwarecapture/serial, no push. Finalacceptance
+andbuilding/design docs will recordactualresults aftertheprobe, not oldTCPevidence.
+
+### T4b native failures and sequential correction
+
+Baseline Linux ON/OFF builds passed; both CTest runs had18/19, solely FFmpeg58
+HEVC drain failure. MJPEG cross-host two sessions120+120 passed. HEVC server
+crashed in libtegrav4l2 during force-IDR while encoder negotiation was active.
+These are separate failures; native acceptance remains incomplete.
+
+Decoder correction is currently the sole implementation unit: require polling to
+EAGAIN after accepted input before sending flush NULL; do not require pending
+metadata empty and do not weaken EOF consistency. Original native decoder test
+passed60+30 with this fix. Necessary test callers obey existing finish-again
+contract; final related tests/commit pending.
+
+Next correction, not yet executing: coalesce early Jetson keyframe requests until
+hardware output establishes encoder readiness. Never emit force-IDR during initial
+negotiation; first valid IDR can satisfy a pending startup refresh. If first output
+is not IDR, defer force signal until readiness and preserve pending recovery request.
+Reset/shutdown clear readiness and pending state. Native encoder regression requests
+IDR immediately after configure and reset, preserves dynamic post-start IDR/GOP
+checks, and actual cross-host HEVC must pass before accepting the fix. No sleeps or
+arbitrary startup delay. Keep explicit backend failures observable.
+
+## Final functional acceptance
+
+All implementation units are committed. macOS20/20 andRelease passed; native
+Linux ON/OFF19/19 passed after the FFmpeg58 drain correction. Jetson startup
+force-IDR fix passed native60frames/dynamicIDR/reset. ActualMJPEG andHEVC UDP/KCP
+Jetson-to-Mac each delivered120+120frames acrosssame-processreconnect. HEVC had
+2/1 recovery events andno pipeline errors; probe followscapturegeneration on
+recovery. Hardwareuse propertyforApple remainsunverified. See docs/acceptance.md
+for measuredscope andlimits; /tmp/kvmux-v3-e2e-report.md contains temporarylogs.
+No push or remoteproductionupdate performed. Only isolatedsynthetic hardware
+encoder/decoder use, no camera/serial/userprocessinterruption. Final test processes exited normally; reserved UDP ports are free and no probe
+process remains. No additional implementation is planned.
+
+Completion: T1, T2, T3a, T3b, T3c, T4a and T4b are done. Earlier pending and
+in_progress entries above are historical execution notes, superseded here.
+Final native source verification found no mismatches in1766 committed files;
+the isolated test CMake append was the only intentional difference. Both final
+cross-host servers exited0; UDP18700/18701 and probe processes are clear.
