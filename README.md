@@ -33,7 +33,7 @@ identifying the capture and serial devices.
 Build from source using the [build guide](docs/building.md). The repository's
 [CI](.github/workflows/ci.yml) builds and tests source; it does not publish
 installer downloads. You need a C++20 compiler, CMake, Ninja and FFmpeg development
-libraries. Windows builds require an MSVC developer shell.
+libraries, including avformat. Windows builds require an MSVC developer shell.
 
 On macOS with a C++20 compiler and CMake installed, install Ninja and FFmpeg
 with Homebrew, then build Release from the repository root:
@@ -62,6 +62,23 @@ see the [verification record](docs/acceptance.md) before choosing hardware.
 4. Wait for fresh video and ready control. The connection popup closes when
    both are ready. Click the video to capture keyboard and mouse input; this
    first click is not sent to the target.
+
+## Capture screenshots and recordings
+
+Open **Media** from the top menu, or from the floating KVMux logo menu. A
+screenshot saves the native decoded video only—never menus, the mouse pointer,
+or the status overlay—to your system **Downloads** folder as
+`kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix.
+
+Recording saves the same video as an H.264 MP4 in **Downloads**, with the same
+time-based name and collision suffix. Use **Start**, **Pause**, **Resume**, and
+**Stop**. **Stop** waits for the file to finish. Screenshots and recordings stay
+local; they are not sent to the target computer.
+
+H.264 MP4 recording requires FFmpeg H.264 support. KVMux shows a clear error if
+it is unavailable. Recording uses a bounded latest-frame writer, so it can drop
+frames when the computer cannot keep up. This feature has not yet been validated
+with physical hardware.
 
 ## Connect over LAN
 
