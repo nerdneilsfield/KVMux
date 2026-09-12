@@ -299,6 +299,8 @@ int main(int argc, char** argv) {
     std::optional<VideoFrame> current_frame;
     std::optional<std::pair<std::uint64_t, std::uint64_t>> recorded_frame;
     std::string media_message;
+    std::string temporary_status;
+    std::chrono::steady_clock::time_point temporary_status_until{};
     std::filesystem::path displayed_snapshot_path;
     std::string displayed_snapshot_error;
     std::string last_status;
@@ -428,9 +430,13 @@ int main(int argc, char** argv) {
         }
         if (media_status.last_snapshot_path != displayed_snapshot_path) {
             displayed_snapshot_path = media_status.last_snapshot_path;
-            if (!displayed_snapshot_path.empty())
-                media_message = "Screenshot saved: " + displayed_snapshot_path.string();
+            if (!displayed_snapshot_path.empty()) {
+                temporary_status = "Screenshot saved: " + displayed_snapshot_path.string();
+                temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            }
         }
+        const bool temporary_status_visible = std::chrono::steady_clock::now() < temporary_status_until;
+        if (!temporary_status_visible) temporary_status.clear();
         const auto media_actions = [&] {
             const auto& status = media_status;
             const bool valid_visible_cpu_frame = current_frame && current_frame->frame &&
@@ -439,7 +445,8 @@ int main(int argc, char** argv) {
             ImGui::BeginDisabled(!valid_visible_cpu_frame);
             if (ImGui::MenuItem("Save screenshot")) {
                 if (recording.snapshot(*current_frame)) {
-                    media_message = "Screenshot queued.";
+                    temporary_status = "Screenshot queued.";
+                    temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
                     ImGui::CloseCurrentPopup();
                 } else {
                     media_message = "Could not queue screenshot.";
@@ -466,7 +473,6 @@ int main(int argc, char** argv) {
             }
             if (!status.error.empty()) ImGui::TextWrapped("Error: %s", status.error.c_str());
             if (!status.snapshot_error.empty()) ImGui::TextWrapped("Screenshot error: %s", status.snapshot_error.c_str());
-            else if (!status.last_snapshot_path.empty()) ImGui::TextWrapped("Screenshot saved: %s", status.last_snapshot_path.string().c_str());
             else if (!media_message.empty()) ImGui::TextUnformatted(media_message.c_str());
         };
         if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
@@ -740,7 +746,10 @@ int main(int argc, char** argv) {
         std::snprintf(line, sizeof(line), "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s | Rec:%s",
             remote ? "LAN" : "Local", resolution.c_str(), d.decode_fps, d.unique_present_fps,
             rates, input_state(snapshot.input_state), pointer, submitted, recording_state(recording_status.state));
-        if (show_status) {
+        std::string status_line = line;
+        if (temporary_status_visible) status_line += " | " + temporary_status;
+        if (show_status || temporary_status_visible) {
+            const bool temporary_status_only = temporary_status_visible && !show_status;
             const float status_height = ImGui::GetTextLineHeight() + 8.F;
             ImGui::SetNextWindowPos({viewport->Pos.x, viewport->Pos.y + viewport->Size.y - status_height});
             ImGui::SetNextWindowSize({viewport->Size.x, status_height});
@@ -749,21 +758,21 @@ int main(int argc, char** argv) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, {0.F, 0.F});
             ImGui::Begin("Status", nullptr, overlay_flags | ImGuiWindowFlags_NoFocusOnAppearing |
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-                (remote_input ? ImGuiWindowFlags_NoInputs : 0));
+                (remote_input || temporary_status_only ? ImGuiWindowFlags_NoInputs : 0));
             ImGui::PopStyleVar();
-            if (!remote_input) record_local_region();
+            if (!remote_input && !temporary_status_only) record_local_region();
             const auto origin = ImGui::GetCursorScreenPos();
             const float line_height = ImGui::GetTextLineHeight();
             const bool connected = snapshot.video_fresh && snapshot.control.state == ControlConnectionState::ready;
             const ImU32 state_color = connected ? IM_COL32(80, 210, 120, 255) : IM_COL32(230, 155, 70, 255);
             auto* draw = ImGui::GetWindowDrawList();
             draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F, state_color);
-            const float text_width = ImGui::CalcTextSize(line).x;
+            const float text_width = ImGui::CalcTextSize(status_line.c_str()).x;
             const float room = std::max(1.F, ImGui::GetContentRegionAvail().x - 14.F);
             const float font_size = ImGui::GetFontSize() * std::min(1.F, room / std::max(1.F, text_width));
             draw->AddText(ImGui::GetFont(), font_size,
                 {origin.x + 14.F, origin.y + (line_height - font_size) * .5F},
-                ImGui::GetColorU32(ImGuiCol_Text), line);
+                ImGui::GetColorU32(ImGuiCol_Text), status_line.c_str());
             ImGui::Dummy({ImGui::GetContentRegionAvail().x, line_height});
             if (!remote_input && ImGui::IsItemHovered())
                 ImGui::SetTooltip("Video: %s | Control: %s | USB: %s\n%s\n%s",
@@ -771,7 +780,6 @@ int main(int argc, char** argv) {
                     snapshot.control.target_usb_ready ? "ready" : "not ready",
                     snapshot.capture.error.c_str(), snapshot.control.error.c_str());
             if (!recording_status.snapshot_error.empty()) ImGui::SetTooltip("Screenshot error: %s", recording_status.snapshot_error.c_str());
-            else if (!recording_status.last_snapshot_path.empty()) ImGui::SetTooltip("Screenshot saved: %s", recording_status.last_snapshot_path.string().c_str());
             else if (!recording_status.error.empty()) ImGui::SetTooltip("Recording error: %s", recording_status.error.c_str());
             else if (!recording_status.output_path.empty()) ImGui::SetTooltip("Recording: %s\n%s\n%s",
                 recording_state(recording_status.state), recording_status.output_path.filename().string().c_str(),
