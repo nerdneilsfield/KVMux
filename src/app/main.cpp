@@ -638,6 +638,12 @@ int main(int argc, char** argv) {
         ImGui::PopStyleVar(2);
         if (diagnostics_open && !remote_input) {
             const auto d = diagnostics.snapshot();
+            const ImVec2 max_size{std::max(1.F, viewport->WorkSize.x - 16.F),
+                std::max(1.F, viewport->WorkSize.y - 16.F)};
+            // A stable initial width prevents wrapped text from inflating the auto-fit height.
+            ImGui::SetNextWindowSize({std::min(620.F, max_size.x), std::min(360.F, max_size.y)},
+                ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSizeConstraints({0.F, 0.F}, max_size);
             ImGui::Begin("Diagnostics", &diagnostics_open);
             record_local_region();
             ImGui::Text("Decoded video resolution: %s", resolution.c_str());
