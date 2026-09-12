@@ -160,11 +160,21 @@ public:
             }
         }
         gst_buffer_unmap(buffer, &map); gst_sample_unref(sample);
+        // NVIDIA creates its encoder during asynchronous negotiation. A request
+        // before the first output must not call its force-IDR action signal.
+        if (keyframe_pending_) {
+            keyframe_pending_ = false;
+            if (!output.idr && !finished_) g_signal_emit_by_name(encoder_, "force-IDR");
+        }
         return {};
     }
     CodecResult request_keyframe() override {
         if (!encoder_ || finished_) return fail("Encoder is not accepting keyframe requests");
         if (auto error = bus_error(); !error.ok()) return error;
+        if (!hardware_active_) {
+            keyframe_pending_ = true;
+            return {};
+        }
         g_signal_emit_by_name(encoder_, "force-IDR");
         return {};
     }
@@ -190,6 +200,7 @@ public:
             if (element) gst_object_unref(element);
         input_ = output_ = encoder_ = pipeline_ = nullptr;
         pending_.clear(); last_pts_ = -1; finished_ = false; hardware_active_ = false;
+        keyframe_pending_ = false;
     }
 private:
     CodecResult bus_error() {
@@ -210,6 +221,7 @@ private:
     std::int64_t last_pts_{-1};
     bool finished_{};
     bool hardware_active_{};
+    bool keyframe_pending_{};
     std::uint64_t encoded_sequence_{};
 };
 }  // namespace
