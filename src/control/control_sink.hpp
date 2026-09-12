@@ -2,6 +2,7 @@
 
 #include "control/control_event.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -24,6 +25,25 @@ enum class ControlConnectionState {
 
 enum class MouseMode { absolute, relative };
 
+struct DesiredInputState {
+    std::uint8_t modifiers{};
+    std::array<std::uint8_t, 6> keys{};
+    std::uint8_t buttons{};
+    MouseMode mode{MouseMode::absolute};
+    std::uint16_t absolute_x{}, absolute_y{};
+};
+
+struct InputSync {
+    std::uint64_t epoch{}, intent_generation{}, revision{};
+    DesiredInputState state;
+};
+
+struct AppliedInputState {
+    bool known{};
+    std::uint64_t epoch{}, intent_generation{}, revision{};
+    DesiredInputState state;
+};
+
 struct SerialPortInfo {
     std::string name;
     std::string description;
@@ -42,6 +62,7 @@ struct ControlSnapshot {
     std::uint64_t timeout_count{};
     std::uint64_t rejected_events{};
     std::string error;
+    AppliedInputState applied;
 };
 
 class ControlSink {
@@ -54,6 +75,7 @@ public:
     virtual void update_ui_heartbeat() noexcept {}
     virtual void video_presented(std::uint64_t) noexcept {}
     [[nodiscard]] virtual SubmitResult submit(ControlEvent event) = 0;
+    [[nodiscard]] virtual SubmitResult synchronize(InputSync) { return SubmitResult::not_ready; }
     virtual void release_all() noexcept = 0;
     [[nodiscard]] virtual ControlSnapshot snapshot() const = 0;
 };

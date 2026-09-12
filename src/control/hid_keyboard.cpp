@@ -38,6 +38,13 @@ void HidKeyboardState::release(const std::uint8_t usage) noexcept {
     }
 }
 
+void HidKeyboardState::restore(const std::uint8_t modifiers,
+                               const std::array<std::uint8_t, 6>& keys) noexcept {
+    modifiers_ = modifiers;
+    keys_ = keys;
+    ignored_.clear();
+}
+
 void HidKeyboardState::clear() noexcept {
     modifiers_ = 0;
     keys_.fill(0);

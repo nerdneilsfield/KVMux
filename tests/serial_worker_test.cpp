@@ -26,6 +26,13 @@ struct FakeSerial {
     kvmux::ch9329::Parser requests;
     std::vector<kvmux::ch9329::Frame> received;
 
+    void ack(std::uint8_t command) {
+        std::lock_guard lock(mutex);
+        const auto bytes = kvmux::ch9329::encode({0,
+            static_cast<std::uint8_t>(command | 0x80U), {0}});
+        incoming.insert(incoming.end(), bytes.begin(), bytes.end());
+    }
+
     kvmux::SerialIo io() {
         return {
             [this](const std::string&, int) { std::lock_guard lock(mutex); opened = true; return true; },
@@ -155,5 +162,123 @@ int main() {
     }
 
     sink.disconnect();
+
+    FakeSerial sync_fake;
+    Ch9329ControlSink synced(sync_fake.io());
+    synced.connect("sync", 57600);
+    require(eventually([&] { return synced.snapshot().state == ControlConnectionState::ready; }),
+            "sync handshake ready");
+    synced.set_control_active(true);
+    InputSync desired{synced.snapshot().epoch, 7, 11,
+        {3, {4, 0, 5, 0, 0, 0}, 5, MouseMode::relative, 1234, 2345}};
+    auto invalid = desired;
+    invalid.state.keys[1] = 4;
+    require(synced.synchronize(invalid) == SubmitResult::not_ready, "duplicate key rejected");
+    invalid = desired;
+    invalid.state.keys[0] = 0xe0;
+    require(synced.synchronize(invalid) == SubmitResult::not_ready, "modifier usage rejected");
+    invalid = desired;
+    invalid.state.absolute_x = 4096;
+    require(synced.synchronize(invalid) == SubmitResult::not_ready, "coordinate rejected");
+    std::size_t start{};
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        sync_fake.answer = false;
+        start = sync_fake.received.size();
+    }
+    auto sent = [&](std::size_t index, std::uint8_t command) {
+        std::lock_guard lock(sync_fake.mutex);
+        return sync_fake.received.size() > index && sync_fake.received[index].command == command;
+    };
+    require(synced.synchronize(desired) == SubmitResult::accepted, "sync accepted");
+    desired.revision = 12;
+    desired.state.buttons = 2;
+    require(synced.synchronize(desired) == SubmitResult::overloaded, "second sync cannot relabel");
+    require(synced.submit({desired.epoch, 1, std::chrono::steady_clock::now(), KeyEdge{6, true}}) ==
+            SubmitResult::overloaded, "ordinary input fenced by sync");
+    require(eventually([&] { return sent(start, 0x02); }), "sync keyboard sent");
+    require(!synced.snapshot().applied.known, "no ACK is not applied");
+    sync_fake.ack(0x02);
+    require(eventually([&] { return sent(start + 1, 0x05); }), "sync mouse follows keyboard ACK");
+    require(!synced.snapshot().applied.known, "keyboard ACK alone insufficient");
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        require(sync_fake.received[start + 1].data == std::vector<std::uint8_t>({1, 5, 0, 0, 0}),
+                "relative sync has immutable buttons and zero deltas/wheel");
+    }
+    sync_fake.ack(0x05);
+    require(eventually([&] { return synced.snapshot().applied.known; }), "two ACKs publish");
+    const auto applied = synced.snapshot().applied;
+    require(applied.epoch == desired.epoch && applied.intent_generation == 7 &&
+            applied.revision == 11 && applied.state.modifiers == 3 &&
+            applied.state.keys[0] == 4 && applied.state.keys[1] == 0 && applied.state.keys[2] == 5 &&
+            applied.state.buttons == 5 && applied.state.mode == MouseMode::relative &&
+            applied.state.absolute_x == 1234 && applied.state.absolute_y == 2345,
+            "exact immutable applied state");
+    require(synced.submit({desired.epoch, 2, std::chrono::steady_clock::now(), KeyEdge{4, false}}) ==
+            SubmitResult::accepted, "healthy edge after sync");
+    require(!synced.snapshot().applied.known, "ordinary event invalidates known");
+    require(eventually([&] { return sent(start + 2, 0x02); }), "post-sync key report sent");
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        const auto& data = sync_fake.received[start + 2].data;
+        require(data[0] == 3 && data[2] == 0 && data[3] == 0 && data[4] == 5, "internal held keys match sync");
+    }
+    sync_fake.ack(0x02);
+    require(eventually([&] {
+        synced.update_ui_heartbeat();
+        return synced.synchronize(desired) == SubmitResult::accepted;
+    }), "next sync after ordinary ACK");
+    require(eventually([&] { return sent(start + 3, 0x02); }), "second keyboard sent");
+    sync_fake.ack(0x02);
+    require(eventually([&] { return sent(start + 4, 0x05); }), "second mouse sent");
+    synced.release_all();
+    require(!synced.snapshot().applied.known && synced.snapshot().epoch != desired.epoch,
+            "release fences revision immediately");
+    sync_fake.ack(0x05);
+    require(eventually([&] { return sent(start + 5, 0x02); }), "late mouse ACK starts neutral clear");
+    require(!synced.snapshot().applied.known, "canceled two ACK snapshot never published");
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        require(sync_fake.received[start + 5].data == std::vector<std::uint8_t>(8, 0),
+                "release clears held keys");
+        sync_fake.answer = true;
+    }
+    sync_fake.ack(0x02);
+    require(eventually([&] { return synced.snapshot().state == ControlConnectionState::ready; }),
+            "canceled sync release completes");
+    desired.epoch = synced.snapshot().epoch;
+    require(synced.synchronize(desired) == SubmitResult::not_ready, "inactive control rejects sync");
+    synced.set_control_active(true);
+    desired.state.mode = MouseMode::absolute;
+    require(synced.synchronize(desired) == SubmitResult::accepted, "fresh active sync accepted");
+    require(eventually([&] { return synced.snapshot().applied.known; }), "sync known before timeout");
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        require(sync_fake.received.back().data ==
+                ch9329::absolute_mouse_report(0, 2, 1234, 2345, 0).data,
+                "absolute synchronization uses exact coordinates and zero wheel");
+    }
+    require(eventually([&] { return !synced.snapshot().applied.known; }, 400ms),
+            "expired UI heartbeat invalidates applied state");
+    require(synced.synchronize(desired) == SubmitResult::not_ready, "stale heartbeat rejects sync");
+    require(eventually([&] { return synced.snapshot().state == ControlConnectionState::ready; }),
+            "heartbeat expiry completes neutral clear");
+    desired.epoch = synced.snapshot().epoch;
+    synced.set_control_active(true);
+    require(synced.synchronize(desired) == SubmitResult::accepted, "fresh epoch resumes sync");
+    require(eventually([&] { return synced.snapshot().applied.known; }), "fresh epoch applies");
+    {
+        std::lock_guard lock(sync_fake.mutex);
+        sync_fake.answer = false;
+    }
+    require(synced.synchronize(desired) == SubmitResult::accepted, "timeout sync accepted");
+    require(eventually([&] { return synced.snapshot().state == ControlConnectionState::stalled; }, 300ms),
+            "sync ACK timeout stalls");
+    require(!synced.snapshot().applied.known, "stall invalidates applied state");
+    require(eventually([&] { return synced.snapshot().timeout_count == 1; }, 800ms),
+            "sync hard timeout faults link");
+    require(!synced.snapshot().applied.known, "fault cannot publish sync");
+    synced.disconnect();
     return EXIT_SUCCESS;
 }

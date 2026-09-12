@@ -38,6 +38,7 @@ public:
     void update_ui_heartbeat() noexcept override;
 
     [[nodiscard]] SubmitResult submit(ControlEvent event) override;
+    [[nodiscard]] SubmitResult synchronize(InputSync sync) override;
     void release_all() noexcept override;
     [[nodiscard]] ControlSnapshot snapshot() const override;
 

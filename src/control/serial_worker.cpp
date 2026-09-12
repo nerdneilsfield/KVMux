@@ -35,7 +35,7 @@ bool protocol_mode(std::uint8_t mode) { return mode == 0x00U || mode == 0x80U; }
 }  // namespace
 
 struct Ch9329ControlSink::Impl {
-    enum class Purpose { info, config, keyboard, absolute, relative };
+    enum class Purpose { info, config, keyboard, absolute, relative, sync_keyboard, sync_mouse };
     enum class ClearStep { none, keyboard, absolute, relative };
 
     struct Transaction {
@@ -47,12 +47,23 @@ struct Ch9329ControlSink::Impl {
         bool stalled{};
     };
 
-    explicit Impl(SerialIo value) : io(std::move(value)), worker([this] { run(); }) {}
+    explicit Impl(SerialIo value) : io(std::move(value)) {
+        // run() uses members declared after worker; start only after initialization.
+        worker = std::thread([this] { run(); });
+    }
+
+    // Caller holds mutex. A canceled in-flight report still drains its ACK,
+    // but its snapshot can never be published or continue with a held mouse.
+    void invalidate_sync() {
+        status.applied.known = false;
+        input_sync.reset();
+    }
 
     ~Impl() {
         {
             std::lock_guard lock(mutex);
             stopping = true;
+            invalidate_sync();
             queue.request_release();
         }
         wake.notify_one();
@@ -71,11 +82,14 @@ struct Ch9329ControlSink::Impl {
         transaction.reset();
         parser.reset();
         clear_step = ClearStep::none;
-        keyboard.clear();
-        buttons = 0;
-        relative_x = relative_y = wheel = 0.0;
         {
             std::lock_guard lock(mutex);
+            keyboard.clear();
+            buttons = 0;
+            relative_x = relative_y = wheel = 0.0;
+            ordinary_inflight = false;
+            sync_inflight = false;
+            invalidate_sync();
             queue.request_release();
             status.epoch = queue.epoch();
             status.state = reconnect ? ControlConnectionState::reconnecting : ControlConnectionState::fault;
@@ -109,15 +123,18 @@ struct Ch9329ControlSink::Impl {
 
     void begin_clear(Clock::time_point now, bool both_mouse_modes = false) {
         // Both idle and in-flight ACK release paths must forget held input.
-        keyboard.clear(); buttons = 0; relative_x = relative_y = wheel = 0.0;
+        {
+            std::lock_guard lock(mutex);
+            invalidate_sync();
+            ordinary_inflight = false;
+            keyboard.clear(); buttons = 0; relative_x = relative_y = wheel = 0.0;
+            status.state = ControlConnectionState::clearing;
+            status.release_confirmed = false;
+        }
         std::array<std::uint8_t, 6> empty{};
         clear_both_mouse_modes = both_mouse_modes;
         clear_step = ClearStep::keyboard;
         begin(ch9329::keyboard_report(address, 0, empty), Purpose::keyboard, now);
-        update_snapshot([](auto& value) {
-            value.state = ControlConnectionState::clearing;
-            value.release_confirmed = false;
-        });
     }
 
     void finish_clear_step(Clock::time_point now) {
@@ -197,7 +214,10 @@ struct Ch9329ControlSink::Impl {
         const bool was_stalled = transaction->stalled;
         const auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(now - transaction->started);
         transaction.reset();
-        update_snapshot([&](auto& value) { value.last_ack_rtt = rtt; });
+        update_snapshot([&](auto& value) {
+            value.last_ack_rtt = rtt;
+            ordinary_inflight = false;
+        });
 
         if (purpose == Purpose::info) {
             const bool usb_ready = reply.data[1] == 1U;
@@ -222,6 +242,7 @@ struct Ch9329ControlSink::Impl {
             });
             if (!usb_ready) {
                 std::lock_guard lock(mutex);
+                invalidate_sync();
                 queue.request_release();
                 status.epoch = queue.epoch();
                 return true;
@@ -242,6 +263,41 @@ struct Ch9329ControlSink::Impl {
                 configuration_validated = true;
                 handshake_needs_clear = false;
                 begin_clear(now, true);
+            }
+        } else if (purpose == Purpose::sync_keyboard || purpose == Purpose::sync_mouse) {
+            bool canceled{};
+            {
+                std::lock_guard lock(mutex);
+                canceled = !input_sync || was_stalled || release_requested ||
+                    queue.release_pending() || input_sync->epoch != status.epoch ||
+                    !control_active || now - heartbeat > kHeartbeatTimeout;
+                if (canceled) {
+                    invalidate_sync();
+                    (void)queue.take_release_request();
+                    sync_inflight = false;
+                } else if (purpose == Purpose::sync_keyboard) {
+                    const auto& state = input_sync->state;
+                    begin(state.mode == MouseMode::absolute ?
+                        ch9329::absolute_mouse_report(address, state.buttons,
+                            state.absolute_x, state.absolute_y, 0) :
+                        ch9329::relative_mouse_report(address, state.buttons, 0, 0, 0),
+                        Purpose::sync_mouse, now);
+                } else {
+                    const auto& sync = *input_sync;
+                    keyboard.restore(sync.state.modifiers, sync.state.keys);
+                    buttons = sync.state.buttons;
+                    mouse_mode = sync.state.mode;
+                    absolute_x = sync.state.absolute_x;
+                    absolute_y = sync.state.absolute_y;
+                    status.applied = {true, sync.epoch, sync.intent_generation,
+                                      sync.revision, sync.state};
+                    input_sync.reset();
+                    sync_inflight = false;
+                }
+            }
+            if (canceled) {
+                release_requested = false;
+                begin_clear(now);
             }
         } else if (clear_step != ClearStep::none) {
             finish_clear_step(now);
@@ -309,6 +365,7 @@ struct Ch9329ControlSink::Impl {
             if (queue.take_release_request()) { release_requested = true; }
             if (control_active && now - heartbeat > kHeartbeatTimeout) {
                 control_active = false;
+                invalidate_sync();
                 queue.request_release();
                 status.epoch = queue.epoch();
                 release_requested = true;
@@ -352,6 +409,26 @@ struct Ch9329ControlSink::Impl {
             for (const auto& reply : replies) { if (accept_ack(reply, now)) { break; } }
         }
 
+        if (transaction && (transaction->purpose == Purpose::sync_keyboard ||
+                            transaction->purpose == Purpose::sync_mouse) && transaction->written == 0) {
+            bool canceled{};
+            {
+                std::lock_guard lock(mutex);
+                canceled = !input_sync || queue.release_pending() ||
+                    input_sync->epoch != status.epoch || !control_active ||
+                    now - heartbeat > kHeartbeatTimeout;
+                if (canceled) {
+                    invalidate_sync();
+                    sync_inflight = false;
+                    (void)queue.take_release_request();
+                }
+            }
+            if (canceled) {
+                transaction.reset();
+                release_requested = false;
+                begin_clear(now);
+            }
+        }
         if (transaction) {
             if (transaction->written < transaction->bytes.size()) {
                 const auto remaining = std::span(transaction->bytes).subspan(transaction->written);
@@ -374,6 +451,7 @@ struct Ch9329ControlSink::Impl {
                               transaction->written, transaction->bytes.size());
                 transaction->stalled = true;
                 std::lock_guard lock(mutex);
+                invalidate_sync();
                 queue.request_release();
                 status.epoch = queue.epoch();
                 status.state = ControlConnectionState::stalled;
@@ -384,21 +462,32 @@ struct Ch9329ControlSink::Impl {
 
         if (release_requested) {
             release_requested = false;
-            keyboard.clear(); buttons = 0; relative_x = relative_y = wheel = 0.0;
             begin_clear(now);
             return;
         }
 
-        std::optional<ControlEvent> event;
         {
             std::lock_guard lock(mutex);
-            event = queue.pop();
+            if (input_sync) {
+                if (!sync_started) {
+                    sync_started = true;
+                    sync_inflight = true;
+                    // Cancellation must clear the mode this immutable sync will use.
+                    mouse_mode = input_sync->state.mode;
+                    begin(ch9329::keyboard_report(address, input_sync->state.modifiers,
+                        input_sync->state.keys), Purpose::sync_keyboard, now);
+                }
+                return;
+            }
+            if (auto event = queue.pop()) {
+                ordinary_inflight = true;
+                if (auto frame = event_frame(std::move(*event))) {
+                    begin(std::move(frame->first), frame->second, now);
+                }
+                return;
+            }
         }
-        if (event) {
-            if (auto frame = event_frame(std::move(*event))) { begin(std::move(frame->first), frame->second, now); }
-        } else if (now - last_info >= kInfoInterval) {
-            begin_info(now);
-        }
+        if (now - last_info >= kInfoInterval) { begin_info(now); }
     }
 
     void run() {
@@ -407,6 +496,7 @@ struct Ch9329ControlSink::Impl {
                 std::unique_lock lock(mutex);
                 wake.wait_for(lock, std::chrono::milliseconds(1), [this] { return stopping.load(); });
                 if (stopping.load()) {
+                    invalidate_sync();
                     queue.request_release();
                     release_requested = true;
                 }
@@ -434,6 +524,11 @@ struct Ch9329ControlSink::Impl {
     ch9329::Parser parser;
     HidKeyboardState keyboard;
     std::optional<Transaction> transaction;
+    // Shared with admission under mutex; transaction itself is worker-owned.
+    std::optional<InputSync> input_sync;
+    bool sync_started{};
+    bool sync_inflight{};
+    bool ordinary_inflight{};
     std::string port;
     int baud{9600};
     std::uint8_t address{};
@@ -467,6 +562,7 @@ void Ch9329ControlSink::connect(std::string port, int baud_rate, std::uint8_t ad
     impl_->address = address == 0xffU ? 0U : address;
     impl_->connect_requested = true;
     impl_->reconnect_at = {};
+    impl_->invalidate_sync();
     impl_->status.state = ControlConnectionState::opening;
     impl_->wake.notify_one();
 }
@@ -474,6 +570,7 @@ void Ch9329ControlSink::connect(std::string port, int baud_rate, std::uint8_t ad
 void Ch9329ControlSink::disconnect() noexcept {
     std::lock_guard lock(impl_->mutex);
     impl_->control_active = false;
+    impl_->invalidate_sync();
     impl_->queue.request_release();
     impl_->status.epoch = impl_->queue.epoch();
     if (impl_->open) {
@@ -489,6 +586,7 @@ void Ch9329ControlSink::disconnect() noexcept {
 void Ch9329ControlSink::set_mouse_mode(MouseMode mode) {
     std::lock_guard lock(impl_->mutex);
     if (impl_->mouse_mode != mode) {
+        impl_->invalidate_sync();
         impl_->queue.request_release();
         impl_->status.epoch = impl_->queue.epoch();
         impl_->status.release_confirmed = false;
@@ -502,6 +600,7 @@ void Ch9329ControlSink::set_mouse_mode(MouseMode mode) {
 void Ch9329ControlSink::set_control_active(bool active) noexcept {
     std::lock_guard lock(impl_->mutex);
     impl_->control_active = active;
+    if (!active) impl_->invalidate_sync();
     impl_->heartbeat = Clock::now();
     impl_->wake.notify_one();
 }
@@ -513,16 +612,57 @@ void Ch9329ControlSink::update_ui_heartbeat() noexcept {
 
 SubmitResult Ch9329ControlSink::submit(ControlEvent event) {
     std::lock_guard lock(impl_->mutex);
+    if (impl_->input_sync || impl_->sync_inflight) {
+        ++impl_->status.rejected_events;
+        return SubmitResult::overloaded;
+    }
     const auto result = impl_->queue.submit(std::move(event), Clock::now());
+    if (result == SubmitResult::accepted || result == SubmitResult::overloaded)
+        impl_->invalidate_sync();
     if (result != SubmitResult::accepted) { ++impl_->status.rejected_events; }
     impl_->status.epoch = impl_->queue.epoch();
     impl_->wake.notify_one();
     return result;
 }
 
+SubmitResult Ch9329ControlSink::synchronize(InputSync sync) {
+    std::lock_guard lock(impl_->mutex);
+    const auto& state = sync.state;
+    bool valid = sync.intent_generation != 0 && sync.revision != 0 &&
+        state.buttons <= 7 && state.absolute_x <= 4095 && state.absolute_y <= 4095 &&
+        (state.mode == MouseMode::absolute || state.mode == MouseMode::relative);
+    std::array<bool, 256> seen{};
+    for (const auto key : state.keys) {
+        if (key == 0) continue;
+        const bool supported = (key >= 0x04U && key <= 0x73U) ||
+            (key >= 0x7fU && key <= 0x82U) || (key >= 0x85U && key <= 0x87U) ||
+            (key >= 0x89U && key <= 0x8fU);
+        valid = valid && supported && !seen[key];
+        seen[key] = true;
+    }
+    if (!valid || impl_->status.state != ControlConnectionState::ready ||
+        !impl_->status.target_usb_ready || !impl_->status.release_confirmed ||
+        sync.epoch != impl_->status.epoch || impl_->queue.release_pending() ||
+        !impl_->control_active || Clock::now() - impl_->heartbeat > kHeartbeatTimeout) {
+        ++impl_->status.rejected_events;
+        return SubmitResult::not_ready;
+    }
+    if (impl_->input_sync || impl_->sync_inflight || impl_->ordinary_inflight || impl_->queue.size() != 0 ||
+        impl_->relative_x != 0 || impl_->relative_y != 0 || impl_->wheel != 0) {
+        ++impl_->status.rejected_events;
+        return SubmitResult::overloaded;
+    }
+    impl_->status.applied.known = false;
+    impl_->input_sync = std::move(sync);
+    impl_->sync_started = false;
+    impl_->wake.notify_one();
+    return SubmitResult::accepted;
+}
+
 void Ch9329ControlSink::release_all() noexcept {
     std::lock_guard lock(impl_->mutex);
     impl_->control_active = false;
+    impl_->invalidate_sync();
     impl_->queue.request_release();
     impl_->status.epoch = impl_->queue.epoch();
     impl_->status.release_confirmed = false;

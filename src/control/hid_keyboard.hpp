@@ -11,6 +11,8 @@ public:
     [[nodiscard]] bool press(std::uint8_t usage);
     void release(std::uint8_t usage) noexcept;
     void clear() noexcept;
+    // Restore all six report slots, including holes, after a two-report sync.
+    void restore(std::uint8_t modifiers, const std::array<std::uint8_t, 6>& keys) noexcept;
 
     [[nodiscard]] std::uint8_t modifiers() const noexcept { return modifiers_; }
     [[nodiscard]] const std::array<std::uint8_t, 6>& keys() const noexcept { return keys_; }

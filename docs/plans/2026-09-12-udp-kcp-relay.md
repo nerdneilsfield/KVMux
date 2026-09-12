@@ -62,7 +62,7 @@ inventory/build registration in the coherent commit. Exact files/contracts/check
 commands will be specified before readiness, not delegated as an open-ended layer.
 
 ### T2: UDP media delivery and reference recovery
-Status: in_progress (acceptance passed; diff inspection and commit pending). Depends on: T1. Acceptance: A2, A5.
+Status: done. Depends on: T1. Acceptance: A2, A5.
 Deliver bounded frame packetization/reassembly with pacing and refresh feedback,
 using existing owned MJPEG/HEVC payloads and codec interfaces. Resolve loss/FEC
 tradeoffs from the concrete burst-loss acceptance before implementation.
@@ -308,3 +308,61 @@ No relay/source integration, hardware performance, cross-host, adaptive bitrate,
 or session-liveness acceptance is claimed. Native linker retains the existing
 missing /Users/dengqi/.local/lib search-path warning; new media source compiles
 without warnings. No push performed.
+
+## T3 subdivision and next executable unit
+
+T2 is committed and accepted. Split T3 into sequential independently verified
+units: T3a serial-ACKed state synchronization; T3b v3 envelope/control wire and
+session freshness; T3c relay replacement plus router intent recovery. No parallel
+implementation. T3b/T3c exact protocol remains blocked until specified below.
+
+### T3a: Immutable serial state synchronization
+Status: in_progress. Depends on: T2. Acceptance: A4 (serial subset).
+Modify src/control/control_sink.hpp, serial_worker.hpp/.cpp and tests/serial_worker_test.cpp.
+New DesiredInputState: uint8 modifiers, array<uint8_t,6> keys, uint8 buttons
+(bits0..2), MouseMode mode, uint16 absolute_x/y (0..4095). No deltas/wheel.
+New InputSync: uint64 epoch,intent_generation,revision plus DesiredInputState.
+New AppliedInputState: bool known; uint64 epoch,intent_generation,revision;
+DesiredInputState state. Append AppliedInputState applied to ControlSnapshot.
+ControlSink::synchronize(InputSync)->SubmitResult default not_ready, real
+Ch9329ControlSink override. Default is unsupported semantics for current fakes,
+not old-wire compatibility. Normal ControlEvent unchanged in this unit.
+
+Only ready/USB-ready/release-confirmed current epoch accepts synchronization;
+nonzero intent/revision, unique supported usages excluding modifier usages in
+keys array, buttons<=7, valid mode andcoordinates. Require control_active and
+fresh existing UI heartbeat. Do not hardcode user-configurable Host exclusion
+inside serial layer; router provides eligible state in T3c.
+At most one pending/inflight snapshot; second submission returns overloaded
+(no invisible overwrite). Fence ordinary queued input: synchronization admitted
+only when action queue empty, no outstanding delta residuals; pause ordinary
+submit until its snapshot completes. Worker existing info transaction may finish
+first; snapshot must not interleave ordinary reports. Execute keyboard report,
+then mouse report (zero relative deltas andwheel) from an immutable snapshot.
+Publish applied.known only after BOTH successful matching serial ACKs and current
+epoch, intent and revision. Never interpret GET_INFO as state readback. Existing
+release/fault/disconnect/stall invalidates applied immediately and purges pending
+sync; never publish a late canceled snapshot. Internal keyboard/button/absolute
+state must match synchronization for subsequent healthy edges. On accepting
+ordinary input invalidate snapshot-known conservatively until next synchronization;
+healthy event application acknowledgements are a later T3b/T3c contract, not
+silently inferred. Snapshot application does not mean target USB/application ACK.
+
+Tests use existing SerialIo fake: keyboard-onlyACK insufficient; mouseACK publishes
+exact immutable revision; second snapshot cannot relabel first; release/epoch
+change betweenACKs prevents publication and starts neutral clear; relative sync
+hasbuttonsbutzerodeltas/wheel; fault/timeout invalidates state. Existing serial
+release andrelative uncertain-action tests must still pass.
+Commands repo cwd: cmake --build --preset macos-debug --target
+kvmux_serial_worker_test kvmux_ch9329_control_test -j8;
+ctest --preset macos-debug -R '^(serial_worker|ch9329_control)$' --output-on-failure.
+Inspect diff and commit this coherent control capability+tests+plan, no push.
+
+T3a public types now match the declared contract in control_sink.hpp.
+T3c must distinguish a completed synchronization barrier from the current
+applied.known snapshot: ordinary healthy input invalidates snapshot knowledge but
+must NOT re-enter recovery on every key/mouse action. Only actual freshness,
+epoch/readiness failure or explicit cancellation resets the synchronization barrier.
+A narrow serial-worker prerequisite moves thread launch to the constructor body,
+after all members initialize; this fixes observed construction-order UB, not a
+proven cause of the historical network timeout.
