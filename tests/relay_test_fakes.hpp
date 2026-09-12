@@ -12,6 +12,8 @@ struct FakeSerial {
     bool opened{};
     std::size_t write_limit{3};
     bool answer{true};
+    bool hold_mouse_ack{};
+    std::deque<std::uint8_t> held_ack;
     std::deque<std::uint8_t> incoming;
     kvmux::ch9329::Parser requests;
     std::vector<kvmux::ch9329::Frame> received;
@@ -38,7 +40,8 @@ struct FakeSerial {
                         response.data[1] = 0x80;
                     }
                     const auto encoded = kvmux::ch9329::encode(response);
-                    incoming.insert(incoming.end(), encoded.begin(), encoded.end());
+                    auto& destination = hold_mouse_ack && (request.command == 0x04U || request.command == 0x05U) ? held_ack : incoming;
+                    destination.insert(destination.end(), encoded.begin(), encoded.end());
                 }
                 return static_cast<std::ptrdiff_t>(count);
             },

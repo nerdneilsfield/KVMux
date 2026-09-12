@@ -633,3 +633,11 @@ actual2s blackout traces set boundedpertestlimits, never remove behavior checks.
 No new uncertain protocol decision blocks this task; actual implementation bugs
 must be fixed and verified before marking it done. T4 native cross-host and
 loadadaptation acceptance are not implied by T3c success.
+
+T3c integration currently verifying full Debug suite. Real UDP interruption cases,
+HEVC reference recovery, slow encoder/control independence, delayed serial ACK,
+wrong peer/tuple rejection and limited-rate operation passed focused checks.
+Full-suite execution exposed a previous-cancel/new-macro intent race; implementation
+worker fixed generation/admission ordering and added actual serial Host-macro and
+relative-mode synchronization assertions. Final full-suite result/commit pending;
+do not classify this task complete from earlier targeted passes.

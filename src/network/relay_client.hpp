@@ -19,8 +19,8 @@ struct ClientVideoSnapshot {
     std::uint64_t recoveries{};
     std::string error;
 };
-// Per-client lifetime totals for complete relay packets, including the 12-byte
-// protocol header. Excludes TCP/IP overhead, retransmissions and partial packets.
+// Per-client lifetime totals for accepted UDP datagrams, including the 32-byte
+// envelope and retransmissions. Excludes UDP/IP headers.
 // stop()/start() preserve totals; a new client starts at zero. An in-flight
 // packet may finish after stop(), which does not wait for network workers.
 struct TrafficSnapshot {
@@ -36,8 +36,9 @@ public:
     void mouse_mode(MouseMode mode);
     void active(bool active) noexcept;
     void gui_progress() noexcept;
-    void video_presented(std::uint64_t sequence) noexcept;
-    SubmitResult submit(ControlEvent event);
+    void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept;
+    kvmux::SubmitResult synchronize(InputSync);
+    kvmux::SubmitResult submit(ControlEvent event);
     ControlSnapshot control_snapshot() const;
     CaptureSnapshot capture_snapshot() const;
     TrafficSnapshot traffic_snapshot() const;
@@ -67,8 +68,9 @@ public:
     void set_mouse_mode(MouseMode mode) override { client_->mouse_mode(mode); }
     void set_control_active(bool value) noexcept override { client_->active(value); }
     void update_ui_heartbeat() noexcept override { client_->gui_progress(); }
-    void video_presented(std::uint64_t sequence) noexcept override { client_->video_presented(sequence); }
-    SubmitResult submit(ControlEvent event) override { return client_->submit(std::move(event)); }
+    void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept override { client_->video_presented(generation, sequence); }
+    kvmux::SubmitResult synchronize(InputSync value) override { return client_->synchronize(std::move(value)); }
+    kvmux::SubmitResult submit(ControlEvent event) override { return client_->submit(std::move(event)); }
     void release_all() noexcept override { client_->release(); }
     ControlSnapshot snapshot() const override { return client_->control_snapshot(); }
 private:

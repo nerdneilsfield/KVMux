@@ -45,7 +45,7 @@ const char* control_state(ControlConnectionState state) {
     return "Unknown";
 }
 const char* input_state(InputState state) {
-    switch (state) { case InputState::preview: return "Preview"; case InputState::arming: return "Arming"; case InputState::captured: return "Captured"; case InputState::releasing: return "Releasing"; case InputState::fault: return "Fault"; }
+    switch (state) { case InputState::preview: return "Preview"; case InputState::arming: return "Arming"; case InputState::captured: return "Captured"; case InputState::recovering: return "Recovering"; case InputState::releasing: return "Releasing"; case InputState::fault: return "Fault"; }
     return "Unknown";
 }
 std::string mode_text(const CaptureMode& mode) {
@@ -175,7 +175,8 @@ int main(int argc, char** argv) {
         if (std::chrono::steady_clock::now() >= next_serial_scan) { ports = enumerate_serial_ports(); next_serial_scan = std::chrono::steady_clock::now() + std::chrono::seconds(1); }
         session->tick();
         if (auto newest = session->take_latest_frame()) { current_frame = std::move(newest); diagnostics.record_decode(current_frame->decoded); }
-        if (current_frame && renderer.upload(*current_frame, config.color_override)) { diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
+        if (current_frame && current_frame->generation != session->snapshot().capture.generation) current_frame.reset();
+        if (current_frame && renderer.upload(*current_frame, config.color_override)) { session->video_presented(current_frame->generation, current_frame->sequence); diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
         const auto snapshot = session->snapshot();
         if (debug) {
             const auto status = std::string("capture=") + capture_state(snapshot.capture.state) +
@@ -215,7 +216,10 @@ int main(int argc, char** argv) {
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
-        const bool captured = snapshot.input_state == InputState::captured;
+        const bool captured = snapshot.input_state == InputState::captured || snapshot.input_state == InputState::recovering;
+        const bool relative_capture = captured && config.mouse_mode == MouseMode::relative;
+        if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
+            SDL_SetWindowRelativeMouseMode(window, relative_capture);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.F);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.F);
         ImGui::Begin("KVMuxRoot", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |

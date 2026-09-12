@@ -63,6 +63,8 @@ struct ControlSnapshot {
     std::uint64_t rejected_events{};
     std::string error;
     AppliedInputState applied;
+    // Network-only interruption can suspend execution without revoking UI intent.
+    bool recoverable_transport{};
 };
 
 class ControlSink {
@@ -73,7 +75,7 @@ public:
     virtual void set_mouse_mode(MouseMode) {}
     virtual void set_control_active(bool) noexcept {}
     virtual void update_ui_heartbeat() noexcept {}
-    virtual void video_presented(std::uint64_t) noexcept {}
+    virtual void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept { (void)generation; (void)sequence; }
     [[nodiscard]] virtual SubmitResult submit(ControlEvent event) = 0;
     [[nodiscard]] virtual SubmitResult synchronize(InputSync) { return SubmitResult::not_ready; }
     virtual void release_all() noexcept = 0;

@@ -29,10 +29,8 @@ add_library(kvmux_core STATIC
     src/network/relay_server.cpp
     src/network/relay_client.cpp
     src/network/media_codec_wire.cpp
-    src/network/relay_protocol.cpp
     src/network/relay_wire.cpp
     src/network/relay_session.cpp
-    src/network/tcp_socket.cpp
     src/network/udp_socket.cpp
     src/network/udp_media.cpp
     src/network/kcp_channel.cpp
@@ -214,23 +212,21 @@ if(BUILD_TESTING)
     add_test(NAME udp_kcp COMMAND kvmux_udp_kcp_test)
     set_tests_properties(udp_kcp PROPERTIES TIMEOUT 15)
 
-    add_executable(kvmux_tcp_socket_test tests/tcp_socket_test.cpp)
-    target_link_libraries(kvmux_tcp_socket_test PRIVATE kvmux::core)
-    add_test(NAME tcp_socket COMMAND kvmux_tcp_socket_test)
-    set_tests_properties(tcp_socket PROPERTIES TIMEOUT 15)
 
-    add_executable(kvmux_relay_server_test tests/relay_server_test.cpp)
+    add_executable(kvmux_relay_server_test tests/relay_server_test.cpp src/app/kvm_session.cpp)
     target_link_libraries(kvmux_relay_server_test PRIVATE kvmux::core)
     add_test(NAME relay_server COMMAND kvmux_relay_server_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
     set_tests_properties(relay_server PROPERTIES TIMEOUT 15)
+
+    add_executable(kvmux_relay_recovery_test tests/relay_recovery_test.cpp src/app/kvm_session.cpp)
+    target_link_libraries(kvmux_relay_recovery_test PRIVATE kvmux::core)
+    add_test(NAME relay_recovery COMMAND kvmux_relay_recovery_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+    set_tests_properties(relay_recovery PROPERTIES TIMEOUT 35)
 
     add_executable(kvmux_media_codec_wire_test tests/media_codec_wire_test.cpp)
     target_link_libraries(kvmux_media_codec_wire_test PRIVATE kvmux::core)
     add_test(NAME media_codec_wire COMMAND kvmux_media_codec_wire_test)
 
-    add_executable(kvmux_relay_protocol_test tests/relay_protocol_test.cpp)
-    target_link_libraries(kvmux_relay_protocol_test PRIVATE kvmux::core)
-    add_test(NAME relay_protocol COMMAND kvmux_relay_protocol_test)
 
     add_executable(kvmux_relay_client_test tests/relay_client_test.cpp src/app/kvm_session.cpp)
     target_link_libraries(kvmux_relay_client_test PRIVATE kvmux::core)

@@ -12,6 +12,8 @@ struct ServerOptions {
     VideoCodec codec{VideoCodec::mjpeg};
     CodecBackend encoder_backend{CodecBackend::automatic};
     std::uint32_t bitrate{8'000'000};
+    // UDP envelope, media payload and XOR parity; excludes UDP/IP headers.
+    std::uint64_t transport_bytes_per_second{12'000'000};
 };
 // Caller starts native capture and connects the serial sink first.
 // stop() joins all workers; capture and sink must outlive the server.

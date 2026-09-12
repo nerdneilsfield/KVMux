@@ -54,6 +54,7 @@ int reconnect_test(GLuint ui_framebuffer, const char* jpeg_path) {
             if (auto frame = session->take_latest_frame()) {current = std::move(frame); ++frames;}
             if (current) {
                 if (!renderer.upload(*current, kvmux::ColorOverride::automatic)) ++failures;
+                else session->video_presented(current->generation, current->sequence);
                 GLint binding{}; glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
                 glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(renderer.texture_id()));
                 unsigned char rgba[16 * 16 * 4]; GLint internal{};
@@ -78,15 +79,16 @@ int reconnect_test(GLuint ui_framebuffer, const char* jpeg_path) {
         }
         if (frames < 20) { std::fprintf(stderr, "reconnect=%d only %d frames\n", cycle, frames); ++failures; }
         if (cycle == 2) {
-            // Peer closes both sockets. Let the existing session observe Fault
-            // before the next Connect replaces it, without restarting the GUI.
+            // UDP absence suspends freshness, not the separately bounded 10s
+            // session. Reconnect remains possible without restarting the GUI.
             server.stop();
             const auto fault_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (session->snapshot().capture.state != kvmux::CaptureState::fault &&
+            while (session->snapshot().video_state != kvmux::SessionVideoState::stale &&
                    std::chrono::steady_clock::now() < fault_deadline) {
                 session->tick(); begin(); end();
             }
-            if (session->snapshot().capture.state != kvmux::CaptureState::fault) ++failures;
+            if (session->snapshot().video_state != kvmux::SessionVideoState::stale ||
+                session->snapshot().capture.state == kvmux::CaptureState::fault) ++failures;
             if (!server.start({"127.0.0.1", 0, 0}, error)) ++failures;
         } else {
             session->release_control(); (void)session->stop_capture(); (void)session->disconnect_control();

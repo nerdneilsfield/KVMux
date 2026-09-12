@@ -79,6 +79,7 @@ public:
     void release_control() noexcept;
 
     [[nodiscard]] std::optional<VideoFrame> take_latest_frame();
+    void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept;
     [[nodiscard]] KvmSessionSnapshot snapshot() const;
 
     // Idempotent. Serial release/close is observed for at most serial_timeout.

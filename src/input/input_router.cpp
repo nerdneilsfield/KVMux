@@ -88,7 +88,7 @@ bool InputRouter::submit(ControlPayload payload) {
     const auto snapshot = sink_.snapshot();
     const auto result = sink_.submit(
         {snapshot.epoch, ++sequence_, Clock::now(), payload});
-    if (result != SubmitResult::accepted) { fail(); return false; }
+    if (result != SubmitResult::accepted) { if (snapshot.recoverable_transport) recover(); else fail(); return false; }
     std::visit([this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, AbsoluteMotion> ||
@@ -135,7 +135,7 @@ void InputRouter::handle_key(const InputKey& key) {
     }
 
     if (key.usb_usage == host_usage_) {
-        if (key.pressed && state_ == InputState::captured) {
+        if (key.pressed && (capture_intended() || special_active())) {
             swallowed_host_releases_.insert(key.usb_usage);
             begin_release();
         } else if (!key.pressed) {
@@ -143,17 +143,24 @@ void InputRouter::handle_key(const InputKey& key) {
         }
         return;
     }
-    if (state_ != InputState::captured || key.repeat) { return; }
     if (isolated_keys_.contains(key.usb_usage)) {
         if (!key.pressed) { isolated_keys_.erase(key.usb_usage); }
         return;
     }
+    if (key.repeat) return;
+    if (capture_intended()) {
+        if (key.pressed) (void)held_.press(static_cast<std::uint8_t>(key.usb_usage));
+        else held_.release(static_cast<std::uint8_t>(key.usb_usage));
+    }
+    if (state_ != InputState::captured) return;
     (void)submit(KeyEdge{static_cast<std::uint8_t>(key.usb_usage), key.pressed});
 }
 
 void InputRouter::handle_pointer(const InputPointerMotion& motion) {
-    if (state_ != InputState::captured || mouse_mode_ != MouseMode::absolute) { return; }
+    if (!capture_intended() || mouse_mode_ != MouseMode::absolute) return;
     const auto [x, y] = absolute(motion.x, motion.y);
+    desired_x_ = x; desired_y_ = y;
+    if (!captured()) return;
     (void)submit(AbsoluteMotion{static_cast<double>(x) / 4095.0,
                                 static_cast<double>(y) / 4095.0});
 }
@@ -177,14 +184,14 @@ void InputRouter::handle_button(const InputButton& button) {
         state_ = InputState::arming;
         activation_button_ = number;
         activation_released_ = false;
-        isolated_keys_ = physical_keys_;
+        isolated_keys_ = physical_keys_; held_.clear();
         return;
     }
     if (state_ == InputState::arming) {
         if (number == activation_button_ && !button.pressed) { activation_released_ = true; }
         return;
     }
-    if (state_ != InputState::captured) { return; }
+    if (!capture_intended()) return;
     if (button.pressed) {
         if (!video_rect_.contains(button.x, button.y) && buttons_ == 0) { return; }
         buttons_ = static_cast<std::uint8_t>(buttons_ | bit);
@@ -193,6 +200,8 @@ void InputRouter::handle_button(const InputButton& button) {
         buttons_ = static_cast<std::uint8_t>(buttons_ & ~bit);
     }
     const auto [x, y] = absolute(button.x, button.y);
+    desired_x_ = x; desired_y_ = y;
+    if (!captured()) return;
     (void)submit(ButtonEdge{static_cast<std::uint8_t>(number - 1U), button.pressed,
                             static_cast<double>(x) / 4095.0,
                             static_cast<double>(y) / 4095.0});
@@ -247,27 +256,80 @@ std::pair<std::uint16_t, std::uint16_t> InputRouter::absolute(
             static_cast<std::uint16_t>(std::min(4095.0, std::floor(4096.0 * v)))};
 }
 
-void InputRouter::tick(const Clock::time_point now) {
-    if (state_ == InputState::arming && activation_released_ && video_fresh_ &&
-        sink_ready_released()) {
-        state_ = InputState::captured;
-        activation_button_ = 0;
-    } else if (state_ == InputState::releasing && sink_.snapshot().release_confirmed) {
-        state_ = InputState::preview;
-        release_requested_ = false;
+DesiredInputState InputRouter::desired() const {
+    DesiredInputState value;
+    value.modifiers = held_.modifiers(); value.keys = held_.keys();
+    // Canonical reports without changing the serial rollover/ignored-key policy.
+    std::sort(value.keys.begin(), value.keys.end());
+    value.buttons = buttons_; value.mode = mouse_mode_;
+    value.absolute_x = desired_x_; value.absolute_y = desired_y_;
+    return value;
+}
+void InputRouter::recover() noexcept {
+    if (temporary_intent_) { begin_release(); return; }
+    if (!capture_intended()) return;
+    state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
+    residual_x_ = residual_y_ = wheel_residual_ = 0;
+    special_steps_.clear(); pending_special_.reset(); pointer_ = {};
+}
+void InputRouter::synchronize(Clock::time_point now) {
+    const auto snapshot = sink_.snapshot();
+    if (!video_fresh_ || !sink_ready_released()) { sync_.reset(); return; }
+    const auto state = desired();
+    auto equal = [](const DesiredInputState& a, const DesiredInputState& b) {
+        return a.modifiers == b.modifiers && a.keys == b.keys && a.buttons == b.buttons &&
+            a.mode == b.mode && a.absolute_x == b.absolute_x && a.absolute_y == b.absolute_y;
+    };
+    if (sync_) {
+        const auto& ack = snapshot.applied;
+        if (ack.known && ack.epoch == sync_->epoch && ack.intent_generation == sync_->intent_generation &&
+            ack.revision == sync_->revision && equal(ack.state, sync_->state)) {
+            const bool unchanged = equal(state, sync_->state);
+            sync_.reset();
+            if (unchanged) {
+                barrier_epoch_ = snapshot.epoch;
+                if (pending_special_) {
+                    auto keys = *pending_special_; pending_special_.reset(); schedule_special(keys, now);
+                } else state_ = InputState::captured;
+                return;
+            }
+        } else if (snapshot.epoch != sync_->epoch || now - sync_at_ >= std::chrono::milliseconds(500)) sync_.reset();
+        else return;
     }
+    InputSync value{snapshot.epoch, intent_, ++revision_, state};
+    if (sink_.synchronize(value) == SubmitResult::accepted) { sync_ = value; sync_at_ = now; }
+}
+void InputRouter::tick(const Clock::time_point now) {
+    const auto snapshot = sink_.snapshot();
+    if (snapshot.recoverable_transport && state_ == InputState::arming && activation_released_) {
+        ++intent_; revision_ = 0; activation_button_ = 0; state_ = InputState::recovering;
+    }
+    if (snapshot.recoverable_transport && capture_intended() &&
+        (!video_fresh_ || !sink_ready_released() || (barrier_epoch_ && barrier_epoch_ != snapshot.epoch))) recover();
+    if (temporary_intent_ && (!video_fresh_ || !sink_ready_released())) { begin_release(); return; }
+    if (state_ == InputState::arming && activation_released_ && video_fresh_ && sink_ready_released()) {
+        activation_button_ = 0;
+        state_ = InputState::captured;
+    } else if (state_ == InputState::releasing && snapshot.release_confirmed) {
+        state_ = InputState::preview; release_requested_ = false;
+    }
+    if (snapshot.recoverable_transport && (state_ == InputState::recovering || pending_special_)) synchronize(now);
     while (!special_steps_.empty() && special_steps_.front().due <= now) {
-        auto step = std::move(special_steps_.front());
-        special_steps_.erase(special_steps_.begin());
+        auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
         for (const auto edge : step.edges) {
             if (!submit(edge)) { special_steps_.clear(); return; }
         }
+    }
+    if (temporary_intent_ && !pending_special_ && special_steps_.empty()) {
+        // Keep the final up edges inside the active lease until the next UI turn.
+        temporary_intent_ = false;
     }
 }
 
 void InputRouter::begin_release() noexcept {
     pointer_ = {};
-    special_steps_.clear();
+    special_steps_.clear(); pending_special_.reset(); temporary_intent_ = false;
+    sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
     isolated_keys_.clear();
@@ -275,10 +337,10 @@ void InputRouter::begin_release() noexcept {
     state_ = InputState::releasing;
 }
 
-void InputRouter::release() noexcept { if (state_ != InputState::preview) begin_release(); }
+void InputRouter::release() noexcept { if (state_ != InputState::preview || special_active()) begin_release(); }
 void InputRouter::focus_lost() noexcept { begin_release(); }
 void InputRouter::minimized() noexcept { begin_release(); }
-void InputRouter::video_stale() noexcept { video_fresh_ = false; begin_release(); }
+void InputRouter::video_stale() noexcept { video_fresh_ = false; if (sink_.snapshot().recoverable_transport) recover(); else begin_release(); }
 void InputRouter::fail() noexcept { pointer_ = {}; sink_.release_all(); release_requested_ = true; state_ = InputState::fault; }
 void InputRouter::clear_fault() noexcept {
     if (state_ == InputState::fault && sink_ready_released()) {
@@ -288,22 +350,25 @@ void InputRouter::clear_fault() noexcept {
 }
 
 bool InputRouter::send_special(const SpecialKeys keys, const Clock::time_point now) {
-    if (state_ != InputState::preview || !special_steps_.empty() || !sink_ready_released()) {
-        return false;
+    if (state_ != InputState::preview || special_active() || !sink_ready_released()) return false;
+    if (sink_.snapshot().recoverable_transport) {
+        if (!video_fresh_) return false;
+        ++intent_; revision_ = 0; temporary_intent_ = true; pending_special_ = keys;
+        held_.clear(); buttons_ = 0; synchronize(now); return true;
     }
+    schedule_special(keys, now); return !special_steps_.empty();
+}
+void InputRouter::schedule_special(const SpecialKeys keys, const Clock::time_point now) {
     std::vector<std::uint8_t> usages;
-    if (keys == SpecialKeys::control_alt_delete) { usages = {0xe0, 0xe2, 0x4c}; }
-    else if (keys == SpecialKeys::alt_tab) { usages = {0xe2, 0x2b}; }
-    else if (supported_usb_keyboard_usage(host_usage_)) {
-        usages = {static_cast<std::uint8_t>(host_usage_)};
-    } else { return false; }
-    std::vector<KeyEdge> down;
-    std::vector<KeyEdge> up;
-    for (const auto usage : usages) { down.push_back({usage, true}); }
-    for (auto it = usages.rbegin(); it != usages.rend(); ++it) { up.push_back({*it, false}); }
+    if (keys == SpecialKeys::control_alt_delete) usages = {0xe0, 0xe2, 0x4c};
+    else if (keys == SpecialKeys::alt_tab) usages = {0xe2, 0x2b};
+    else if (supported_usb_keyboard_usage(host_usage_)) usages = {static_cast<std::uint8_t>(host_usage_)};
+    else return;
+    std::vector<KeyEdge> down, up;
+    for (const auto usage : usages) down.push_back({usage, true});
+    for (auto it = usages.rbegin(); it != usages.rend(); ++it) up.push_back({*it, false});
     special_steps_.push_back({now, std::move(down)});
     special_steps_.push_back({now + std::chrono::milliseconds(20), std::move(up)});
-    return true;
 }
 
 }  // namespace kvmux

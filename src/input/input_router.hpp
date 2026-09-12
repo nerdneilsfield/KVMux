@@ -1,6 +1,7 @@
 #pragma once
 
 #include "control/control_sink.hpp"
+#include "control/hid_keyboard.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -12,7 +13,7 @@
 
 namespace kvmux {
 
-enum class InputState { preview, arming, captured, releasing, fault };
+enum class InputState { preview, arming, captured, recovering, releasing, fault };
 enum class InputMouseButton : std::uint8_t { left = 1, right = 2, middle = 3 };
 enum class SpecialKeys { control_alt_delete, alt_tab, host_key };
 enum class TargetAspect { full_frame, ratio_16_9, ratio_16_10, ratio_4_3 };
@@ -66,7 +67,9 @@ public:
     [[nodiscard]] MouseMode mouse_mode() const noexcept { return mouse_mode_; }
     [[nodiscard]] bool captured() const noexcept { return state_ == InputState::captured; }
 
-    [[nodiscard]] bool special_active() const noexcept { return !special_steps_.empty(); }
+    [[nodiscard]] bool capture_intended() const noexcept { return state_ == InputState::captured || state_ == InputState::recovering || (state_ == InputState::arming && activation_released_); }
+
+    [[nodiscard]] bool special_active() const noexcept { return pending_special_.has_value() || !special_steps_.empty(); }
 
     // Set the active desktop region, which may exclude bars inside the capture.
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
@@ -107,10 +110,21 @@ private:
     void handle_wheel(const InputWheel& wheel);
     void begin_release() noexcept;
     void fail() noexcept;
+    void recover() noexcept;
+    DesiredInputState desired() const;
+    void synchronize(Clock::time_point now);
+    void schedule_special(SpecialKeys, Clock::time_point);
     void send_relative_integral(int dx, int dy, int wheel);
     [[nodiscard]] std::pair<std::uint16_t, std::uint16_t> absolute(double x,
                                                                   double y) const noexcept;
 
+    HidKeyboardState held_;
+    std::uint64_t intent_{}, revision_{}, barrier_epoch_{};
+    std::optional<InputSync> sync_;
+    Clock::time_point sync_at_{};
+    std::uint16_t desired_x_{}, desired_y_{};
+    std::optional<SpecialKeys> pending_special_;
+    bool temporary_intent_{};
     ControlSink& sink_;
     InputState state_{InputState::preview};
     MouseMode mouse_mode_{MouseMode::absolute};
