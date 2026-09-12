@@ -299,6 +299,8 @@ int main(int argc, char** argv) {
     std::optional<VideoFrame> current_frame;
     std::optional<std::pair<std::uint64_t, std::uint64_t>> recorded_frame;
     std::string media_message;
+    std::filesystem::path displayed_snapshot_path;
+    std::string displayed_snapshot_error;
     std::string last_status;
 
     while (running) {
@@ -418,14 +420,31 @@ int main(int argc, char** argv) {
         }
         was_captured = captured;
         const bool relative_capture = captured && config.mouse_mode == MouseMode::relative;
+        const auto media_status = recording.status();
+        if (media_status.snapshot_error != displayed_snapshot_error) {
+            displayed_snapshot_error = media_status.snapshot_error;
+            if (!displayed_snapshot_error.empty())
+                media_message = "Screenshot error: " + displayed_snapshot_error;
+        }
+        if (media_status.last_snapshot_path != displayed_snapshot_path) {
+            displayed_snapshot_path = media_status.last_snapshot_path;
+            if (!displayed_snapshot_path.empty())
+                media_message = "Screenshot saved: " + displayed_snapshot_path.string();
+        }
         const auto media_actions = [&] {
-            const auto status = recording.status();
+            const auto& status = media_status;
             const bool valid_visible_cpu_frame = current_frame && current_frame->frame &&
                 !current_frame->frame->hw_frames_ctx && current_frame->generation == snapshot.capture.generation &&
                 snapshot.video_fresh && renderer.texture_id() != 0;
             ImGui::BeginDisabled(!valid_visible_cpu_frame);
-            if (ImGui::MenuItem("Save screenshot"))
-                media_message = recording.snapshot(*current_frame) ? "Screenshot queued." : "Could not queue screenshot.";
+            if (ImGui::MenuItem("Save screenshot")) {
+                if (recording.snapshot(*current_frame)) {
+                    media_message = "Screenshot queued.";
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    media_message = "Could not queue screenshot.";
+                }
+            }
             ImGui::EndDisabled();
             ImGui::BeginDisabled(!valid_visible_cpu_frame || status.state != RecordingState::idle);
             if (ImGui::MenuItem("Start recording"))
@@ -446,6 +465,8 @@ int main(int argc, char** argv) {
                 ImGui::TextWrapped("%s", status.output_path.string().c_str());
             }
             if (!status.error.empty()) ImGui::TextWrapped("Error: %s", status.error.c_str());
+            if (!status.snapshot_error.empty()) ImGui::TextWrapped("Screenshot error: %s", status.snapshot_error.c_str());
+            else if (!status.last_snapshot_path.empty()) ImGui::TextWrapped("Screenshot saved: %s", status.last_snapshot_path.string().c_str());
             else if (!media_message.empty()) ImGui::TextUnformatted(media_message.c_str());
         };
         if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
@@ -749,7 +770,9 @@ int main(int argc, char** argv) {
                     capture_state(snapshot.capture.state), control_state(snapshot.control.state),
                     snapshot.control.target_usb_ready ? "ready" : "not ready",
                     snapshot.capture.error.c_str(), snapshot.control.error.c_str());
-            if (!recording_status.error.empty()) ImGui::SetTooltip("Recording error: %s", recording_status.error.c_str());
+            if (!recording_status.snapshot_error.empty()) ImGui::SetTooltip("Screenshot error: %s", recording_status.snapshot_error.c_str());
+            else if (!recording_status.last_snapshot_path.empty()) ImGui::SetTooltip("Screenshot saved: %s", recording_status.last_snapshot_path.string().c_str());
+            else if (!recording_status.error.empty()) ImGui::SetTooltip("Recording error: %s", recording_status.error.c_str());
             else if (!recording_status.output_path.empty()) ImGui::SetTooltip("Recording: %s\n%s\n%s",
                 recording_state(recording_status.state), recording_status.output_path.filename().string().c_str(),
                 recording_status.output_path.string().c_str());
