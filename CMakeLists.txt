@@ -120,6 +120,27 @@ target_link_libraries(kvmux-relay PRIVATE kvmux::core kvmux::capture)
 
 if(KVMUX_BUILD_GUI)
     add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp)
+    # SDL_GetBasePath resolves to Contents/Resources in a macOS bundle.
+    set(kvmux_branding "${CMAKE_CURRENT_SOURCE_DIR}/assets/branding")
+    if(APPLE)
+        target_sources(kvmux PRIVATE "${kvmux_branding}/app.icns"
+            "${kvmux_branding}/logo.png" "${kvmux_branding}/app-icon.png")
+        set_source_files_properties("${kvmux_branding}/app.icns" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+        set_source_files_properties("${kvmux_branding}/logo.png" "${kvmux_branding}/app-icon.png" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources/assets/branding)
+    else()
+        add_custom_command(TARGET kvmux POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:kvmux>/assets/branding"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${kvmux_branding}/logo.png" "${kvmux_branding}/app-icon.png"
+                "$<TARGET_FILE_DIR:kvmux>/assets/branding")
+    endif()
+    if(WIN32)
+        enable_language(RC)
+        configure_file(packaging/windows/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+        target_sources(kvmux PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    endif()
     if(APPLE)
         configure_file(packaging/macos/Info.plist.in "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
         set_target_properties(kvmux PROPERTIES MACOSX_BUNDLE TRUE
@@ -261,6 +282,14 @@ if(KVMUX_BUILD_GUI)
         ]])
     else()
         install(TARGETS kvmux RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+        install(FILES "${kvmux_branding}/logo.png" "${kvmux_branding}/app-icon.png"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}/assets/branding")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            install(FILES "${kvmux_branding}/app-icon.png"
+                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/1024x1024/apps" RENAME kvmux.png)
+            install(FILES packaging/linux/dev.kvmux.desktop
+                DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
+        endif()
     endif()
 endif()
 install(FILES third_party/INVENTORY.md DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux")

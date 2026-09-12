@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KVMux
+Comment=View and control a connected computer
+Exec=kvmux
+Icon=kvmux
+Terminal=false
+Categories=System;RemoteAccess;
