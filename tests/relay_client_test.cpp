@@ -143,8 +143,37 @@ void hevc_test(const char* path) {
     gui.session.release_control();
 }
 
+void first_frame_activation_test(const char* jpeg) {
+    RelayFixture relay(jpeg);
+    GuiFixture gui(relay.options(), true);
+    bool injected = false;
+    gui.after_session_tick = [&] {
+        if (injected || !gui.session.snapshot().video_fresh) return;
+        injected = true;
+        assert(gui.session.snapshot().video.processed_frames == 0);
+        // Complete decode/presentation after the tick cached a false video gate,
+        // but before activate() checks readiness and sends its only click.
+        gui.capture->hold = false;
+        assert(until([&] { return gui.session.snapshot().video.processed_frames > 0; }));
+        auto frame = gui.session.take_latest_frame(); assert(frame);
+        gui.session.video_presented(frame->generation, frame->sequence);
+        gui.presented_generation = frame->generation;
+        gui.presented_arrival = frame->arrival;
+        assert(until([&] {
+            gui.client->gui_progress();
+            const auto state = gui.session.snapshot();
+            return state.control.state == ControlConnectionState::ready &&
+                state.control.target_usb_ready && state.control.release_confirmed && state.video_fresh;
+        }));
+    };
+    gui.activate();
+    assert(injected);
+    gui.session.release_control();
+}
+
 int main(int argc, char** argv) {
     assert(argc > 2);
+    first_frame_activation_test(argv[1]);
     hevc_test(argv[2]);
     RelayFixture relay(argv[1]); GuiFixture gui(relay.options()); gui.activate();
     gui.session.release_control();

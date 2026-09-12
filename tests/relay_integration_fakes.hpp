@@ -97,19 +97,42 @@ struct UdpProxy {
         kvmux::relay::ClientOptions options; options.control_port = *control.local_port(); options.video_port = *video.local_port(); return options;
     }
 };
+struct GatedNetworkCapture final : CaptureSource {
+    std::shared_ptr<kvmux::relay::RelayClient> client;
+    std::atomic<bool> hold{false};
+    explicit GatedNetworkCapture(std::shared_ptr<kvmux::relay::RelayClient> value) : client(std::move(value)) {}
+    std::vector<DeviceInfo> enumerate_devices() override { return {}; }
+    std::vector<CaptureMode> enumerate_modes(const std::string&) override { return {}; }
+    void start(const CaptureMode&) override { client->start(); }
+    void stop() noexcept override { client->stop(); }
+    CaptureSnapshot snapshot() const override { return client->capture_snapshot(); }
+    std::optional<CaptureSample> take_latest_sample() override { return hold ? std::nullopt : client->take_sample(); }
+};
 struct GuiFixture {
     std::shared_ptr<kvmux::relay::RelayClient> client;
+    GatedNetworkCapture* capture{};
     KvmSession session;
-    explicit GuiFixture(kvmux::relay::ClientOptions options)
+    std::uint64_t presented_generation{};
+    std::chrono::steady_clock::time_point presented_arrival{};
+    std::function<void()> after_session_tick;
+    explicit GuiFixture(kvmux::relay::ClientOptions options, bool hold_samples = false)
         : client(std::make_shared<kvmux::relay::RelayClient>(options)),
-          session(std::make_unique<kvmux::relay::NetworkCaptureSource>(client), std::make_unique<kvmux::relay::NetworkControlSink>(client)) {
+          session([&] {
+              auto source = std::make_unique<GatedNetworkCapture>(client);
+              source->hold = hold_samples; capture = source.get(); return source;
+          }(), std::make_unique<kvmux::relay::NetworkControlSink>(client)) {
         DeviceInfo device; device.stable_id = "relay"; device.weak_match = true;
         CaptureMode mode{"relay",0,0,{0,1},PixelFormat::mjpeg,PixelFormat::mjpeg,"MJPEG"};
         assert(session.select_capture(device, mode)); session.set_video_rect({0,0,100,100});
     }
     void tick() {
         session.tick();
-        if (auto frame = session.take_latest_frame()) session.video_presented(frame->generation, frame->sequence);
+        if (after_session_tick) after_session_tick();
+        if (auto frame = session.take_latest_frame()) {
+            session.video_presented(frame->generation, frame->sequence);
+            presented_generation = frame->generation;
+            presented_arrival = frame->arrival;
+        }
     }
     bool wait(const std::function<bool()>& condition, std::chrono::milliseconds timeout = 3000ms) {
         return until([&] { tick(); return condition(); }, timeout);
@@ -119,7 +142,20 @@ struct GuiFixture {
         while (std::chrono::steady_clock::now() < end) { tick(); std::this_thread::sleep_for(2ms); }
     }
     void activate() {
-        assert(wait([&] { return session.snapshot().control.state == ControlConnectionState::ready && session.snapshot().video_fresh; }));
+        // Capture freshness can precede decode/presentation. Observe a displayed
+        // frame before the tick that updates InputRouter's cached video gate.
+        assert(until([&] {
+            const auto before = session.snapshot();
+            const bool displayed = presented_generation == before.capture.generation &&
+                presented_arrival != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() - presented_arrival < 500ms &&
+                before.video.processed_frames > 0;
+            tick();
+            const auto state = session.snapshot();
+            return displayed && presented_generation == state.capture.generation &&
+                state.control.state == ControlConnectionState::ready &&
+                state.control.target_usb_ready && state.control.release_confirmed && state.video_fresh;
+        }));
         session.handle_input({InputButton{InputMouseButton::left, true, 50,50}});
         session.handle_input({InputButton{InputMouseButton::left, false, 50,50}});
         const bool captured = wait([&] { return session.snapshot().input_state == InputState::captured; });
