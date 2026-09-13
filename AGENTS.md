@@ -48,8 +48,14 @@ decision in the relevant documentation.
   overload, stale video, focus loss, device changes, sleep, and shutdown all
   use the common release path. Never report release as confirmed after the
   communication link is lost.
-- Use SDL scancodes as physical USB keyboard usages. Do not route text input as
-  remote keystrokes. The Host key is local-only and must never reach the target.
+- Use SDL scancodes as physical USB keyboard usages. Do not route SDL text input
+  as remote keystrokes. The only exception is an explicit opt-in, controlled
+  ASCII simulated typing engine: it accepts US-layout printable ASCII plus Tab
+  and Enter, starts only on an explicit user action, and sends paced, bounded
+  events through the existing `InputRouter`/`ControlSink`. It must use the
+  common cancel/release path and must not persist or log clipboard/text data.
+  Unicode and Wubi input are out of scope. The Host key is local-only and must
+  never reach the target.
 - Keep platform capture code in the three native adapters: Media Foundation on
   Windows, V4L2 on Linux, and AVFoundation in Objective-C++ files on macOS.
   Shared video, input, control, and UI code must not depend on native handles.

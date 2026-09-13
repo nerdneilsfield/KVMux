@@ -63,6 +63,20 @@ see the [verification record](docs/acceptance.md) before choosing hardware.
    both are ready. Click the video to capture keyboard and mouse input; this
    first click is not sent to the target.
 
+## Type ASCII text
+
+Use the local text or paste field to enter text, then choose **Type**. This is
+an explicit simulated typing action; it does not forward SDL text input.
+KVMux accepts only US-keyboard-layout printable ASCII plus Tab and Enter.
+It rejects any other character before typing starts. Keep the target focused
+and using a US keyboard layout, because the target interprets the simulated
+key presses.
+
+Typing is paced and bounded. Cancel it or release input with the usual Host-key,
+focus-loss, or connection-release path; KVMux releases active keys and stops
+remaining text. Clipboard content stays local and is neither persisted nor
+logged. Unicode, Chinese, and Wubi input are not supported yet.
+
 ## Capture screenshots and recordings
 
 Open **Media** from the top menu, or from the floating KVMux logo menu. A
