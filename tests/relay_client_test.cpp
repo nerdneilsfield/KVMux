@@ -143,6 +143,46 @@ void hevc_test(const char* path) {
     gui.session.release_control();
 }
 
+void chunked_ascii_paste_loopback_test(const char* jpeg) {
+    // 961 crosses the 960-byte wire chunk boundary while remaining within the mapper limit.
+    RelayFixture relay(jpeg);
+    { std::lock_guard lock(relay.serial.mutex); relay.serial.write_limit = 4096; }
+    GuiFixture gui(relay.options());
+    gui.activate();
+    constexpr std::size_t text_bytes = 961;
+    std::vector<std::uint8_t> text(text_bytes, static_cast<std::uint8_t>('a'));
+    const auto keyboard_reports_before = [&] {
+        std::lock_guard lock(relay.serial.mutex);
+        return static_cast<std::size_t>(std::count_if(relay.serial.received.begin(), relay.serial.received.end(),
+            [](const auto& frame) { return frame.command == 0x02U; }));
+    }();
+    assert(gui.client->start_ascii_paste_text(std::move(text)) == SubmitResult::accepted);
+
+    bool executing = false;
+    const bool finished = gui.wait([&] {
+        const auto paste = gui.client->ascii_paste_text_snapshot();
+        executing = executing || paste.state == kvmux::relay::PasteUploadState::executing;
+        return paste.state == kvmux::relay::PasteUploadState::completed;
+    }, 10000ms);
+    const auto paste = gui.client->ascii_paste_text_snapshot();
+    assert(finished);
+    assert(executing);
+    assert(paste.total_bytes == text_bytes && paste.accepted_bytes == text_bytes &&
+        paste.completed_bytes == text_bytes && paste.reason == kvmux::relay::wire::PasteStatusReason::none);
+    {
+        std::lock_guard lock(relay.serial.mutex);
+        // Each unshifted ASCII character sends key-down and key-up. Exact count
+        // proves the two uploaded chunks were assembled once, with no replay.
+        const auto keyboard_reports_after = static_cast<std::size_t>(std::count_if(
+            relay.serial.received.begin(), relay.serial.received.end(),
+            [](const auto& frame) { return frame.command == 0x02U; }));
+        // Each character has a key-down and key-up report. Exact count proves
+        // the two uploaded chunks were assembled once, with no replay.
+        assert(keyboard_reports_after == keyboard_reports_before + text_bytes * 2);
+    }
+    gui.session.release_control();
+}
+
 void first_frame_activation_test(const char* jpeg) {
     RelayFixture relay(jpeg);
     GuiFixture gui(relay.options(), true);
@@ -174,6 +214,7 @@ void first_frame_activation_test(const char* jpeg) {
 int main(int argc, char** argv) {
     assert(argc > 2);
     first_frame_activation_test(argv[1]);
+    chunked_ascii_paste_loopback_test(argv[1]);
     hevc_test(argv[2]);
     RelayFixture relay(argv[1]); GuiFixture gui(relay.options()); gui.activate();
     gui.session.release_control();
