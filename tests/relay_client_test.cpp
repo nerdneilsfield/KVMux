@@ -290,14 +290,8 @@ void first_frame_activation_test(const char* jpeg) {
     gui.session.release_control();
 }
 
-int main(int argc, char** argv) {
-    assert(argc > 2);
-    concurrent_network_front_start_test(argv[1]);
-    first_frame_activation_test(argv[1]);
-    chunked_ascii_paste_loopback_test(argv[1]);
-    paste_keepalive_survives_blackholed_server_status_test(argv[1]);
-    hevc_test(argv[2]);
-    RelayFixture relay(argv[1]); GuiFixture gui(relay.options()); gui.activate();
+void input_recovery_test(const char* jpeg) {
+    RelayFixture relay(jpeg); GuiFixture gui(relay.options()); gui.activate();
     gui.session.release_control();
     assert(gui.wait([&] { return gui.session.snapshot().input_state == InputState::preview; }));
     { std::lock_guard lock(relay.serial.mutex); relay.serial.hold_mouse_ack = true; }
@@ -345,4 +339,46 @@ int main(int argc, char** argv) {
     gui.activate();
     assert(relay.sink.snapshot().applied.known && relay.sink.snapshot().applied.state.mode == MouseMode::relative);
     gui.session.release_control();
+}
+
+struct TestCase {
+    const char* name;
+    void (*run)(const char*, const char*);
+};
+
+void run_concurrent_network_front_start(const char* jpeg, const char*) { concurrent_network_front_start_test(jpeg); }
+void run_first_frame_activation(const char* jpeg, const char*) { first_frame_activation_test(jpeg); }
+void run_chunked_ascii_paste_loopback(const char* jpeg, const char*) { chunked_ascii_paste_loopback_test(jpeg); }
+void run_paste_keepalive_blackholed_status(const char* jpeg, const char*) { paste_keepalive_survives_blackholed_server_status_test(jpeg); }
+void run_hevc(const char*, const char* hevc) { hevc_test(hevc); }
+void run_input_recovery(const char* jpeg, const char*) { input_recovery_test(jpeg); }
+
+int main(int argc, char** argv) {
+    assert(argc >= 3);
+    const std::array cases{
+        TestCase{"concurrent_network_front_start", run_concurrent_network_front_start},
+        TestCase{"first_frame_activation", run_first_frame_activation},
+        TestCase{"chunked_ascii_paste_loopback", run_chunked_ascii_paste_loopback},
+        TestCase{"paste_keepalive_blackholed_status", run_paste_keepalive_blackholed_status},
+        TestCase{"hevc", run_hevc},
+        TestCase{"input_recovery", run_input_recovery},
+    };
+    std::optional<std::string_view> requested;
+    if (argc == 5 && std::string_view(argv[3]) == "--case") requested = argv[4];
+    else if (argc != 3) {
+        std::fprintf(stderr, "usage: %s <jpeg> <hevc> [--case <name>]\n", argv[0]);
+        return 2;
+    }
+    bool matched = false;
+    for (const auto& test : cases) {
+        if (requested && *requested != test.name) continue;
+        matched = true;
+        std::fprintf(stderr, "[ RUN      ] relay_client.%s\n", test.name);
+        test.run(argv[1], argv[2]);
+        std::fprintf(stderr, "[       OK ] relay_client.%s\n", test.name);
+    }
+    if (!matched) {
+        std::fprintf(stderr, "unknown relay_client case: %.*s\n", static_cast<int>(requested->size()), requested->data());
+        return 2;
+    }
 }
