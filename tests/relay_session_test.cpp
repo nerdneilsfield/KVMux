@@ -66,11 +66,17 @@ void execute_upload_contract() {
     check(f.s.paste_begin({9,4,crc},at(0)).items[0].paste_status->state==w::PasteState::uploading);
     check(f.s.paste_begin({10,4,crc},at(1)).items[0].paste_status->reason==w::PasteStatusReason::conflict);
     check(f.s.paste_chunk({9,0,{'a','b','c','d'}},at(3)).items[0].paste_status->state==w::PasteState::uploaded);
+    // An expired history proof is not an Execute authorization.
+    Fixture expired; expired.establish(); expired.s.paste_begin({18,4,crc},at(0));
+    expired.s.paste_chunk({18,0,text},at(1));
+    expired.proof(50,301); // challenge-window expiry: never creates a lease.
+    auto rejected=expired.s.paste_execute({18},at(302));
+    check(rejected.items[0].paste_status->state!=w::PasteState::preparing);
     Fixture malformed; malformed.establish(); malformed.s.paste_begin({19,4,crc},at(0));
     auto bad_chunk=malformed.s.paste_chunk({19,1,text},at(1));
     check(bad_chunk.items[0].paste_status->state==w::PasteState::finished && bad_chunk.items[0].paste_status->outcome==w::PasteOutcome::rejected);
-    // A proof after completion is required for Execute.
-    check(f.s.paste_execute({9},at(4)).items[0].paste_status->reason==w::PasteStatusReason::proof);
+    // A fresh proof for a recently sent frame remains an authorization lease
+    // while the sender starts pacing a newer frame and this upload completes.
     f.proof(50,51);
     auto preparing=f.s.paste_execute({9},at(52)); check(preparing.items[0].paste_status->state==w::PasteState::preparing);
     check(f.s.pending_paste_bytes()->size()==4 && f.s.pending_paste_owner()->second==1);

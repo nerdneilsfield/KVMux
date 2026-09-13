@@ -53,6 +53,8 @@ struct ServerSession::Impl {
     std::array<Issued,200> challenges{};
     std::size_t count{}, head{};
     std::uint64_t next_id{}, latest_proof{}, intent{}, canceled{}, revision{}, last_edge{};
+    struct ValidProof { std::uint64_t challenge{}, intent{}; SessionTime lease{}; };
+    std::optional<ValidProof> valid_proof;
     std::optional<SessionTime> execution;
     struct PasteUpload {
         wire::PasteBegin begin;
@@ -62,7 +64,6 @@ struct ServerSession::Impl {
         SessionTime deadline{};
         wire::PasteState state{wire::PasteState::uploading};
         std::optional<SessionTime> lease;
-        std::uint64_t completion_proof{};
         // Bound at Begin. A paste must never outlive the control owner that created it.
         std::uint64_t owner_epoch{}, owner_intent{}, job_id{};
     };
@@ -107,7 +108,7 @@ struct ServerSession::Impl {
     void revoke(SessionActions& out) {
         if(paste) cancel_paste(out,wire::PasteStatusReason::canceled);
         if(execution||barrier||pending_sync) action(out,SessionAction::Kind::revoke_input);
-        execution.reset(); barrier=false; pending_sync.reset(); completed_sync.reset();
+        execution.reset(); valid_proof.reset(); barrier=false; pending_sync.reset(); completed_sync.reset();
     }
     void expire(SessionActions& out) {
         revoke(out); phase=SessionPhase::idle; action(out,SessionAction::Kind::expired);
@@ -155,6 +156,9 @@ struct ServerSession::Impl {
         }
         if(!p.active||!p.video_fresh||!video_valid||!ready(snapshot)) { revoke(out); return; }
         auto deadline=deferred ? now+250ms : *time+250ms;
+        // This is the admission record for reliable paste execution.  It is
+        // retained for its bounded lease, rather than tied to a later frame.
+        valid_proof = ValidProof{p.challenge, intent, deadline};
         if(!execution||deadline>*execution) {
             execution=deadline; action(out,SessionAction::Kind::lease_changed);
         }
@@ -193,7 +197,7 @@ SessionActions ServerSession::on_datagram(const udp::Endpoint& peer,std::span<co
         if(!ids.session||!ids.conversation||!ids.generation) return out;
         s.phase=SessionPhase::pending; s.peer=peer; s.tuple={ids.session,e->tuple.nonce,ids.conversation};
         s.welcome={s.codec,ids.generation}; s.pending_deadline=now+2s;
-        s.count=s.head=0; s.next_id=s.latest_proof=s.intent=s.canceled=s.revision=s.last_edge=0;
+        s.count=s.head=0; s.next_id=s.latest_proof=s.intent=s.canceled=s.revision=s.last_edge=0; s.valid_proof.reset();
         s.clear_paste(); s.terminal_paste.reset(); s.execution.reset(); s.barrier=false; s.pending_sync.reset(); s.completed_sync.reset();
         send(out,peer,EnvelopeKind::welcome,s.tuple,s.welcome); return out;
     }
@@ -273,7 +277,6 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk, Session
     p.bytes.insert(p.bytes.end(),chunk.payload.begin(),chunk.payload.end());
     p.accepted_bytes=static_cast<std::uint32_t>(p.bytes.size()); ++p.next;
     p.state=p.bytes.size()==p.begin.normalized_bytes ? wire::PasteState::uploaded : wire::PasteState::uploading;
-    if (p.state == wire::PasteState::uploaded) p.completion_proof=s.latest_proof;
     paste_action(out,s.status()); return out;
 }
 SessionActions ServerSession::paste_execute(const wire::PasteExecute& execute, SessionTime now) {
@@ -284,8 +287,11 @@ SessionActions ServerSession::paste_execute(const wire::PasteExecute& execute, S
     auto& p=*s.paste;
     if (p.state == wire::PasteState::preparing || p.state == wire::PasteState::executing) { paste_action(out, s.status()); return out; }
     if(p.state!=wire::PasteState::uploaded || p.bytes.size()!=p.begin.normalized_bytes || support::crc32_ieee(p.bytes)!=p.begin.crc32 || !valid_paste_text(p.bytes)) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
-    // Execute is intent. A proof must be newer than completion and currently leased.
-    if(!s.latest_proof || s.latest_proof <= p.completion_proof || !s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof)); return out; }
+    // Execute is authorized by an actually validated video proof for this
+    // owner. It need not be the newest proof: continuous media can advance
+    // sender state after the client presented this still-live frame.
+    if(!s.valid_proof || s.valid_proof->intent != p.owner_intent ||
+       now >= s.valid_proof->lease) { paste_action(out,s.status(wire::PasteStatusReason::proof)); return out; }
     p.state=wire::PasteState::preparing; p.lease=now+500ms;
     paste_action(out,s.status()); return out;
 }
