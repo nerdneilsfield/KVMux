@@ -66,7 +66,7 @@ struct ServerSession::Impl {
         std::optional<std::uint64_t> authorization_token;
         std::uint64_t authorization_request{}, completion_proof{};
         // Bound at Begin. A paste must never outlive the control owner that created it.
-        std::uint64_t owner_epoch{}, owner_intent{};
+        std::uint64_t owner_epoch{}, owner_intent{}, job_id{};
     };
     std::optional<PasteUpload> paste;
     std::optional<wire::PasteStatus> terminal_paste;
@@ -348,12 +348,16 @@ SessionActions ServerSession::paste_keepalive(const wire::PasteKeepalive& keepal
     paste_action(out, s.status());
     return out;
 }
-SessionActions ServerSession::paste_started(SessionTime now) {
+SessionActions ServerSession::paste_started(std::uint64_t job_id, SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
+    s.paste->job_id = job_id;
     // The serial job owns mapped gestures. Do not retain upload source after handoff.
     s.paste->bytes.clear(); s.paste->bytes.shrink_to_fit();
     return out;
+}
+SessionActions ServerSession::paste_started(SessionTime now) {
+    return paste_started(0, now);
 }
 SessionActions ServerSession::paste_start_failed(SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
@@ -366,7 +370,8 @@ SessionActions ServerSession::update_ascii_paste(const AsciiPasteSnapshot& snaps
     // completed job observed at `now` cannot be canceled by that same pass.
     (void)now;
     auto& s=*impl_; SessionActions out;
-    if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
+    if (!s.paste || s.paste->state != wire::PasteState::executing ||
+        snapshot.job_id != s.paste->job_id) return out;
     auto st=s.status(); st.completed_bytes=static_cast<std::uint32_t>(
         st.accepted_bytes * (snapshot.total_gestures ? snapshot.completed_gestures : 0) /
         (snapshot.total_gestures ? snapshot.total_gestures : 1));
@@ -382,6 +387,10 @@ std::optional<wire::PasteStatus> ServerSession::paste_status() const {
 }
 std::optional<std::span<const std::uint8_t>> ServerSession::pending_paste_bytes() const {
     const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing || s.paste->bytes.empty()) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
+}
+std::optional<std::pair<std::uint64_t, std::uint64_t>> ServerSession::pending_paste_owner() const {
+    const auto& s=*impl_; if (!s.paste || s.paste->state != wire::PasteState::executing || s.paste->bytes.empty()) return {};
+    return std::pair{s.paste->owner_epoch, s.paste->owner_intent};
 }
 bool ServerSession::matches(const udp::Endpoint& peer,const wire::Tuple& tuple) const {
     return impl_->phase==SessionPhase::established&&impl_->peer==peer&&impl_->tuple==tuple;

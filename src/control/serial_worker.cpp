@@ -59,6 +59,10 @@ struct Ch9329ControlSink::Impl {
 
     // Caller holds mutex. A report already written must still drain its ACK.
     void cancel_paste_locked(AsciiPasteState state) {
+        if (pending_paste) {
+            paste = {state, pending_paste->job.gestures.size(), 0, pending_paste->job_id};
+            pending_paste.reset();
+        }
         if (paste.state == AsciiPasteState::active) { paste.state = state; }
         paste_job.reset();
         paste_gesture = paste_edge = 0;
@@ -538,6 +542,28 @@ struct Ch9329ControlSink::Impl {
 
         {
             std::lock_guard lock(mutex);
+            if (pending_paste) {
+                const auto& request = *pending_paste;
+                const auto& applied = status.applied;
+                const bool owner_matches = request.owner_epoch == status.epoch &&
+                    request.owner_intent != 0 && applied.known &&
+                    applied.epoch == request.owner_epoch &&
+                    applied.intent_generation == request.owner_intent;
+                const bool ready_for_paste = status.state == ControlConnectionState::ready &&
+                    status.target_usb_ready && status.release_confirmed && control_active &&
+                    now - heartbeat <= kHeartbeatTimeout && !input_sync && !sync_inflight &&
+                    !ordinary_inflight && queue.size() == 0 && !transaction;
+                if (!owner_matches) {
+                    paste = {AsciiPasteState::canceled, request.job.gestures.size(), 0, request.job_id};
+                    pending_paste.reset();
+                } else if (ready_for_paste) {
+                    paste = {AsciiPasteState::active, request.job.gestures.size(), 0, request.job_id};
+                    paste_job = std::move(request.job);
+                    pending_paste.reset();
+                    paste_gesture = paste_edge = 0;
+                }
+                if (paste.active()) return;
+            }
             if (input_sync) {
                 if (!sync_started) {
                     sync_started = true;
@@ -613,6 +639,8 @@ struct Ch9329ControlSink::Impl {
     std::uint64_t ordinary_sequence{};
     AsciiPasteSnapshot paste;
     std::optional<AsciiPasteJob> paste_job;
+    // One bounded relay request waits for the worker's own ACK-derived state.
+    std::optional<AsciiPasteRequest> pending_paste;
     std::size_t paste_gesture{};
     std::size_t paste_edge{};
     std::string port;
@@ -764,8 +792,25 @@ SubmitResult Ch9329ControlSink::start_ascii_paste(AsciiPasteJob job) {
     return SubmitResult::accepted;
 }
 
+SubmitResult Ch9329ControlSink::prepare_ascii_paste(AsciiPasteRequest request) {
+    std::lock_guard lock(impl_->mutex);
+    if (!request.job_id || !request.owner_epoch || !request.owner_intent || request.job.gestures.empty() ||
+        std::ranges::any_of(request.job.gestures, [](const auto& edges) { return edges.empty(); }) ||
+        impl_->pending_paste || impl_->paste.active()) {
+        ++impl_->status.rejected_events;
+        return SubmitResult::not_ready;
+    }
+    impl_->pending_paste = std::move(request);
+    impl_->wake.notify_one();
+    return SubmitResult::accepted;
+}
+
 void Ch9329ControlSink::cancel_ascii_paste() noexcept {
     std::lock_guard lock(impl_->mutex);
+    if (impl_->pending_paste) {
+        impl_->paste = {AsciiPasteState::canceled, impl_->pending_paste->job.gestures.size(), 0, impl_->pending_paste->job_id};
+        impl_->pending_paste.reset();
+    }
     if (impl_->paste.state == AsciiPasteState::active) {
         impl_->cancel_paste_locked(AsciiPasteState::canceled);
         impl_->queue.request_release();

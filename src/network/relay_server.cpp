@@ -183,6 +183,7 @@ struct RelayServer::Impl {
         struct AuthorizationFence { std::uint64_t transaction{}, epoch{}, intent{}, revision{}; DesiredInputState state; };
         std::optional<AuthorizationFence> authorization_fence;
         std::uint64_t next_authorization_revision{1};
+        std::uint64_t next_paste_job_id{1};
         std::vector<std::vector<std::uint8_t>> control_output;
         std::size_t control_index{};
         struct Pending { std::vector<std::uint8_t> body; Clock::time_point deadline; };
@@ -357,8 +358,10 @@ struct RelayServer::Impl {
                             AsciiPasteJob job;
                             job.gestures.reserve(mapped.gestures.size());
                             for (auto& gesture : mapped.gestures) job.gestures.push_back(std::move(gesture.edges));
-                            if (sink.start_ascii_paste(std::move(job)) == kvmux::SubmitResult::accepted)
-                                actions(session.paste_started(now));
+                            const auto owner = session.pending_paste_owner();
+                            const auto job_id = next_paste_job_id++;
+                            if (owner && sink.prepare_ascii_paste({job_id, owner->first, owner->second, std::move(job)}) == kvmux::SubmitResult::accepted)
+                                actions(session.paste_started(job_id, now));
                             else { sink.cancel_ascii_paste(); actions(session.paste_start_failed(now)); }
                         }
                     }

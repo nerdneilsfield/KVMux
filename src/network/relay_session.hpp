@@ -62,12 +62,15 @@ public:
     SessionActions paste_keepalive(const wire::PasteKeepalive&, SessionTime);
     // Transfers the validated upload to the serial owner, then reports ACK-derived progress.
     // Call before tick(now), so a terminal serial observation wins at that instant.
+    SessionActions paste_started(std::uint64_t job_id, SessionTime);
+    // Legacy direct local path has no correlation identifier.
     SessionActions paste_started(SessionTime);
     SessionActions paste_start_failed(SessionTime);
     SessionActions update_ascii_paste(const AsciiPasteSnapshot&, SessionTime);
     [[nodiscard]] std::optional<wire::PasteStatus> paste_status() const;
     // Available after an accepted commit until the relay server submits it to the serial owner.
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> pending_paste_bytes() const;
+    [[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint64_t>> pending_paste_owner() const;
     [[nodiscard]] bool matches(const udp::Endpoint&, const wire::Tuple&) const;
     [[nodiscard]] InputGate check_sync(const wire::Sync&, SessionTime) const;
     // Call after synchronous sink admission; rejection must not create an ACK.
