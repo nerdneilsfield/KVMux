@@ -212,6 +212,12 @@ void paste_upload_contract() {
     f.proof(50,50); f.barrier(50);
     auto done=f.s.paste_commit({9},at(51)); check(done.items[0].paste_status->state==w::PasteState::executing);
     check(f.s.pending_paste_bytes()->size()==4 && f.s.pending_paste_fence()->intent==1);
+    check(f.s.check_edge({1,1,1,1,1,KeyEdge{4,true}},at(51))==InputGate::rejected);
+    f.s.paste_started(at(51)); check(!f.s.pending_paste_bytes());
+    auto progress=f.s.update_ascii_paste({AsciiPasteState::active,2,1},at(52));
+    check(progress.items[0].paste_status->state==w::PasteState::executing && progress.items[0].paste_status->completed_bytes==2);
+    auto terminal=f.s.update_ascii_paste({AsciiPasteState::completed,2,2},at(53));
+    check(terminal.items[0].paste_status->state==w::PasteState::completed && terminal.items[0].paste_status->completed_bytes==4);
     Fixture bad; bad.establish();
     auto b=bad.s.paste_begin({3,2,0},at(0)); check(b.size==1);
     auto rejected=bad.s.paste_chunk({3,0,{'x','\r'}},at(1)); check(rejected.items[0].paste_status->state==w::PasteState::complete);

@@ -4,6 +4,7 @@
 #include "network/kcp_channel.hpp"
 #include "network/media_codec_wire.hpp"
 #include "network/relay_selection.hpp"
+#include "input/us_ascii_text.hpp"
 #include "video/video_processor.hpp"
 extern "C" {
 #include <libswscale/swscale.h>
@@ -177,6 +178,7 @@ struct RelayServer::Impl {
         udp::Endpoint peer;
         std::optional<wire::StateAck> ack;
         std::optional<wire::Status> status;
+        std::optional<wire::PasteStatus> paste_status;
         std::vector<std::vector<std::uint8_t>> control_output;
         std::size_t control_index{};
         struct Pending { std::vector<std::uint8_t> body; Clock::time_point deadline; };
@@ -189,7 +191,7 @@ struct RelayServer::Impl {
         auto status_at = Clock::time_point{};
         bool fatal{};
         auto request_refresh = [&] { std::lock_guard lock(media_mutex); keyframe = true; media_wake.notify_one(); };
-        auto revoke = [&] { sink.set_control_active(false); sink.release_all(); ack.reset(); };
+        auto revoke = [&] { sink.cancel_ascii_paste(); sink.set_control_active(false); sink.release_all(); ack.reset(); };
         auto actions = [&](const SessionActions& batch) {
             for (const auto& action : batch) {
                 switch (action.kind) {
@@ -214,6 +216,11 @@ struct RelayServer::Impl {
                     break;
                 case SessionAction::Kind::revoke_input: revoke(); break;
                 case SessionAction::Kind::state_ack: ack = action.ack; break;
+                case SessionAction::Kind::paste_ready:
+                    paste_status = action.paste_status;
+                    if (action.paste_status && (action.paste_status->state == wire::PasteState::canceled ||
+                        action.paste_status->state == wire::PasteState::rejected || action.paste_status->state == wire::PasteState::expired)) sink.cancel_ascii_paste();
+                    break;
                 case SessionAction::Kind::expired:
                     admission.reset();
                     revoke(); kcp.reset(); pacer.reset(); pending.reset(); pending_proof.reset(); sending.reset(); history.clear(); ack.reset(); status.reset();
@@ -318,6 +325,28 @@ struct RelayServer::Impl {
                     if (gate == InputGate::allowed) actions(session.edge_submitted(*value,
                         sink.submit({value->epoch, value->source_sequence, now, value->payload}), now));
                     else if (gate == InputGate::recovery_required) actions(session.edge_submitted(*value, kvmux::SubmitResult::not_ready, now));
+                } else if (auto value = std::get_if<wire::PasteBegin>(&*message)) {
+                    actions(session.paste_begin(*value, now));
+                } else if (auto value = std::get_if<wire::PasteChunk>(&*message)) {
+                    actions(session.paste_chunk(*value, now));
+                } else if (auto value = std::get_if<wire::PasteCommit>(&*message)) {
+                    actions(session.paste_commit(*value, now));
+                    if (auto bytes = session.pending_paste_bytes()) {
+                        const auto mapped = map_us_ascii_text(std::string_view(
+                            reinterpret_cast<const char*>(bytes->data()), bytes->size()));
+                        if (!mapped) {
+                            sink.cancel_ascii_paste(); actions(session.paste_start_failed(now));
+                        } else {
+                            AsciiPasteJob job;
+                            job.gestures.reserve(mapped.gestures.size());
+                            for (auto& gesture : mapped.gestures) job.gestures.push_back(std::move(gesture.edges));
+                            if (sink.start_ascii_paste(std::move(job)) == kvmux::SubmitResult::accepted)
+                                actions(session.paste_started(now));
+                            else { sink.cancel_ascii_paste(); actions(session.paste_start_failed(now)); }
+                        }
+                    }
+                } else if (auto value = std::get_if<wire::PasteCancel>(&*message)) {
+                    actions(session.paste_cancel(*value, now));
                 } else if (auto value = std::get_if<wire::MediaFeedback>(&*message)) {
                     if (admission && admission->feedback(value->generation, value->stats, now)) {
                         std::lock_guard lock(media_mutex); ++snapshot.feedback_samples;
@@ -329,6 +358,9 @@ struct RelayServer::Impl {
             }
             if (!kcp) continue;
             now = Clock::now();
+            // Serial progress advances only after each HID report ACK. Poll it at
+            // the same bounded cadence as the normal control status.
+            if (now - status_at >= 50ms) actions(session.update_ascii_paste(sink.ascii_paste_snapshot(), now));
             if (now - status_at >= 50ms) {
                 const auto value = sink.snapshot();
                 status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through(), value.ordinary_input_pending, value.completed_ordinary_sequence};
@@ -339,6 +371,7 @@ struct RelayServer::Impl {
                 return bytes && kcp->submit(*bytes) == SubmitResult::accepted;
             };
             if (ack && submit(*ack)) ack.reset();
+            if (paste_status && submit(*paste_status)) paste_status.reset();
             if (status && submit(*status)) status.reset();
             kcp->update(milliseconds(now));
             if (kcp->failed()) { fatal = true; continue; }

@@ -46,6 +46,10 @@ public:
     SessionActions paste_chunk(const wire::PasteChunk&, SessionTime);
     SessionActions paste_commit(const wire::PasteCommit&, SessionTime);
     SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
+    // Transfers the validated upload to the serial owner, then reports ACK-derived progress.
+    SessionActions paste_started(SessionTime);
+    SessionActions paste_start_failed(SessionTime);
+    SessionActions update_ascii_paste(const AsciiPasteSnapshot&, SessionTime);
     [[nodiscard]] std::optional<wire::PasteStatus> paste_status() const;
     // Available after an accepted commit until the relay server submits it to the serial owner.
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> pending_paste_bytes() const;

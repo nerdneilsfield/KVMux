@@ -57,6 +57,7 @@ struct ServerSession::Impl {
     struct PasteUpload {
         wire::PasteBegin begin;
         std::vector<std::uint8_t> bytes;
+        std::uint32_t accepted_bytes{};
         std::uint32_t next{};
         SessionTime deadline{};
         wire::PasteState state{wire::PasteState::uploading};
@@ -72,7 +73,7 @@ struct ServerSession::Impl {
     wire::PasteStatus status(wire::PasteStatusReason reason=wire::PasteStatusReason::none) const {
         if(!paste) return {};
         const auto& p=*paste;
-        return {p.begin.transaction_id,p.state,p.next,static_cast<std::uint32_t>(p.bytes.size()),0,reason};
+        return {p.begin.transaction_id,p.state,p.next,p.accepted_bytes,0,reason};
     }
     void clear_paste() { paste.reset(); }
     void cancel_paste(SessionActions& out, wire::PasteStatusReason reason) {
@@ -224,7 +225,8 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk, Session
     }
     if(chunk.chunk_index!=p.next || p.bytes.size()+chunk.payload.size()>p.begin.normalized_bytes ||
        (p.bytes.size()+chunk.payload.size()<p.begin.normalized_bytes && chunk.payload.size()!=960)) { fail(wire::PasteStatusReason::invalid); return out; }
-    p.bytes.insert(p.bytes.end(),chunk.payload.begin(),chunk.payload.end()); ++p.next;
+    p.bytes.insert(p.bytes.end(),chunk.payload.begin(),chunk.payload.end());
+    p.accepted_bytes=static_cast<std::uint32_t>(p.bytes.size()); ++p.next;
     p.state=p.bytes.size()==p.begin.normalized_bytes ? wire::PasteState::complete : wire::PasteState::uploading;
     paste_action(out,s.status()); return out;
 }
@@ -232,6 +234,7 @@ SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, Sess
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(s.phase!=SessionPhase::established || !s.paste || commit.transaction_id!=s.paste->begin.transaction_id) return out;
     auto& p=*s.paste;
+    if (p.state == wire::PasteState::executing) { paste_action(out, s.status()); return out; }
     if(p.bytes.size()!=p.begin.normalized_bytes) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
     if(support::crc32_ieee(p.bytes)!=p.begin.crc32) { auto st=s.status(wire::PasteStatusReason::checksum); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
     if(!valid_paste_text(p.bytes)) { auto st=s.status(wire::PasteStatusReason::invalid); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
@@ -245,9 +248,35 @@ SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, Sess
     if(s.paste && s.paste->begin.transaction_id==cancel.transaction_id) s.cancel_paste(out,wire::PasteStatusReason::canceled);
     return out;
 }
+SessionActions ServerSession::paste_started(SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
+    // The serial job owns mapped gestures. Do not retain upload source after handoff.
+    s.paste->bytes.clear(); s.paste->bytes.shrink_to_fit();
+    return out;
+}
+SessionActions ServerSession::paste_start_failed(SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
+    auto st=s.status(wire::PasteStatusReason::serial); st.state=wire::PasteState::rejected;
+    s.clear_paste(); paste_action(out,st); return out;
+}
+SessionActions ServerSession::update_ascii_paste(const AsciiPasteSnapshot& snapshot, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
+    auto st=s.status(); st.completed_bytes=static_cast<std::uint32_t>(
+        st.accepted_bytes * (snapshot.total_gestures ? snapshot.completed_gestures : 0) /
+        (snapshot.total_gestures ? snapshot.total_gestures : 1));
+    if (snapshot.state == AsciiPasteState::completed) st.state=wire::PasteState::completed;
+    else if (snapshot.state == AsciiPasteState::canceled) { st.state=wire::PasteState::canceled; st.reason=wire::PasteStatusReason::canceled; }
+    else if (snapshot.state == AsciiPasteState::failed) { st.state=wire::PasteState::rejected; st.reason=wire::PasteStatusReason::serial; }
+    if (st.state != wire::PasteState::executing) { s.clear_paste(); paste_action(out,st); }
+    else if (st.completed_bytes != 0) paste_action(out,st);
+    return out;
+}
 std::optional<wire::PasteStatus> ServerSession::paste_status() const { return impl_->paste ? std::optional{impl_->status()} : std::nullopt; }
 std::optional<std::span<const std::uint8_t>> ServerSession::pending_paste_bytes() const {
-    const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
+    const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing || s.paste->bytes.empty()) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
 }
 std::optional<wire::StateAck> ServerSession::pending_paste_fence() const { return impl_->paste ? impl_->paste->fence : std::nullopt; }
 bool ServerSession::matches(const udp::Endpoint& peer,const wire::Tuple& tuple) const {
@@ -269,7 +298,7 @@ SessionActions ServerSession::sync_submitted(const wire::Sync& sync,kvmux::Submi
 }
 InputGate ServerSession::check_edge(const wire::Edge& edge,SessionTime now) const {
     const auto& s=*impl_;
-    if(!wire::encode_control(edge,wire::Direction::client_to_server)||!s.eligible(edge.epoch,edge.intent,edge.challenge,now)||!s.barrier) return InputGate::rejected;
+    if(!wire::encode_control(edge,wire::Direction::client_to_server)||!s.eligible(edge.epoch,edge.intent,edge.challenge,now)||!s.barrier || (s.paste && s.paste->state==wire::PasteState::executing)) return InputGate::rejected;
     if(edge.sequence<=s.last_edge) return InputGate::duplicate;
     if(s.last_edge==std::numeric_limits<std::uint64_t>::max()||edge.sequence!=s.last_edge+1) return InputGate::recovery_required;
     return InputGate::allowed;
