@@ -186,16 +186,21 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
     assert(executing);
     assert(paste.total_bytes == text_bytes && paste.accepted_bytes == text_bytes &&
         paste.completed_bytes == text_bytes && paste.reason == kvmux::relay::wire::PasteStatusReason::none);
+    // Completion is reported before KvmSession tears down its temporary intent.
+    // Wait for that release to be confirmed before counting its final HID report.
+    assert(gui.wait([&] {
+        const auto state = gui.session.snapshot();
+        return !state.text_paste_active && state.input_state == InputState::preview &&
+            state.control.release_confirmed;
+    }));
     {
         std::lock_guard lock(relay.serial.mutex);
         const auto keyboard_reports_after = static_cast<std::size_t>(std::count_if(
             relay.serial.received.begin(), relay.serial.received.end(),
             [](const auto& frame) { return frame.command == 0x02U; }));
-        // 961 bytes cross the normalized 960-byte upload chunk boundary.
-        // The temporary remote intent adds one synchronized empty keyboard report
-        // before the job and one release report after it. The remaining reports
-        // are exactly the two edges for each normalized character.
-        assert(keyboard_reports_after >= keyboard_reports_before + 2 + text_bytes * 2);
+        // 961 bytes cross the normalized 960-byte upload chunk boundary. The temporary
+        // remote intent contributes one synchronized empty report and one release report.
+        assert(keyboard_reports_after == keyboard_reports_before + 2 + text_bytes * 2);
     }
     // The relay-private authorization revision must not collide with the GUI revision stream.
     assert(gui.session.set_mouse_mode(MouseMode::relative));

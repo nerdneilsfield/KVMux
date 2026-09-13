@@ -33,8 +33,10 @@ struct RelayClient::Impl {
         PasteUploadSnapshot snapshot;
         std::uint64_t epoch{}, intent{};
         std::uint32_t next_chunk{};
-        bool begin_sent{}, execute_sent{}, cancel_pending{};
-        std::uint64_t proof_retry_after{};
+        bool begin_sent{}, cancel_pending{};
+        // The challenge that accompanied the most recently accepted Execute.
+        // A newer proof is the only retry signal; PasteStatus is coalesced feedback.
+        std::uint64_t execute_challenge{};
     };
     std::optional<PasteUpload> paste;
     std::uint64_t next_paste_id{};
@@ -346,7 +348,6 @@ struct RelayClient::Impl {
                     case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
                     case wire::PasteState::uploaded:
                         paste->snapshot.state = PasteUploadState::uploaded;
-                        if (value->reason == wire::PasteStatusReason::proof) { paste->execute_sent = false; paste->proof_retry_after = session.latest_challenge(); }
                         break;
                     case wire::PasteState::preparing: paste->snapshot.state = PasteUploadState::preparing; break;
                     case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
@@ -415,8 +416,11 @@ struct RelayClient::Impl {
                             wire::PasteChunk chunk{job.snapshot.transaction_id, job.next_chunk,
                                 std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
                             if (submit(chunk, 1)) ++job.next_chunk;
-                        } else if (!job.execute_sent && session.latest_challenge() > job.proof_retry_after) {
-                            if (submit(wire::PasteExecute{job.snapshot.transaction_id}, 1)) job.execute_sent = true;
+                        } else if (barrier && session.latest_challenge() > job.execute_challenge) {
+                            // Execute has no transport ACK. Retry only after a newer displayed
+                            // proof, which bounds this to one submission per challenge.
+                            if (submit(wire::PasteExecute{job.snapshot.transaction_id}, 1))
+                                job.execute_challenge = session.latest_challenge();
                         }
                     }
                 }
