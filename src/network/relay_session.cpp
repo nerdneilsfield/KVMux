@@ -348,10 +348,10 @@ std::optional<wire::PasteStatus> ServerSession::paste_status() const {
     return impl_->paste ? std::optional{impl_->status()} : impl_->terminal_paste;
 }
 std::optional<std::span<const std::uint8_t>> ServerSession::pending_paste_bytes() const {
-    const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing || s.paste->bytes.empty()) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
+    const auto& s=*impl_; if(!s.paste || ((s.paste->state!=wire::PasteState::executing && s.paste->state!=wire::PasteState::preparing) || s.paste->bytes.empty())) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
 }
 std::optional<std::pair<std::uint64_t, std::uint64_t>> ServerSession::pending_paste_owner() const {
-    const auto& s=*impl_; if (!s.paste || s.paste->state != wire::PasteState::executing || s.paste->bytes.empty()) return {};
+    const auto& s=*impl_; if (!s.paste || (s.paste->state != wire::PasteState::executing && s.paste->state != wire::PasteState::preparing) || s.paste->bytes.empty()) return {};
     return std::pair{s.paste->owner_epoch, s.paste->owner_intent};
 }
 bool ServerSession::matches(const udp::Endpoint& peer,const wire::Tuple& tuple) const {
