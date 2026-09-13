@@ -84,6 +84,8 @@ public:
     [[nodiscard]] virtual SubmitResult synchronize(InputSync) { return SubmitResult::not_ready; }
     // Starts one fully mapped HID-only job. Unsupported sinks return not_ready.
     [[nodiscard]] virtual SubmitResult start_ascii_paste(AsciiPasteJob) { return SubmitResult::not_ready; }
+    // Remote sinks receive normalized transaction bytes; local sinks receive HID gestures.
+    [[nodiscard]] virtual SubmitResult start_ascii_paste_text(std::vector<std::uint8_t>) { return SubmitResult::not_ready; }
     virtual void cancel_ascii_paste() noexcept {}
     [[nodiscard]] virtual AsciiPasteSnapshot ascii_paste_snapshot() const { return {}; }
     virtual void release_all() noexcept = 0;

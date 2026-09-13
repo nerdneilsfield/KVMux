@@ -39,6 +39,12 @@ public:
         ++paste_cancels;
         if (paste_value.active()) paste_value.state = kvmux::AsciiPasteState::canceled;
     }
+    kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> text) override {
+        ++paste_text_starts;
+        paste_text = std::move(text);
+        paste_value = {kvmux::AsciiPasteState::active, paste_text.size(), 0};
+        return result;
+    }
     kvmux::AsciiPasteSnapshot ascii_paste_snapshot() const override { return paste_value; }
 
     kvmux::ControlSnapshot snapshot_value = [] {
@@ -55,6 +61,8 @@ public:
     int releases{};
     int paste_starts{};
     int paste_cancels{};
+    int paste_text_starts{};
+    std::vector<std::uint8_t> paste_text;
     kvmux::AsciiPasteJob paste_job;
     kvmux::AsciiPasteSnapshot paste_value;
     bool auto_complete{true};
@@ -429,9 +437,20 @@ int main() {
         const auto& sync = sink.syncs.back();
         sink.snapshot_value.applied = {true, sync.epoch, sync.intent_generation,
                                       sync.revision, sync.state};
-        for (int i = 2; i < 12; ++i) router.tick(start + std::chrono::milliseconds(i));
-        require(sink.events.size() == 4, "applied ACK admits ACK-drained text edges");
-        router.tick(start + std::chrono::milliseconds(12));
+        router.tick(start + std::chrono::milliseconds(2));
+        require(sink.paste_text_starts == 1 && sink.paste_text == std::vector<std::uint8_t>{'A'},
+                "relay text uploads normalized bytes after the synchronization barrier");
+        router.cancel_text();
+        require(sink.paste_cancels >= 1 && sink.releases > 0,
+                "cancel releases the remote paste transaction");
+    }
+
+    {
+        const std::string text(65536, 'a');
+        const auto mapped = map_us_ascii_text(text);
+        require(mapped && mapped.gestures.size() == text.size(), "mapper accepts the relay transaction limit");
+        require(map_us_ascii_text(text + 'a').error == TextPasteError::too_long,
+                "mapper rejects text beyond the relay transaction limit");
     }
 
     return EXIT_SUCCESS;

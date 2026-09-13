@@ -177,6 +177,8 @@ private:
     bool text_active_{};
     // Local sinks own the mapped paste and report ACK-derived progress.
     bool direct_ascii_paste_{};
+    bool remote_ascii_paste_{};
+    std::vector<std::uint8_t> text_normalized_;
     AsciiPasteSnapshot direct_paste_snapshot_{};
     bool text_completion_pending_{};
     TextMappingResult text_result_;

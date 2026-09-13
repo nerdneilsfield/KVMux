@@ -88,9 +88,9 @@ public:
     kvmux::SubmitResult synchronize(InputSync value) override { return client_->synchronize(std::move(value)); }
     kvmux::SubmitResult submit(ControlEvent event) override { return client_->submit(std::move(event)); }
     void release_all() noexcept override { client_->release(); }
-    kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> normalized) { return client_->start_ascii_paste_text(std::move(normalized)); }
-    void cancel_ascii_paste_text() noexcept { client_->cancel_ascii_paste_text(); }
-    PasteUploadSnapshot ascii_paste_text_snapshot() const { return client_->ascii_paste_text_snapshot(); }
+    kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> normalized) override { return client_->start_ascii_paste_text(std::move(normalized)); }
+    void cancel_ascii_paste() noexcept override { client_->cancel_ascii_paste_text(); }
+    AsciiPasteSnapshot ascii_paste_snapshot() const override;
     ControlSnapshot snapshot() const override { return client_->control_snapshot(); }
 private:
     std::shared_ptr<RelayClient> client_;

@@ -44,7 +44,7 @@ TextFilterResult filter_us_ascii_text(const std::string_view text) {
     return result;
 }
 
-TextMappingResult map_us_ascii_text(const std::string_view text) {
+TextMappingResult map_us_ascii_text(const std::string_view text, std::vector<std::uint8_t>* normalized_text) {
     TextMappingResult result;
     result.source_bytes = text.size();
     std::vector<unsigned char> normalized;
@@ -65,7 +65,8 @@ TextMappingResult map_us_ascii_text(const std::string_view text) {
     }
     result.normalized_characters = normalized.size();
     if (normalized.empty()) { result.error = TextPasteError::empty; return result; }
-    if (normalized.size() > 1024) { result.error = TextPasteError::too_long; return result; }
+    if (normalized.size() > 65536) { result.error = TextPasteError::too_long; return result; }
+    if (normalized_text) *normalized_text = normalized;
     result.gestures.reserve(normalized.size());
     for (const auto c : normalized) {
         Entry entry = c == '\t' ? Entry{0x2b, false} : c == '\n' ? Entry{0x28, false} : printable(c);

@@ -32,6 +32,7 @@ struct TextMappingResult {
 
 // Validates the entire byte string before returning any HID gestures. This first
 // version accepts only US ASCII printable bytes, TAB, and LF; CRLF becomes LF.
-[[nodiscard]] TextMappingResult map_us_ascii_text(std::string_view text);
+[[nodiscard]] TextMappingResult map_us_ascii_text(
+    std::string_view text, std::vector<std::uint8_t>* normalized = nullptr);
 
 }  // namespace kvmux

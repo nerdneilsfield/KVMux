@@ -535,6 +535,15 @@ void RelayClient::cancel_ascii_paste_text() noexcept {
     p.paste->cancel_pending = true; p.paste->snapshot.state = PasteUploadState::canceled; p.paste->snapshot.reason = wire::PasteStatusReason::canceled; p.paste->bytes.clear();
 }
 PasteUploadSnapshot RelayClient::ascii_paste_text_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->paste ? impl_->paste->snapshot : PasteUploadSnapshot{}; }
+AsciiPasteSnapshot NetworkControlSink::ascii_paste_snapshot() const {
+    const auto paste = client_->ascii_paste_text_snapshot();
+    AsciiPasteState state = AsciiPasteState::idle;
+    if (paste.state == PasteUploadState::uploading || paste.state == PasteUploadState::complete || paste.state == PasteUploadState::executing) state = AsciiPasteState::active;
+    else if (paste.state == PasteUploadState::completed) state = AsciiPasteState::completed;
+    else if (paste.state == PasteUploadState::canceled || paste.state == PasteUploadState::expired) state = AsciiPasteState::canceled;
+    else if (paste.state == PasteUploadState::rejected) state = AsciiPasteState::failed;
+    return {state, paste.total_bytes, paste.completed_bytes};
+}
 ControlSnapshot RelayClient::control_snapshot() const {
     auto& p = *impl_; std::lock_guard lock(p.mutex); auto result = p.control;
     if (p.cancel_inflight) { result.state = ControlConnectionState::clearing; result.release_confirmed = false; result.applied.known = false; }
