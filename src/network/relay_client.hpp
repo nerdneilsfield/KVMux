@@ -38,6 +38,8 @@ struct PasteUploadSnapshot {
     wire::PasteStatusReason reason{wire::PasteStatusReason::none};
     [[nodiscard]] bool terminal() const noexcept { return state == PasteUploadState::completed || state == PasteUploadState::canceled || state == PasteUploadState::rejected || state == PasteUploadState::expired; }
 };
+// Merges coalesced server feedback without allowing a transaction to regress.
+PasteUploadSnapshot merge_paste_status(PasteUploadSnapshot current, const wire::PasteStatus& status) noexcept;
 struct TrafficSnapshot {
     std::uint64_t video_received_bytes{}, control_received_bytes{}, control_sent_bytes{};
 };

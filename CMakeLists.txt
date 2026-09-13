@@ -234,6 +234,10 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_relay_wire_test PRIVATE kvmux::core)
     add_test(NAME relay_wire COMMAND kvmux_relay_wire_test)
 
+    add_executable(kvmux_relay_client_status_test tests/relay_client_status_test.cpp)
+    target_link_libraries(kvmux_relay_client_status_test PRIVATE kvmux::core)
+    add_test(NAME relay_client_status COMMAND kvmux_relay_client_status_test)
+
     add_executable(kvmux_relay_session_test tests/relay_session_test.cpp)
     target_link_libraries(kvmux_relay_session_test PRIVATE kvmux::core)
     add_test(NAME relay_session COMMAND kvmux_relay_session_test)

@@ -1,4 +1,5 @@
 #include "network/kcp_channel.hpp"
+#include "network/paste_execute_retry.hpp"
 #include "network/udp_socket.hpp"
 
 #include <algorithm>
@@ -52,14 +53,29 @@ void bounds() {
     check(reserved.submit(Bytes{7}, 1) == SubmitResult::full);
     check(reserved.submit(Bytes{8}) == SubmitResult::accepted);
 
-    // Paste chunks and ordinary traffic reserve one bounded lifecycle slot.
-    // A coalesced executing keepalive therefore still enters when all ordinary
-    // capacity is occupied; no retry queue is needed.
+    // Begin, chunks, and ordinary traffic reserve one lifecycle slot. Execute
+    // consumes that final slot, so it is accepted at the KCP window boundary.
     KcpChannel executing(42);
     for (int i = 0; i < 127; ++i)
         check(executing.submit(Bytes{7}, 1) == SubmitResult::accepted);
-    check(executing.submit(Bytes{13}) == SubmitResult::accepted); // PasteKeepalive
+    check(executing.submit(Bytes{13}) == SubmitResult::accepted); // PasteExecute
     check(executing.submit(Bytes{9}) == SubmitResult::full);
+
+    // A full Execute submission records its attempt but not its accepted proof.
+    // It must not retry before 10 ms, then resubmit the same proof once capacity returns.
+    kvmux::relay::PasteExecuteRetry retry;
+    const auto at = std::chrono::steady_clock::time_point{};
+    KcpChannel full_execute(42);
+    for (int i = 0; i < 128; ++i) check(full_execute.submit(Bytes{7}) == SubmitResult::accepted);
+    check(kvmux::relay::should_retry_paste_execute(retry, 99, at));
+    check(full_execute.submit(Bytes{13}) == SubmitResult::full);
+    check(retry.accepted_challenge == 0 && retry.attempted_challenge == 99 && retry.attempted_at == at);
+    check(!kvmux::relay::should_retry_paste_execute(retry, 99, at + 9ms));
+    check(kvmux::relay::should_retry_paste_execute(retry, 99, at + 10ms));
+    KcpChannel drained_execute(42);
+    check(drained_execute.submit(Bytes{13}) == SubmitResult::accepted);
+    kvmux::relay::accept_paste_execute(retry, 99);
+    check(!kvmux::relay::should_retry_paste_execute(retry, 99, at + 20ms));
 
     sender.update(0);
     auto packets = sender.take_datagrams();

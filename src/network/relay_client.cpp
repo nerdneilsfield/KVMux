@@ -1,6 +1,7 @@
 #include "network/relay_client.hpp"
 #include "network/relay_session.hpp"
 #include "network/kcp_channel.hpp"
+#include "network/paste_execute_retry.hpp"
 #include "network/media_codec_wire.hpp"
 #include "support/crc32.hpp"
 #include <algorithm>
@@ -14,6 +15,39 @@
 #include <utility>
 
 namespace kvmux::relay {
+PasteUploadSnapshot merge_paste_status(PasteUploadSnapshot current, const wire::PasteStatus& status) noexcept {
+    if (current.terminal()) return current;
+    const auto phase = [](PasteUploadState state) noexcept {
+        switch (state) {
+        case PasteUploadState::uploading: return 1U;
+        case PasteUploadState::uploaded: return 2U;
+        case PasteUploadState::preparing: return 3U;
+        case PasteUploadState::executing: return 4U;
+        default: return 0U;
+        }
+    };
+    const auto received_phase = static_cast<unsigned>(status.state);
+    if (status.state != wire::PasteState::finished && received_phase < phase(current.state)) return current;
+
+    current.accepted_bytes = std::max(current.accepted_bytes, std::min(status.accepted_bytes, current.total_bytes));
+    current.completed_bytes = std::max(current.completed_bytes, std::min(status.completed_bytes, current.total_bytes));
+    current.reason = status.reason;
+    switch (status.state) {
+    case wire::PasteState::uploading: current.state = PasteUploadState::uploading; break;
+    case wire::PasteState::uploaded: current.state = PasteUploadState::uploaded; break;
+    case wire::PasteState::preparing: current.state = PasteUploadState::preparing; break;
+    case wire::PasteState::executing: current.state = PasteUploadState::executing; break;
+    case wire::PasteState::finished:
+        switch (status.outcome) {
+        case wire::PasteOutcome::completed: current.state = PasteUploadState::completed; break;
+        case wire::PasteOutcome::canceled: current.state = PasteUploadState::canceled; break;
+        case wire::PasteOutcome::expired: current.state = PasteUploadState::expired; break;
+        default: current.state = PasteUploadState::rejected; break;
+        }
+        break;
+    }
+    return current;
+}
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 struct RelayClient::Impl {
@@ -37,9 +71,8 @@ struct RelayClient::Impl {
         std::uint64_t epoch{}, intent{};
         std::uint32_t next_chunk{};
         bool begin_sent{}, cancel_pending{};
-        // The challenge that accompanied the most recently accepted Execute.
-        // A newer proof is the only retry signal; PasteStatus is coalesced feedback.
-        std::uint64_t execute_challenge{};
+        // A full KCP window retries without a new proof, but never spins.
+        PasteExecuteRetry execute_retry;
     };
     std::optional<PasteUpload> paste;
     std::uint64_t next_paste_id{};
@@ -76,6 +109,14 @@ struct RelayClient::Impl {
     void suspend() {
         barrier = false; control.applied.known = false;
         events.clear(); requested_sync.reset(); pending_sync.reset();
+    }
+    void apply_paste_status(const wire::PasteStatus& value) {
+        if (!paste || value.transaction_id != paste->snapshot.transaction_id ||
+            paste->epoch != control.epoch || paste->intent != intent) return;
+        const auto previous = paste->snapshot;
+        paste->snapshot = merge_paste_status(paste->snapshot, value);
+        if (!previous.terminal() && paste->snapshot.terminal()) paste->bytes.clear();
+        if (paste->snapshot.state == PasteUploadState::executing) paste->bytes.clear();
     }
     void abandon_paste(PasteUploadState state, wire::PasteStatusReason reason) {
         if (!paste) return;
@@ -341,28 +382,7 @@ struct RelayClient::Impl {
                     control.completed_ordinary_sequence = same_epoch ? value->completed_ordinary_sequence : 0;
                     status_at = now;
                 } else if (auto value = std::get_if<wire::PasteStatus>(&*message)) {
-                    if (!paste || value->transaction_id != paste->snapshot.transaction_id ||
-                        paste->epoch != control.epoch || paste->intent != intent) continue;
-                    if (paste->snapshot.terminal()) continue;
-                    paste->snapshot.accepted_bytes = std::min(value->accepted_bytes, paste->snapshot.total_bytes);
-                    paste->snapshot.completed_bytes = std::min(value->completed_bytes, paste->snapshot.total_bytes);
-                    paste->snapshot.reason = value->reason;
-                    switch (value->state) {
-                    case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
-                    case wire::PasteState::uploaded:
-                        paste->snapshot.state = PasteUploadState::uploaded;
-                        break;
-                    case wire::PasteState::preparing: paste->snapshot.state = PasteUploadState::preparing; break;
-                    case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
-                    case wire::PasteState::finished:
-                        switch (value->outcome) {
-                        case wire::PasteOutcome::completed: paste->snapshot.state = PasteUploadState::completed; break;
-                        case wire::PasteOutcome::canceled: paste->snapshot.state = PasteUploadState::canceled; break;
-                        case wire::PasteOutcome::expired: paste->snapshot.state = PasteUploadState::expired; break;
-                        default: paste->snapshot.state = PasteUploadState::rejected; break;
-                        }
-                        paste->bytes.clear(); break;
-                    }
+                    apply_paste_status(*value);
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
                         value->revision == pending_sync->revision && value->edge_floor == pending_sync->edge_floor &&
@@ -419,11 +439,12 @@ struct RelayClient::Impl {
                             wire::PasteChunk chunk{job.snapshot.transaction_id, job.next_chunk,
                                 std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
                             if (submit(chunk, 1)) ++job.next_chunk;
-                        } else if (barrier && session.latest_challenge() > job.execute_challenge) {
-                            // Execute has no transport ACK. Retry only after a newer displayed
-                            // proof, which bounds this to one submission per challenge.
-                            if (submit(wire::PasteExecute{job.snapshot.transaction_id}, 1))
-                                job.execute_challenge = session.latest_challenge();
+                        } else if (const auto challenge = session.latest_challenge();
+                            should_retry_paste_execute(job.execute_retry, challenge, now)) {
+                            // Execute consumes the final lifecycle slot. A full window retries at
+                            // a bounded cadence until it drains, rather than waiting for another proof.
+                            if (submit(wire::PasteExecute{job.snapshot.transaction_id}))
+                                accept_paste_execute(job.execute_retry, challenge);
                         }
                     }
                 }
