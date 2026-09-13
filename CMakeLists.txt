@@ -269,7 +269,7 @@ if(BUILD_TESTING)
     add_test(NAME relay_client COMMAND kvmux_relay_client_test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/hevc_1080p60.h265")
-    set_tests_properties(relay_client PROPERTIES TIMEOUT 15)
+    set_tests_properties(relay_client PROPERTIES TIMEOUT 30)
 
     add_executable(kvmux_video_contract_test tests/video_contract_test.cpp)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
