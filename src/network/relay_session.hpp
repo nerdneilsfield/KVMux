@@ -46,6 +46,7 @@ public:
     SessionActions paste_chunk(const wire::PasteChunk&, SessionTime);
     SessionActions paste_commit(const wire::PasteCommit&, SessionTime);
     SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
+    SessionActions paste_keepalive(const wire::PasteKeepalive&, SessionTime);
     // Transfers the validated upload to the serial owner, then reports ACK-derived progress.
     SessionActions paste_started(SessionTime);
     SessionActions paste_start_failed(SessionTime);
@@ -71,6 +72,8 @@ public:
     // Only barrier_complete additionally permits healthy edges. Caller must tick
     // and enforce this deadline, not replace it with a receipt-local heartbeat.
     [[nodiscard]] std::optional<SessionTime> execution_deadline() const;
+    // During an executing paste this is the transaction lease; otherwise it is the proof lease.
+    [[nodiscard]] std::optional<SessionTime> control_deadline() const;
     [[nodiscard]] std::size_t challenge_count() const;
 private:
     struct Impl;

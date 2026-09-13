@@ -186,6 +186,7 @@ struct RelayClient::Impl {
         std::unique_ptr<MediaReceiver> receiver;
         std::optional<wire::RefreshRequest> refresh;
         std::optional<wire::MediaFeedback> feedback;
+        Clock::time_point paste_keepalive_at{};
         std::vector<std::vector<std::uint8_t>> output;
         std::size_t output_index{};
         std::uint64_t reliable_cancel{};
@@ -383,6 +384,9 @@ struct RelayClient::Impl {
                     auto& job = *paste;
                     if (job.cancel_pending) {
                         if (submit(wire::PasteCancel{job.snapshot.transaction_id, wire::PasteCancelReason::user})) job.cancel_pending = false;
+                    } else if (job.snapshot.state == PasteUploadState::executing) {
+                        // A completed transaction keeps its own control lease. Video may recover independently.
+                        if (now - paste_keepalive_at >= 100ms && submit(wire::PasteKeepalive{job.snapshot.transaction_id})) paste_keepalive_at = now;
                     } else if (!job.snapshot.terminal() && barrier && ready(now) && active) {
                         if (!job.begin_sent) {
                             if (submit(wire::PasteBegin{job.snapshot.transaction_id, job.snapshot.total_bytes, support::crc32_ieee(job.bytes)})) job.begin_sent = true;

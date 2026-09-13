@@ -237,8 +237,13 @@ Only one controller is supported. A new session starts in Preview. A short
 network interruption keeps focused capture intent, but revokes input when its
 250 ms lease expires. Fresh presented video and an acknowledged current-state
 snapshot are required before input resumes. Completed clicks and stale relative
-motion are not replayed. Host exit or focus loss cancels that intent. The session
-expires after 10 seconds without peer liveness. Pairing is not authentication.
+motion are not replayed. An accepted remote ASCII paste becomes a transaction:
+its initial admission still requires that proof and snapshot, but it then renews
+a separate 500 ms reliable-control lease while it executes. This lets a long
+paste continue through video recovery without admitting ordinary input. If the
+client control heartbeat stops, or Host exit/focus loss cancels the intent, the
+server cancels the transaction and releases input. The session expires after 10
+seconds without peer liveness. Pairing is not authentication.
 
 ## Limits and verification
 

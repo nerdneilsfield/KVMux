@@ -305,7 +305,7 @@ struct RelayServer::Impl {
             }
             actions(session.tick(now));
             actions(session.update_control_snapshot(sink.snapshot(), now));
-            const auto lease = session.execution_deadline();
+            const auto lease = session.control_deadline();
             if (lease && now < *lease) { sink.set_control_active(true); sink.update_ui_heartbeat(); }
             else sink.set_control_active(false);
             if (!kcp) continue;
@@ -347,6 +347,8 @@ struct RelayServer::Impl {
                     }
                 } else if (auto value = std::get_if<wire::PasteCancel>(&*message)) {
                     actions(session.paste_cancel(*value, now));
+                } else if (auto value = std::get_if<wire::PasteKeepalive>(&*message)) {
+                    actions(session.paste_keepalive(*value, now));
                 } else if (auto value = std::get_if<wire::MediaFeedback>(&*message)) {
                     if (admission && admission->feedback(value->generation, value->stats, now)) {
                         std::lock_guard lock(media_mutex); ++snapshot.feedback_samples;

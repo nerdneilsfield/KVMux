@@ -225,9 +225,31 @@ void paste_upload_contract() {
     Fixture expiry; expiry.establish(); expiry.s.paste_begin({4,1,0},at(0)); auto x=expiry.s.tick(at(30000)); check(x.items[0].paste_status->state==w::PasteState::expired);
 }
 
+void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
+    Fixture f; f.establish();
+    const std::vector<std::uint8_t> text{'a'};
+    check(f.s.paste_begin({19,1,support::crc32_ieee(text)},at(0)).size==1);
+    check(f.s.paste_chunk({19,0,text},at(1)).size==1);
+    f.proof(0,0); f.barrier(0);
+    check(f.s.paste_commit({19},at(1)).items[0].paste_status->state==w::PasteState::executing);
+    f.s.paste_started(at(1));
+    // Presentation proof expires at 250ms. The transaction continues while the
+    // client GUI/control loop renews its explicit lease.
+    check(!f.s.tick(at(251)).items[0].paste_status.has_value());
+    check(f.s.paste_keepalive({19},at(400)).size==0);
+    check(!f.s.tick(at(800)).items[0].paste_status.has_value());
+    auto expired=f.s.tick(at(900));
+    check(count(expired, Kind::paste_ready)==1);
+    bool canceled = false; for (const auto& action : expired) if (action.paste_status) canceled = action.paste_status->state==w::PasteState::canceled && action.paste_status->reason==w::PasteStatusReason::deadline;
+    check(canceled);
+    // A delayed renewal cannot revive the canceled transaction or permit input.
+    check(!f.s.paste_keepalive({19},at(901)).items[0].paste_status.has_value());
+    check(f.s.check_edge({7,1,1,1,1,KeyEdge{4,true}},at(901))==InputGate::rejected);
+}
+
 int main() {
     handshake_loss_duplicate_and_single_controller(); server_issue_time_not_receipt_lease();
     session_10s_input_250ms_separation(); cancellation_overtakes_kcp_and_tombstones();
-    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract();
+    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract(); paste_execution_lease_survives_video_gap_and_expires_without_heartbeat();
     std::cout<<"relay_session: deterministic handshake/freshness/barrier checks passed\n";
 }

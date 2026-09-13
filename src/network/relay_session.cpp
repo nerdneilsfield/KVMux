@@ -62,6 +62,7 @@ struct ServerSession::Impl {
         SessionTime deadline{};
         wire::PasteState state{wire::PasteState::uploading};
         std::optional<wire::StateAck> fence;
+        std::optional<SessionTime> lease;
     };
     std::optional<PasteUpload> paste;
     ControlSnapshot snapshot;
@@ -81,8 +82,8 @@ struct ServerSession::Impl {
         auto st=status(reason); st.state=wire::PasteState::canceled;
         clear_paste(); paste_action(out,st);
     }
-    void revoke(SessionActions& out) {
-        if(paste && paste->state==wire::PasteState::executing) cancel_paste(out,wire::PasteStatusReason::canceled);
+    void revoke(SessionActions& out, bool cancel_executing_paste=true) {
+        if(cancel_executing_paste && paste && paste->state==wire::PasteState::executing) cancel_paste(out,wire::PasteStatusReason::canceled);
         if(execution||barrier||pending_sync) action(out,SessionAction::Kind::revoke_input);
         execution.reset(); barrier=false; pending_sync.reset(); completed_sync.reset();
     }
@@ -95,7 +96,8 @@ struct ServerSession::Impl {
         if(phase==SessionPhase::pending&&now>=pending_deadline) expire(out);
         else if(phase==SessionPhase::established) {
             if(now>=session_deadline) expire(out);
-            else if(execution&&now>=*execution) revoke(out);
+            else if (paste && paste->state == wire::PasteState::executing && paste->lease && now >= *paste->lease) cancel_paste(out, wire::PasteStatusReason::deadline);
+            else if(execution&&now>=*execution && (!paste || paste->state != wire::PasteState::executing)) revoke(out);
         }
     }
     std::optional<SessionTime> issued(std::uint64_t id) const {
@@ -116,7 +118,7 @@ struct ServerSession::Impl {
         if(p.intent>intent) {
             revoke(out); intent=p.intent; revision=last_edge=0;
         }
-        if(!p.active||!p.video_fresh||!video_valid) { revoke(out); return; }
+        if(!p.active||!p.video_fresh||!video_valid) { revoke(out, false); return; }
         if(!ready(snapshot)||now>=*time+250ms) return;
         auto deadline=*time+250ms;
         if(!execution||deadline>*execution) {
@@ -240,12 +242,20 @@ SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, Sess
     if(!valid_paste_text(p.bytes)) { auto st=s.status(wire::PasteStatusReason::invalid); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
     if(!s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof)); return out; }
     if(!s.barrier || !s.completed_sync || !ready(s.snapshot) || s.completed_sync->epoch!=s.snapshot.epoch || s.completed_sync->intent!=s.intent || s.intent<=s.canceled) { paste_action(out,s.status(wire::PasteStatusReason::fence)); return out; }
-    p.state=wire::PasteState::executing; p.fence=wire::StateAck{s.completed_sync->epoch,s.completed_sync->intent,s.completed_sync->revision,s.completed_sync->edge_floor,s.completed_sync->state};
+    p.state=wire::PasteState::executing; p.lease=now+500ms; p.fence=wire::StateAck{s.completed_sync->epoch,s.completed_sync->intent,s.completed_sync->revision,s.completed_sync->edge_floor,s.completed_sync->state};
     paste_action(out,s.status()); return out;
 }
 SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(s.paste && s.paste->begin.transaction_id==cancel.transaction_id) s.cancel_paste(out,wire::PasteStatusReason::canceled);
+    return out;
+}
+SessionActions ServerSession::paste_keepalive(const wire::PasteKeepalive& keepalive, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if (s.phase != SessionPhase::established || !s.paste || s.paste->state != wire::PasteState::executing ||
+        s.paste->begin.transaction_id != keepalive.transaction_id || !s.paste->lease) return out;
+    // This lease follows the reliable control connection, not transient video presentation.
+    s.paste->lease = now + 500ms;
     return out;
 }
 SessionActions ServerSession::paste_started(SessionTime now) {
@@ -315,6 +325,11 @@ wire::Welcome ServerSession::welcome() const { return impl_->welcome; }
 bool ServerSession::barrier_complete() const { return impl_->barrier; }
 std::uint64_t ServerSession::canceled_through() const { return impl_->canceled; }
 std::optional<SessionTime> ServerSession::execution_deadline() const { return impl_->execution; }
+std::optional<SessionTime> ServerSession::control_deadline() const {
+    const auto& s=*impl_;
+    if (s.paste && s.paste->state == wire::PasteState::executing) return s.paste->lease;
+    return s.execution;
+}
 std::size_t ServerSession::challenge_count() const { return impl_->count; }
 
 struct ClientSession::Impl {

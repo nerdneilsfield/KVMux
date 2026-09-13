@@ -20,7 +20,7 @@ void control(const w::Control& c,w::Direction d,std::uint8_t type,std::size_t pa
     for(std::size_t n=0;n<b->size();++n) check(!w::decode_control(std::span(*b).first(n),d));
     auto bad=*b; bad.push_back(0); check(!w::decode_control(bad,d));
     bad=*b; bad[1]=1; check(!w::decode_control(bad,d));
-    bad=*b; bad[0]=13; check(!w::decode_control(bad,d));
+    bad=*b; bad[0]=14; check(!w::decode_control(bad,d));
 }
 void envelope_golden_offsets_and_1200_ceiling() {
     Bytes body(1168,0x5a); w::Tuple tuple{0x0102030405060708,0x1112131415161718,0x21222324};
@@ -80,6 +80,7 @@ void paste_control_contract() {
     control(w::PasteCommit{1},c,10,8);
     control(w::PasteCancel{1,w::PasteCancelReason::disconnect},c,11,16);
     control(w::PasteStatus{1,w::PasteState::executing,2,960,10,w::PasteStatusReason::proof},s,12,28);
+    control(w::PasteKeepalive{1},c,13,8);
     auto begin=*w::encode_control(w::PasteBegin{0x0102030405060708,65536,0x10203040},c);
     check(begin==Bytes({8,0,0,16,1,2,3,4,5,6,7,8,0,1,0,0,0x10,0x20,0x30,0x40}));
     auto status=*w::encode_control(w::PasteStatus{1,w::PasteState::completed,2,960,960,w::PasteStatusReason::none},s);
