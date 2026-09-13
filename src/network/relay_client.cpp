@@ -344,7 +344,12 @@ struct RelayClient::Impl {
                     paste->snapshot.reason = value->reason;
                     switch (value->state) {
                     case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
-                    case wire::PasteState::complete: paste->snapshot.state = PasteUploadState::complete; break;
+                    case wire::PasteState::complete:
+                        paste->snapshot.state = PasteUploadState::complete;
+                        // Commit admission is proof-gated. Re-arm only after the
+                        // server refuses it for lack of a current proof.
+                        if (value->reason == wire::PasteStatusReason::proof) paste->commit_sent = false;
+                        break;
                     case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
                     case wire::PasteState::completed: paste->snapshot.state = PasteUploadState::completed; paste->bytes.clear(); break;
                     case wire::PasteState::canceled: paste->snapshot.state = PasteUploadState::canceled; paste->bytes.clear(); break;

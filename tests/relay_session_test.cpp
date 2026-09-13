@@ -225,6 +225,19 @@ void paste_upload_contract() {
     Fixture expiry; expiry.establish(); expiry.s.paste_begin({4,1,0},at(0)); auto x=expiry.s.tick(at(30000)); check(x.items[0].paste_status->state==w::PasteState::expired);
 }
 
+void delayed_paste_upload_requires_a_new_proof_for_commit() {
+    Fixture f; f.establish();
+    const std::vector<std::uint8_t> text(1920, 'a');
+    check(f.s.paste_begin({23, static_cast<std::uint32_t>(text.size()), support::crc32_ieee(text)}, at(0)).size == 1);
+    check(f.s.paste_chunk({23, 0, {text.begin(), text.begin() + 960}}, at(1)).size == 1);
+    // Upload spans the 250ms proof lease. Complete upload alone cannot execute.
+    check(f.s.paste_chunk({23, 1, {text.begin() + 960, text.end()}}, at(300)).items[0].paste_status->state == w::PasteState::complete);
+    check(f.s.paste_commit({23}, at(301)).items[0].paste_status->reason == w::PasteStatusReason::proof);
+    // A current presentation proof renews admission; a retry can now execute.
+    f.proof(350, 350); f.barrier(350);
+    check(f.s.paste_commit({23}, at(351)).items[0].paste_status->state == w::PasteState::executing);
+}
+
 void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
     Fixture f; f.establish();
     const std::vector<std::uint8_t> text{'a'};
@@ -250,6 +263,6 @@ void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
 int main() {
     handshake_loss_duplicate_and_single_controller(); server_issue_time_not_receipt_lease();
     session_10s_input_250ms_separation(); cancellation_overtakes_kcp_and_tombstones();
-    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract(); paste_execution_lease_survives_video_gap_and_expires_without_heartbeat();
+    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract(); delayed_paste_upload_requires_a_new_proof_for_commit(); paste_execution_lease_survives_video_gap_and_expires_without_heartbeat();
     std::cout<<"relay_session: deterministic handshake/freshness/barrier checks passed\n";
 }
