@@ -2,6 +2,7 @@
 #include "network/relay_session.hpp"
 #include "network/kcp_channel.hpp"
 #include "network/media_codec_wire.hpp"
+#include "support/crc32.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -27,6 +28,15 @@ struct RelayClient::Impl {
     ClientVideoSnapshot video;
     std::optional<CaptureSample> latest;
     std::deque<ControlEvent> events;
+    struct PasteUpload {
+        std::vector<std::uint8_t> bytes;
+        PasteUploadSnapshot snapshot;
+        std::uint64_t epoch{}, intent{};
+        std::uint32_t next_chunk{};
+        bool begin_sent{}, commit_sent{}, cancel_pending{};
+    };
+    std::optional<PasteUpload> paste;
+    std::uint64_t next_paste_id{};
     std::optional<InputSync> requested_sync;
     std::optional<wire::Sync> pending_sync;
     std::uint64_t intent{}, wire_sequence{}, last_source_sequence{};
@@ -60,6 +70,12 @@ struct RelayClient::Impl {
     void suspend() {
         barrier = false; control.applied.known = false;
         events.clear(); requested_sync.reset(); pending_sync.reset();
+    }
+    void abandon_paste(PasteUploadState state, wire::PasteStatusReason reason) {
+        if (!paste) return;
+        paste->snapshot.state = state; paste->snapshot.reason = reason;
+        paste->snapshot.accepted_bytes = 0; paste->snapshot.completed_bytes = 0;
+        paste->bytes.clear(); paste->cancel_pending = false;
     }
     void fail(std::string error) {
         std::lock_guard lock(mutex);
@@ -317,6 +333,23 @@ struct RelayClient::Impl {
                     control.ordinary_input_pending = value->ordinary_input_pending;
                     control.completed_ordinary_sequence = same_epoch ? value->completed_ordinary_sequence : 0;
                     status_at = now;
+                } else if (auto value = std::get_if<wire::PasteStatus>(&*message)) {
+                    if (!paste || value->transaction_id != paste->snapshot.transaction_id ||
+                        paste->epoch != control.epoch || paste->intent != intent) continue;
+                    if (paste->snapshot.state == PasteUploadState::canceled &&
+                        value->state != wire::PasteState::canceled) continue;
+                    paste->snapshot.accepted_bytes = std::min(value->accepted_bytes, paste->snapshot.total_bytes);
+                    paste->snapshot.completed_bytes = std::min(value->completed_bytes, paste->snapshot.total_bytes);
+                    paste->snapshot.reason = value->reason;
+                    switch (value->state) {
+                    case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
+                    case wire::PasteState::complete: paste->snapshot.state = PasteUploadState::complete; break;
+                    case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
+                    case wire::PasteState::completed: paste->snapshot.state = PasteUploadState::completed; paste->bytes.clear(); break;
+                    case wire::PasteState::canceled: paste->snapshot.state = PasteUploadState::canceled; paste->bytes.clear(); break;
+                    case wire::PasteState::rejected: paste->snapshot.state = PasteUploadState::rejected; paste->bytes.clear(); break;
+                    case wire::PasteState::expired: paste->snapshot.state = PasteUploadState::expired; paste->bytes.clear(); break;
+                    }
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
                         value->revision == pending_sync->revision && value->edge_floor == pending_sync->edge_floor &&
@@ -345,6 +378,24 @@ struct RelayClient::Impl {
                     wire::Edge edge{control.epoch, intent, wire_sequence + 1, event.sequence, session.latest_challenge(), event.payload};
                     if (!submit(edge)) break;
                     ++wire_sequence; events.pop_front();
+                }
+                if (paste && paste->epoch == control.epoch && paste->intent == intent) {
+                    auto& job = *paste;
+                    if (job.cancel_pending) {
+                        if (submit(wire::PasteCancel{job.snapshot.transaction_id, wire::PasteCancelReason::user})) job.cancel_pending = false;
+                    } else if (!job.snapshot.terminal() && barrier && ready(now) && active) {
+                        if (!job.begin_sent) {
+                            if (submit(wire::PasteBegin{job.snapshot.transaction_id, job.snapshot.total_bytes, support::crc32_ieee(job.bytes)})) job.begin_sent = true;
+                        } else if (job.next_chunk * 960U < job.bytes.size()) {
+                            const auto offset = static_cast<std::size_t>(job.next_chunk) * 960U;
+                            const auto count = std::min<std::size_t>(960, job.bytes.size() - offset);
+                            wire::PasteChunk chunk{job.snapshot.transaction_id, job.next_chunk,
+                                std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
+                            if (submit(chunk)) ++job.next_chunk;
+                        } else if (!job.commit_sent) {
+                            if (submit(wire::PasteCommit{job.snapshot.transaction_id})) job.commit_sent = true;
+                        }
+                    }
                 }
             }
             if (refresh && submit(*refresh)) refresh.reset();
@@ -381,7 +432,7 @@ void RelayClient::start() {
         p.control = {}; p.control.recoverable_transport = true; p.control.state = ControlConnectionState::opening;
         const auto generation = p.capture.generation + 1;
         p.capture = {}; p.capture.generation = generation; p.capture.state = CaptureState::starting;
-        p.video = {}; p.latest.reset(); p.events.clear(); p.requested_sync.reset(); p.pending_sync.reset();
+        p.video = {}; p.latest.reset(); p.events.clear(); p.paste.reset(); p.next_paste_id = 0; p.requested_sync.reset(); p.pending_sync.reset();
         p.ingress.clear(); p.ingress_bytes = 0; p.presentations.clear(); p.decode_recovery.reset();
         p.intent = p.wire_sequence = p.last_source_sequence = p.presented_media = p.presented_capture = p.marker = p.generation = 0;
         p.active = p.barrier = p.release_pending = p.disconnect_pending = p.gui_seen = p.decode_done = p.intent_canceled = p.cancel_inflight = false;
@@ -392,7 +443,7 @@ void RelayClient::start() {
 void RelayClient::stop() noexcept {
     auto& p = *impl_;
     std::lock_guard lock(p.mutex);
-    p.active = false; p.suspend(); p.latest.reset();
+    p.active = false; p.suspend(); p.abandon_paste(PasteUploadState::canceled, wire::PasteStatusReason::session); p.latest.reset();
     if (!p.stopped) p.disconnect_pending = true;
     p.control.state = ControlConnectionState::disconnected;
     p.control.release_confirmed = p.control.target_usb_ready = false;
@@ -401,6 +452,7 @@ void RelayClient::stop() noexcept {
 void RelayClient::release() noexcept {
     auto& p = *impl_; std::lock_guard lock(p.mutex);
     p.suspend(); p.active = false;
+    if (p.paste && !p.paste->snapshot.terminal()) { p.paste->cancel_pending = true; p.paste->snapshot.state = PasteUploadState::canceled; p.paste->snapshot.reason = wire::PasteStatusReason::canceled; p.paste->bytes.clear(); }
     if (!p.stopped && p.intent) { p.release_pending = true; p.cancel_inflight = true; }
 }
 void RelayClient::mouse_mode(MouseMode mode) {
@@ -461,6 +513,28 @@ kvmux::SubmitResult RelayClient::submit(ControlEvent event) {
     }
     p.control.applied.known = false; p.control.ordinary_input_pending = true; p.events.push_back(std::move(event)); return kvmux::SubmitResult::accepted;
 }
+kvmux::SubmitResult RelayClient::start_ascii_paste_text(std::vector<std::uint8_t> normalized) {
+    auto& p = *impl_; std::lock_guard lock(p.mutex);
+    if (normalized.empty() || normalized.size() > 65536 || !p.ready(Clock::now()) || !p.barrier || !p.active || (p.paste && !p.paste->snapshot.terminal())) return kvmux::SubmitResult::not_ready;
+    for (std::size_t i = 0; i < normalized.size(); ++i) {
+        const auto c = normalized[i];
+        if (c >= 0x80 || (c == '\r' && (i + 1 == normalized.size() || normalized[++i] != '\n')) ||
+            !(c == '\t' || c == '\n' || (c >= 0x20 && c <= 0x7e))) return kvmux::SubmitResult::not_ready;
+    }
+    std::random_device random;
+    std::uint64_t id{};
+    while (!id) id = (std::uint64_t(random()) << 32U) ^ random();
+    Impl::PasteUpload job; job.bytes = std::move(normalized); job.epoch = p.control.epoch; job.intent = p.intent;
+    job.snapshot = {PasteUploadState::uploading, id, static_cast<std::uint32_t>(job.bytes.size()), 0, 0, wire::PasteStatusReason::none};
+    p.paste = std::move(job);
+    return kvmux::SubmitResult::accepted;
+}
+void RelayClient::cancel_ascii_paste_text() noexcept {
+    auto& p = *impl_; std::lock_guard lock(p.mutex);
+    if (!p.paste || p.paste->snapshot.terminal()) return;
+    p.paste->cancel_pending = true; p.paste->snapshot.state = PasteUploadState::canceled; p.paste->snapshot.reason = wire::PasteStatusReason::canceled; p.paste->bytes.clear();
+}
+PasteUploadSnapshot RelayClient::ascii_paste_text_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->paste ? impl_->paste->snapshot : PasteUploadSnapshot{}; }
 ControlSnapshot RelayClient::control_snapshot() const {
     auto& p = *impl_; std::lock_guard lock(p.mutex); auto result = p.control;
     if (p.cancel_inflight) { result.state = ControlConnectionState::clearing; result.release_confirmed = false; result.applied.known = false; }

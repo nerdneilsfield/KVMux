@@ -1,6 +1,7 @@
 #pragma once
 #include "control/control_sink.hpp"
 #include "network/udp_media.hpp"
+#include "network/relay_wire.hpp"
 #include "video/codec/video_codec.hpp"
 #include "video/capture/capture_source.hpp"
 #include <memory>
@@ -26,6 +27,14 @@ struct ClientVideoSnapshot {
 // envelope and retransmissions. Excludes UDP/IP headers.
 // stop()/start() preserve totals; a new client starts at zero. An in-flight
 // packet may finish after stop(), which does not wait for network workers.
+enum class PasteUploadState { idle, uploading, complete, executing, completed, canceled, rejected, expired };
+struct PasteUploadSnapshot {
+    PasteUploadState state{PasteUploadState::idle};
+    std::uint64_t transaction_id{};
+    std::uint32_t total_bytes{}, accepted_bytes{}, completed_bytes{};
+    wire::PasteStatusReason reason{wire::PasteStatusReason::none};
+    [[nodiscard]] bool terminal() const noexcept { return state == PasteUploadState::completed || state == PasteUploadState::canceled || state == PasteUploadState::rejected || state == PasteUploadState::expired; }
+};
 struct TrafficSnapshot {
     std::uint64_t video_received_bytes{}, control_received_bytes{}, control_sent_bytes{};
 };
@@ -42,6 +51,10 @@ public:
     void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept;
     kvmux::SubmitResult synchronize(InputSync);
     kvmux::SubmitResult submit(ControlEvent event);
+    // Takes already normalized US-ASCII transaction bytes. It never logs or retains them after completion/cancel.
+    kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> normalized);
+    void cancel_ascii_paste_text() noexcept;
+    PasteUploadSnapshot ascii_paste_text_snapshot() const;
     ControlSnapshot control_snapshot() const;
     CaptureSnapshot capture_snapshot() const;
     TrafficSnapshot traffic_snapshot() const;
@@ -75,6 +88,9 @@ public:
     kvmux::SubmitResult synchronize(InputSync value) override { return client_->synchronize(std::move(value)); }
     kvmux::SubmitResult submit(ControlEvent event) override { return client_->submit(std::move(event)); }
     void release_all() noexcept override { client_->release(); }
+    kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> normalized) { return client_->start_ascii_paste_text(std::move(normalized)); }
+    void cancel_ascii_paste_text() noexcept { client_->cancel_ascii_paste_text(); }
+    PasteUploadSnapshot ascii_paste_text_snapshot() const { return client_->ascii_paste_text_snapshot(); }
     ControlSnapshot snapshot() const override { return client_->control_snapshot(); }
 private:
     std::shared_ptr<RelayClient> client_;
