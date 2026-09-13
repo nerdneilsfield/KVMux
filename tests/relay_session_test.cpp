@@ -1,5 +1,6 @@
 #include "network/relay_session.hpp"
 #include "support/crc32.hpp"
+#include "input/us_ascii_text.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <source_location>
@@ -97,4 +98,70 @@ void ownership_cancel_expiry_and_job_id() {
     Fixture owner; owner.establish(); owner.s.paste_begin({23,1,crc},at(0)); owner.snapshot.epoch=8; owner.s.update_control_snapshot(owner.snapshot,at(1));
     check(owner.s.paste_status()->outcome==w::PasteOutcome::canceled);
 }
-int main() { execute_upload_contract(); ownership_cancel_expiry_and_job_id(); }
+// This models the RelayServer handoff boundary without its UDP/KCP loop or GUI.
+// The worker only starts the immutable mapped request, and completion is fed back
+// as the serial worker's ACK-derived snapshot.
+struct PasteWorker {
+    std::optional<AsciiPasteRequest> prepared;
+    std::uint64_t next_job{41};
+
+    SubmitResult prepare(AsciiPasteRequest request) {
+        if (prepared || request.job.gestures.empty()) return SubmitResult::not_ready;
+        prepared = std::move(request);
+        return SubmitResult::accepted;
+    }
+    AsciiPasteSnapshot complete() const {
+        check(prepared.has_value());
+        return {AsciiPasteState::completed, prepared->job.gestures.size(),
+                prepared->job.gestures.size(), prepared->job_id};
+    }
+};
+
+void execute_two_chunk_relay_transaction() {
+    Fixture f; f.establish();
+    std::vector<std::uint8_t> text(961, 'a');
+    const auto crc = support::crc32_ieee(text);
+
+    // The proof is current before any reliable upload. It grants the owner lease,
+    // but does not itself start a serial job.
+    f.proof(50, 51);
+    check(f.s.paste_begin({101, static_cast<std::uint32_t>(text.size()), crc}, at(52)).items[0].paste_status->state == w::PasteState::uploading);
+    std::vector<std::uint8_t> first(text.begin(), text.begin() + 960);
+    std::vector<std::uint8_t> second(text.begin() + 960, text.end());
+    check(f.s.paste_chunk({101, 0, first}, at(53)).items[0].paste_status->accepted_bytes == 960);
+    auto uploaded = f.s.paste_chunk({101, 1, second}, at(54));
+    check(uploaded.items[0].paste_status->state == w::PasteState::uploaded && uploaded.items[0].paste_status->next_chunk == 2);
+
+    auto preparing = f.s.paste_execute({101}, at(55));
+    check(preparing.items[0].paste_status->state == w::PasteState::preparing);
+    PasteWorker worker;
+    auto bytes = f.s.pending_paste_bytes(); auto owner = f.s.pending_paste_owner();
+    check(bytes && owner && bytes->size() == text.size() && std::equal(bytes->begin(), bytes->end(), text.begin()));
+    auto mapped = map_us_ascii_text(std::string_view(reinterpret_cast<const char*>(bytes->data()), bytes->size()));
+    check(mapped.normalized_characters == 961 && mapped.gestures.size() == 961);
+    check(std::ranges::all_of(mapped.gestures, [](const auto& gesture) { return gesture.edges.size() == 2; })); // 1,922 ACKed HID reports
+    AsciiPasteJob job; for (auto& gesture : mapped.gestures) job.gestures.push_back(std::move(gesture.edges));
+    check(worker.prepare({worker.next_job, owner->first, owner->second, std::move(job)}) == SubmitResult::accepted);
+    check(f.s.paste_started(worker.next_job, at(56)).items[0].paste_status->state == w::PasteState::executing);
+    auto finished = f.s.update_ascii_paste(worker.complete(), at(57));
+    check(finished.items[0].paste_status->state == w::PasteState::finished &&
+          finished.items[0].paste_status->outcome == w::PasteOutcome::completed &&
+          finished.items[0].paste_status->completed_bytes == 961);
+    // Delayed Execute and Cancel cannot alter a retained terminal result.
+    check(f.s.paste_execute({101}, at(58)).items[0].paste_status->outcome == w::PasteOutcome::completed);
+    check(f.s.paste_cancel({101, w::PasteCancelReason::user}, at(59)).items[0].paste_status->outcome == w::PasteOutcome::completed);
+
+    // A newer proof establishes a new owner. An old cancellation must not cancel it.
+    f.c.set_intent(2, true, true, 101);
+    f.proof(100, 101);
+    check(f.s.cancel({1, w::CancelReason::release}, at(102)).size == 1);
+    check(f.s.paste_begin({102, 1, support::crc32_ieee(std::span<const std::uint8_t>(text.data(), 1))}, at(103)).items[0].paste_status->state == w::PasteState::uploading);
+    f.s.paste_chunk({102, 0, {'a'}}, at(104));
+    check(f.s.paste_execute({102}, at(105)).items[0].paste_status->state == w::PasteState::preparing);
+    auto released = f.snapshot; released.release_confirmed = false;
+    auto canceled = f.s.update_control_snapshot(released, at(106));
+    check(canceled.items[0].paste_status->outcome == w::PasteOutcome::canceled);
+    check(f.s.paste_execute({102}, at(107)).items[0].paste_status->outcome == w::PasteOutcome::canceled);
+}
+
+int main() { execute_upload_contract(); ownership_cancel_expiry_and_job_id(); execute_two_chunk_relay_transaction(); }
