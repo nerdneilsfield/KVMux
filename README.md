@@ -68,9 +68,11 @@ see the [verification record](docs/acceptance.md) before choosing hardware.
 Use the local text or paste field to enter text, then choose **Type**. This is
 an explicit simulated typing action; it does not forward SDL text input.
 KVMux accepts only US-keyboard-layout printable ASCII plus Tab and Enter.
-It rejects any other character before typing starts. Keep the target focused
-and using a US keyboard layout, because the target interprets the simulated
-key presses.
+It rejects any other character before typing starts and offers a one-click
+**Remove unsupported** action that retains the supported US ASCII, Tab, and
+Enter characters. Choose **Type** again after removing them. Keep the target
+focused and using a US keyboard layout, because the target interprets the
+simulated key presses.
 
 Typing is paced and bounded. Cancel it or release input with the usual Host-key,
 focus-loss, or connection-release path; KVMux releases active keys and stops
