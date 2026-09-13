@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace kvmux {
@@ -36,6 +37,7 @@ struct KvmSessionSnapshot {
     ControlSnapshot control;
     InputState input_state{InputState::preview};
     InputPointerSnapshot pointer;
+    bool text_paste_active{};
     bool video_fresh{};
     bool shutting_down{};
     bool serial_shutdown_timed_out{};
@@ -68,6 +70,9 @@ public:
     void set_host_key(std::uint16_t usage) noexcept;
     void set_relative_gain(double gain) noexcept;
     [[nodiscard]] bool send_special(SpecialKeys keys);
+    [[nodiscard]] TextMappingResult start_text_paste(std::string_view text);
+    void cancel_text_paste() noexcept;
+    [[nodiscard]] TextMappingResult text_paste_snapshot() const;
 
     void set_video_rect(Rect rect) noexcept;
     void handle_input(const InputEvent& event);

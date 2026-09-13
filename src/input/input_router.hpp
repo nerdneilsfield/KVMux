@@ -2,6 +2,7 @@
 
 #include "control/control_sink.hpp"
 #include "control/hid_keyboard.hpp"
+#include "input/us_ascii_text.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -70,6 +71,10 @@ public:
     [[nodiscard]] bool capture_intended() const noexcept { return state_ == InputState::captured || state_ == InputState::recovering || (state_ == InputState::arming && activation_released_); }
 
     [[nodiscard]] bool special_active() const noexcept { return pending_special_.has_value() || !special_steps_.empty(); }
+    [[nodiscard]] bool text_active() const noexcept { return text_active_; }
+    [[nodiscard]] TextMappingResult start_text(std::string_view text, Clock::time_point now = Clock::now());
+    void cancel_text() noexcept;
+    [[nodiscard]] TextMappingResult text_snapshot() const { return text_result_; }
 
     // Set the active desktop region, which may exclude bars inside the capture.
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
@@ -114,6 +119,7 @@ private:
     DesiredInputState desired() const;
     void synchronize(Clock::time_point now);
     void schedule_special(SpecialKeys, Clock::time_point);
+    void schedule_text(Clock::time_point);
     void send_relative_integral(int dx, int dy, int wheel);
     [[nodiscard]] std::pair<std::uint16_t, std::uint16_t> absolute(double x,
                                                                   double y) const noexcept;
@@ -145,6 +151,10 @@ private:
     std::unordered_set<std::uint16_t> isolated_keys_;
     std::unordered_set<std::uint16_t> swallowed_host_releases_;
     std::vector<SpecialStep> special_steps_;
+    std::vector<TextGesture> text_gestures_;
+    std::size_t next_text_gesture_{};
+    bool text_active_{};
+    TextMappingResult text_result_;
 };
 
 }  // namespace kvmux

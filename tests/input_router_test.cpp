@@ -363,5 +363,27 @@ int main() {
         require(!router.pointer_snapshot().submitted_relative, "release clears diagnostics");
     }
 
+    {
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_fresh(true);
+        const auto start = InputRouter::Clock::now();
+        const auto result = router.start_text("A!", start);
+        require(result && router.text_active(), "text starts only after full mapping");
+        router.tick(start);
+        require(sink.events.size() == 4 && std::get<KeyEdge>(sink.events[0].payload).usage == 0xe1 &&
+                    std::get<KeyEdge>(sink.events[3].payload).usage == 0xe1,
+                "shifted text gesture preserves edge order in one submission turn");
+        router.tick(start + std::chrono::milliseconds(49));
+        require(sink.events.size() == 4, "next text character waits 50ms");
+        router.tick(start + std::chrono::milliseconds(50));
+        router.tick(start + std::chrono::milliseconds(50));
+        require(sink.events.size() == 8 && !router.text_active(), "second gesture follows at pacing interval");
+        const auto active = router.start_text("ab", start + std::chrono::milliseconds(100));
+        require(static_cast<bool>(active), "new text can start after completion");
+        router.handle({InputKey{0x04, true, false}});
+        require(!router.text_active() && sink.releases > 0, "physical key cancels text with release");
+    }
+
     return EXIT_SUCCESS;
 }

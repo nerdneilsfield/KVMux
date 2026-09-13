@@ -117,6 +117,14 @@ bool KvmSession::disconnect_control() {
 void KvmSession::set_host_key(std::uint16_t usage) noexcept { input_.set_host_key(usage); }
 void KvmSession::set_relative_gain(double gain) noexcept { input_.set_relative_gain(gain); }
 bool KvmSession::send_special(SpecialKeys keys) { return video_fresh_ && input_.send_special(keys); }
+TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
+    control_->set_control_active(true);
+    auto result = input_.start_text(text);
+    if (!result) control_->set_control_active(false);
+    return result;
+}
+void KvmSession::cancel_text_paste() noexcept { input_.cancel_text(); control_->set_control_active(false); }
+TextMappingResult KvmSession::text_paste_snapshot() const { return input_.text_snapshot(); }
 
 bool KvmSession::set_mouse_mode(MouseMode mode) {
     if (!preview_only()) return false;
@@ -239,6 +247,7 @@ KvmSessionSnapshot KvmSession::snapshot() const {
     value.control = control_->snapshot();
     value.input_state = input_.state();
     value.pointer = input_.pointer_snapshot();
+    value.text_paste_active = input_.text_active();
     return value;
 }
 

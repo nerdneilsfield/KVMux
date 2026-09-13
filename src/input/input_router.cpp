@@ -108,6 +108,8 @@ bool InputRouter::submit(ControlPayload payload) {
 }
 
 void InputRouter::handle(const InputEvent& event) {
+    // A physical key edge cancels synthetic text before it can inject another character.
+    if (text_active_ && std::holds_alternative<InputKey>(event.payload)) { cancel_text(); }
     std::visit([this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, InputPointerMotion> ||
@@ -270,7 +272,7 @@ void InputRouter::recover() noexcept {
     if (!capture_intended()) return;
     state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
-    special_steps_.clear(); pending_special_.reset(); pointer_ = {};
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_gestures_.clear(); next_text_gesture_ = 0; pointer_ = {};
 }
 void InputRouter::synchronize(Clock::time_point now) {
     const auto snapshot = sink_.snapshot();
@@ -314,13 +316,20 @@ void InputRouter::tick(const Clock::time_point now) {
         state_ = InputState::preview; release_requested_ = false;
     }
     if (snapshot.recoverable_transport && (state_ == InputState::recovering || pending_special_)) synchronize(now);
+    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size()) {
+        schedule_text(now);
+    }
     while (!special_steps_.empty() && special_steps_.front().due <= now) {
         auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
         for (const auto edge : step.edges) {
             if (!submit(edge)) { special_steps_.clear(); return; }
         }
     }
-    if (temporary_intent_ && !pending_special_ && special_steps_.empty()) {
+    if (text_active_ && special_steps_.empty() && next_text_gesture_ == text_gestures_.size()) {
+        text_active_ = false;
+        temporary_intent_ = false;
+    }
+    if (temporary_intent_ && !pending_special_ && special_steps_.empty() && !text_active_) {
         // Keep the final up edges inside the active lease until the next UI turn.
         temporary_intent_ = false;
     }
@@ -328,7 +337,7 @@ void InputRouter::tick(const Clock::time_point now) {
 
 void InputRouter::begin_release() noexcept {
     pointer_ = {};
-    special_steps_.clear(); pending_special_.reset(); temporary_intent_ = false;
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_gestures_.clear(); next_text_gesture_ = 0; temporary_intent_ = false;
     sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -358,6 +367,38 @@ bool InputRouter::send_special(const SpecialKeys keys, const Clock::time_point n
     }
     schedule_special(keys, now); return !special_steps_.empty();
 }
+TextMappingResult InputRouter::start_text(const std::string_view text, const Clock::time_point now) {
+    text_result_ = map_us_ascii_text(text);
+    if (!text_result_ || state_ != InputState::preview || special_active() || text_active_ || !sink_ready_released()) {
+        if (text_result_) text_result_.error = TextPasteError::unsupported;
+        return text_result_;
+    }
+    text_gestures_ = text_result_.gestures;
+    next_text_gesture_ = 0;
+    text_active_ = true;
+    temporary_intent_ = true;
+    if (sink_.snapshot().recoverable_transport) {
+        if (!video_fresh_) { cancel_text(); return text_result_; }
+        ++intent_; revision_ = 0; synchronize(now);
+    } else {
+        schedule_text(now);
+    }
+    return text_result_;
+}
+
+void InputRouter::cancel_text() noexcept {
+    if (text_active_) begin_release();
+}
+
+void InputRouter::schedule_text(const Clock::time_point now) {
+    if (next_text_gesture_ == text_gestures_.size()) return;
+    special_steps_.push_back({now, text_gestures_[next_text_gesture_++].edges});
+    // A full gesture is submitted together; the next character begins only after 50 ms.
+    if (next_text_gesture_ < text_gestures_.size()) {
+        special_steps_.push_back({now + std::chrono::milliseconds(50), {}});
+    }
+}
+
 void InputRouter::schedule_special(const SpecialKeys keys, const Clock::time_point now) {
     std::vector<std::uint8_t> usages;
     if (keys == SpecialKeys::control_alt_delete) usages = {0xe0, 0xe2, 0x4c};
