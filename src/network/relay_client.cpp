@@ -19,6 +19,9 @@ using Clock = std::chrono::steady_clock;
 struct RelayClient::Impl {
     explicit Impl(ClientOptions value) : options(std::move(value)) { control.recoverable_transport = true; }
     ClientOptions options;
+    // Serializes start/stop callers. The worker never takes this lock, so a
+    // completed worker can be joined here without blocking its state updates.
+    std::mutex lifecycle_mutex;
     mutable std::mutex mutex;
     std::atomic<bool> stopped{true};
     std::thread worker, decoder_worker;
@@ -466,7 +469,9 @@ RelayClient::~RelayClient() {
 }
 void RelayClient::start() {
     auto& p = *impl_;
+    std::lock_guard lifecycle_lock(p.lifecycle_mutex);
     if (!p.stopped) return;
+    // Do not hold p.mutex while joining: a worker may need it to finish.
     if (p.worker.joinable()) p.worker.join();
     if (p.decoder_worker.joinable()) p.decoder_worker.join();
     {
@@ -484,6 +489,7 @@ void RelayClient::start() {
 }
 void RelayClient::stop() noexcept {
     auto& p = *impl_;
+    std::lock_guard lifecycle_lock(p.lifecycle_mutex);
     std::lock_guard lock(p.mutex);
     p.active = false; p.suspend(); p.abandon_paste(PasteUploadState::canceled, wire::PasteStatusReason::session); p.latest.reset();
     if (!p.stopped) p.disconnect_pending = true;

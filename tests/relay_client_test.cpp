@@ -242,6 +242,26 @@ void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
     gui.session.release_control();
 }
 
+void concurrent_network_front_start_test(const char* jpeg) {
+    RelayFixture relay(jpeg);
+    auto client = std::make_shared<kvmux::relay::RelayClient>(relay.options());
+    kvmux::relay::NetworkCaptureSource capture(client);
+    kvmux::relay::NetworkControlSink control(client);
+    std::atomic<bool> go{};
+    std::vector<std::thread> starters;
+    for (unsigned i = 0; i < 16; ++i) starters.emplace_back([&, i] {
+        while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+        if (i & 1U) control.connect({}, 0, 0);
+        else capture.start({"relay", 0, 0, {0,1}, PixelFormat::mjpeg, PixelFormat::mjpeg, "MJPEG"});
+    });
+    go.store(true, std::memory_order_release);
+    for (auto& starter : starters) starter.join();
+    // The capture/control fronts share one client lifetime, so their racing
+    // starts must coalesce into its first generation.
+    assert(client->capture_snapshot().generation == 1);
+    client->stop();
+}
+
 void first_frame_activation_test(const char* jpeg) {
     RelayFixture relay(jpeg);
     GuiFixture gui(relay.options(), true);
@@ -272,6 +292,7 @@ void first_frame_activation_test(const char* jpeg) {
 
 int main(int argc, char** argv) {
     assert(argc > 2);
+    concurrent_network_front_start_test(argv[1]);
     first_frame_activation_test(argv[1]);
     chunked_ascii_paste_loopback_test(argv[1]);
     paste_keepalive_survives_blackholed_server_status_test(argv[1]);
