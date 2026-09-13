@@ -179,10 +179,6 @@ struct RelayServer::Impl {
         std::optional<wire::StateAck> ack;
         std::optional<wire::Status> status;
         std::optional<wire::PasteStatus> paste_status;
-        std::optional<wire::PasteAuthorized> paste_authorized;
-        struct AuthorizationFence { std::uint64_t transaction{}, epoch{}, intent{}, revision{}; DesiredInputState state; };
-        std::optional<AuthorizationFence> authorization_fence;
-        std::uint64_t next_authorization_revision{1};
         std::uint64_t next_paste_job_id{1};
         std::vector<std::vector<std::uint8_t>> control_output;
         std::size_t control_index{};
@@ -224,11 +220,7 @@ struct RelayServer::Impl {
                 case SessionAction::Kind::state_ack: ack = action.ack; break;
                 case SessionAction::Kind::paste_ready:
                     paste_status = action.paste_status;
-                    if (action.paste_status && (action.paste_status->state == wire::PasteState::canceled ||
-                        action.paste_status->state == wire::PasteState::rejected || action.paste_status->state == wire::PasteState::expired)) { sink.cancel_ascii_paste(); authorization_fence.reset(); }
-                    break;
-                case SessionAction::Kind::paste_authorized:
-                    paste_authorized = action.paste_authorized;
+                    if (action.paste_status && (action.paste_status->state == wire::PasteState::finished)) { sink.cancel_ascii_paste(); }
                     break;
                 case SessionAction::Kind::expired:
                     admission.reset();
@@ -315,15 +307,6 @@ struct RelayServer::Impl {
                     pending_proof.reset();
                 }
             }
-            if (authorization_fence) {
-                const auto snapshot = sink.snapshot(); const auto& fence = *authorization_fence; const auto& applied = snapshot.applied;
-                if (snapshot.epoch != fence.epoch || snapshot.state != ControlConnectionState::ready || !snapshot.target_usb_ready || !snapshot.release_confirmed) {
-                    actions(session.paste_authorization_failed(now)); authorization_fence.reset();
-                } else if (applied.known && applied.epoch == fence.epoch && applied.intent_generation == fence.intent &&
-                           applied.revision == fence.revision && wire::same_state(applied.state, fence.state)) {
-                    actions(session.paste_authorized(random_id(), now)); authorization_fence.reset();
-                }
-            }
             const auto lease = session.control_deadline();
             if (lease && now < *lease) { sink.set_control_active(true); sink.update_ui_heartbeat(); }
             else sink.set_control_active(false);
@@ -347,8 +330,8 @@ struct RelayServer::Impl {
                     actions(session.paste_begin(*value, now));
                 } else if (auto value = std::get_if<wire::PasteChunk>(&*message)) {
                     actions(session.paste_chunk(*value, now));
-                } else if (auto value = std::get_if<wire::PasteCommit>(&*message)) {
-                    actions(session.paste_commit(*value, now));
+                } else if (auto value = std::get_if<wire::PasteExecute>(&*message)) {
+                    actions(session.paste_execute(*value, now));
                     if (auto bytes = session.pending_paste_bytes()) {
                         const auto mapped = map_us_ascii_text(std::string_view(
                             reinterpret_cast<const char*>(bytes->data()), bytes->size()));
@@ -364,20 +347,6 @@ struct RelayServer::Impl {
                                 actions(session.paste_started(job_id, now));
                             else { sink.cancel_ascii_paste(); actions(session.paste_start_failed(now)); }
                         }
-                    }
-                } else if (auto value = std::get_if<wire::PasteAuthorize>(&*message)) {
-                    actions(session.paste_authorize(*value, now));
-                    if (!authorization_fence) if (auto request = session.pending_paste_authorization()) {
-                        // paste_authorize just installed the fence lease, but this KCP
-                        // pass is after the ordinary heartbeat update. Refresh it before
-                        // submitting so the serial sink can accept this synchronization.
-                        sink.set_control_active(true);
-                        sink.update_ui_heartbeat();
-                        // High-bit revisions are relay-private and never enter ServerSession's GUI revision namespace.
-                        const auto revision = (std::uint64_t{1} << 63) | next_authorization_revision++;
-                        if (sink.synchronize({request->epoch, request->intent, revision, request->state}) == kvmux::SubmitResult::accepted)
-                            authorization_fence = {value->transaction_id, request->epoch, request->intent, revision, request->state};
-                        else actions(session.paste_authorization_failed(now));
                     }
                 } else if (auto value = std::get_if<wire::PasteCancel>(&*message)) {
                     actions(session.paste_cancel(*value, now));
@@ -417,7 +386,6 @@ struct RelayServer::Impl {
                 paste_status.reset();
                 paste_status_at = now;
             }
-            if (paste_authorized && submit(*paste_authorized)) paste_authorized.reset();
             if (status && submit(*status)) status.reset();
             // Retain a bounded KCP batch across UDP would-block. Updating before
             // it drains makes KCP append to its bounded callback queue and fails

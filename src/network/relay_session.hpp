@@ -9,14 +9,13 @@ namespace kvmux::relay {
 using SessionTime = std::chrono::steady_clock::time_point;
 enum class SessionPhase { idle, pending, established };
 struct SessionAction {
-    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected, paste_ready, paste_authorized };
+    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected, paste_ready };
     Kind kind{};
     udp::Endpoint peer;
     std::vector<std::uint8_t> datagram;
     std::optional<wire::StateAck> ack;
     std::optional<wire::BusyReason> rejection;
     std::optional<wire::PasteStatus> paste_status;
-    std::optional<wire::PasteAuthorized> paste_authorized;
 };
 // Fixed-capacity synchronous results. No internal output queue; consume each batch.
 struct SessionActions {
@@ -49,13 +48,7 @@ public:
     // They retain no source outside the one bounded session upload.
     SessionActions paste_begin(const wire::PasteBegin&, SessionTime);
     SessionActions paste_chunk(const wire::PasteChunk&, SessionTime);
-    SessionActions paste_commit(const wire::PasteCommit&, SessionTime);
-    SessionActions paste_authorize(const wire::PasteAuthorize&, SessionTime);
-    // The relay server owns this serial fence revision namespace.
-    struct PasteAuthorization { std::uint64_t epoch{}, intent{}; DesiredInputState state; };
-    [[nodiscard]] std::optional<PasteAuthorization> pending_paste_authorization() const;
-    SessionActions paste_authorized(std::uint64_t token, SessionTime);
-    SessionActions paste_authorization_failed(SessionTime);
+    SessionActions paste_execute(const wire::PasteExecute&, SessionTime);
     SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
     // Call for an already decoded KCP control before tick(now), so a keepalive
     // received at its deadline renews the executing transaction.
@@ -68,7 +61,7 @@ public:
     SessionActions paste_start_failed(SessionTime);
     SessionActions update_ascii_paste(const AsciiPasteSnapshot&, SessionTime);
     [[nodiscard]] std::optional<wire::PasteStatus> paste_status() const;
-    // Available after an accepted commit until the relay server submits it to the serial owner.
+    // Available after accepted execution intent until the relay server submits it to the serial owner.
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> pending_paste_bytes() const;
     [[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint64_t>> pending_paste_owner() const;
     [[nodiscard]] bool matches(const udp::Endpoint&, const wire::Tuple&) const;

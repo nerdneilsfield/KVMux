@@ -28,7 +28,7 @@ struct ClientVideoSnapshot {
 // stop()/start() preserve totals; a new client starts at zero. An in-flight
 // packet may finish after stop(), which does not wait for network workers.
 enum class PasteUploadState {
-    idle, uploading, complete, authorizing, authorized, executing,
+    idle, uploading, uploaded, preparing, executing,
     completed, canceled, rejected, expired
 };
 struct PasteUploadSnapshot {

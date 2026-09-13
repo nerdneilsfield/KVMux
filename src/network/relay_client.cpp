@@ -33,9 +33,8 @@ struct RelayClient::Impl {
         PasteUploadSnapshot snapshot;
         std::uint64_t epoch{}, intent{};
         std::uint32_t next_chunk{};
-        bool begin_sent{}, authorize_sent{}, commit_sent{}, cancel_pending{};
-        std::uint64_t authorization_request{}, authorization_token{}, proof_retry_after{};
-        Clock::time_point authorization_requested_at{};
+        bool begin_sent{}, execute_sent{}, cancel_pending{};
+        std::uint64_t proof_retry_after{};
     };
     std::optional<PasteUpload> paste;
     std::uint64_t next_paste_id{};
@@ -345,28 +344,21 @@ struct RelayClient::Impl {
                     paste->snapshot.reason = value->reason;
                     switch (value->state) {
                     case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
-                    case wire::PasteState::complete:
-                        paste->snapshot.state = PasteUploadState::complete;
-                        if (value->reason == wire::PasteStatusReason::proof_required) {
-                            paste->snapshot.state = PasteUploadState::complete;
-                            paste->authorize_sent = false;
-                            paste->proof_retry_after = session.latest_challenge();
-                        }
-                        if (value->reason == wire::PasteStatusReason::authorization) paste->commit_sent = false;
+                    case wire::PasteState::uploaded:
+                        paste->snapshot.state = PasteUploadState::uploaded;
+                        if (value->reason == wire::PasteStatusReason::proof) { paste->execute_sent = false; paste->proof_retry_after = session.latest_challenge(); }
                         break;
+                    case wire::PasteState::preparing: paste->snapshot.state = PasteUploadState::preparing; break;
                     case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
-                    case wire::PasteState::completed: paste->snapshot.state = PasteUploadState::completed; paste->bytes.clear(); break;
-                    case wire::PasteState::canceled: paste->snapshot.state = PasteUploadState::canceled; paste->bytes.clear(); break;
-                    case wire::PasteState::rejected: paste->snapshot.state = PasteUploadState::rejected; paste->bytes.clear(); break;
-                    case wire::PasteState::expired: paste->snapshot.state = PasteUploadState::expired; paste->bytes.clear(); break;
+                    case wire::PasteState::finished:
+                        switch (value->outcome) {
+                        case wire::PasteOutcome::completed: paste->snapshot.state = PasteUploadState::completed; break;
+                        case wire::PasteOutcome::canceled: paste->snapshot.state = PasteUploadState::canceled; break;
+                        case wire::PasteOutcome::expired: paste->snapshot.state = PasteUploadState::expired; break;
+                        default: paste->snapshot.state = PasteUploadState::rejected; break;
+                        }
+                        paste->bytes.clear(); break;
                     }
-                } else if (auto value = std::get_if<wire::PasteAuthorized>(&*message)) {
-                    if (!paste || paste->snapshot.terminal() || value->transaction_id != paste->snapshot.transaction_id ||
-                        value->request_id != paste->authorization_request || !value->token ||
-                        paste->epoch != control.epoch || paste->intent != intent) continue;
-                    paste->authorization_token = value->token;
-                    paste->snapshot.state = PasteUploadState::authorized;
-                    paste->commit_sent = false;
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
                         value->revision == pending_sync->revision && value->edge_floor == pending_sync->edge_floor &&
@@ -413,7 +405,7 @@ struct RelayClient::Impl {
                             submit(wire::PasteKeepalive{job.snapshot.transaction_id})) {
                             paste_keepalive_at = now;
                         }
-                    } else if (!job.snapshot.terminal() && barrier && ready(now) && active) {
+                    } else if (!job.snapshot.terminal() && ready(now) && active) {
                         if (!job.begin_sent) {
                             if (submit(wire::PasteBegin{job.snapshot.transaction_id, job.snapshot.total_bytes,
                                     support::crc32_ieee(job.bytes)}, 1)) job.begin_sent = true;
@@ -422,23 +414,9 @@ struct RelayClient::Impl {
                             const auto count = std::min<std::size_t>(960, job.bytes.size() - offset);
                             wire::PasteChunk chunk{job.snapshot.transaction_id, job.next_chunk,
                                 std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
-                            // The final chunk must leave a slot for PasteCommit.
                             if (submit(chunk, 1)) ++job.next_chunk;
-                        } else if (!job.authorization_token) {
-                            // An authorization is reliable. Do not send it on every network
-                            // iteration; retry only after an explicit proof request or a bounded timeout.
-                            if (job.authorize_sent && now - job.authorization_requested_at >= 1s) job.authorize_sent = false;
-                            if (!job.authorize_sent && session.latest_challenge() > job.proof_retry_after) {
-                                ++job.authorization_request;
-                                if (submit(wire::PasteAuthorize{job.snapshot.transaction_id, session.latest_challenge(),
-                                        job.authorization_request}, 1)) {
-                                    job.authorize_sent = true;
-                                    job.authorization_requested_at = now;
-                                    job.snapshot.state = PasteUploadState::authorizing;
-                                }
-                            }
-                        } else if (!job.commit_sent) {
-                            if (submit(wire::PasteCommit{job.snapshot.transaction_id, job.authorization_token}, 1)) job.commit_sent = true;
+                        } else if (!job.execute_sent && session.latest_challenge() > job.proof_retry_after) {
+                            if (submit(wire::PasteExecute{job.snapshot.transaction_id}, 1)) job.execute_sent = true;
                         }
                     }
                 }

@@ -37,7 +37,7 @@ public:
     }
     void cancel_ascii_paste() noexcept override {
         ++paste_cancels;
-        if (paste_value.active()) paste_value.state = kvmux::AsciiPasteState::canceled;
+        if (paste_value.active()) paste_value.state = kvmux::AsciiPasteState::completed;
     }
     kvmux::SubmitResult start_ascii_paste_text(std::vector<std::uint8_t> text) override {
         ++paste_text_starts;

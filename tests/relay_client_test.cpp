@@ -175,8 +175,8 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
         const auto paste = gui.client->ascii_paste_text_snapshot();
         executing = executing || paste.state == kvmux::relay::PasteUploadState::executing;
         // Authorization is after upload but before the server starts serial I/O.
-        if (paste.state == kvmux::relay::PasteUploadState::authorizing ||
-            paste.state == kvmux::relay::PasteUploadState::authorized) {
+        if (paste.state == kvmux::relay::PasteUploadState::preparing ||
+            paste.state == kvmux::relay::PasteUploadState::preparing) {
             active_before_serial = active_before_serial || gui.session.snapshot().text_paste_active;
         }
         return paste.state == kvmux::relay::PasteUploadState::completed;
