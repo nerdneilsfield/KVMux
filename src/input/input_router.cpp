@@ -336,6 +336,19 @@ void InputRouter::tick(const Clock::time_point now) {
         for (const auto edge : step.edges) {
             if (!submit(edge)) { special_steps_.clear(); return; }
         }
+        if (step.text_gesture) ++scheduled_text_gestures_;
+    }
+    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size() &&
+        (!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch)) {
+        // The prior 50 ms delay has elapsed. Queue and submit the next gesture now.
+        schedule_text(now);
+        while (!special_steps_.empty() && special_steps_.front().due <= now) {
+            auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
+            for (const auto edge : step.edges) {
+                if (!submit(edge)) { special_steps_.clear(); return; }
+            }
+            if (step.text_gesture) ++scheduled_text_gestures_;
+        }
     }
     if (text_active_ && special_steps_.empty() && next_text_gesture_ == text_gestures_.size()) {
         // Keep the temporary lease through this tick so the final up edges can drain.
@@ -388,6 +401,7 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     text_gestures_ = text_result_.gestures;
     next_text_gesture_ = 0;
     text_completion_pending_ = false;
+    scheduled_text_gestures_ = 0;
     text_active_ = true;
     temporary_intent_ = true;
     if (sink_.snapshot().recoverable_transport) {
@@ -403,9 +417,15 @@ void InputRouter::cancel_text() noexcept {
     if (text_active_) begin_release();
 }
 
+TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
+    return {text_result_.error, text_result_.source_bytes, text_result_.normalized_characters,
+            text_result_.gestures.size(), scheduled_text_gestures_, text_active_,
+            text_active_ && !special_steps_.empty()};
+}
+
 void InputRouter::schedule_text(const Clock::time_point now) {
     if (next_text_gesture_ == text_gestures_.size()) return;
-    special_steps_.push_back({now, text_gestures_[next_text_gesture_++].edges});
+    special_steps_.push_back({now, text_gestures_[next_text_gesture_++].edges, true});
     // A full gesture is submitted together; the next character begins only after 50 ms.
     if (next_text_gesture_ < text_gestures_.size()) {
         special_steps_.push_back({now + std::chrono::milliseconds(50), {}});

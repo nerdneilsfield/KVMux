@@ -23,6 +23,8 @@ struct TextFilterResult {
 struct TextGesture { std::vector<KeyEdge> edges; };
 struct TextMappingResult {
     TextPasteError error{TextPasteError::none};
+    // Metadata only; source text is never retained for diagnostics.
+    std::size_t source_bytes{};
     std::size_t normalized_characters{};
     std::vector<TextGesture> gestures;
     [[nodiscard]] explicit operator bool() const noexcept { return error == TextPasteError::none; }

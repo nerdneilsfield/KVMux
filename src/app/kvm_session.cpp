@@ -125,6 +125,7 @@ TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
 }
 void KvmSession::cancel_text_paste() noexcept { input_.cancel_text(); control_->set_control_active(false); }
 TextMappingResult KvmSession::text_paste_snapshot() const { return input_.text_snapshot(); }
+TextPasteSnapshot KvmSession::text_paste_progress() const noexcept { return input_.text_paste_snapshot(); }
 
 bool KvmSession::set_mouse_mode(MouseMode mode) {
     if (!preview_only()) return false;

@@ -51,6 +51,18 @@ struct Rect {
 [[nodiscard]] bool supported_usb_keyboard_usage(std::uint16_t usage) noexcept;
 
 // UI-thread diagnostics. Submission means queue acceptance, not a device ACK.
+// Counts are safe metadata only. "Scheduled" means the router accepted all
+// edges of a gesture into the control sink; it does not mean target delivery.
+struct TextPasteSnapshot {
+    TextPasteError error{TextPasteError::none};
+    std::size_t source_bytes{};
+    std::size_t normalized_characters{};
+    std::size_t planned_gestures{};
+    std::size_t scheduled_gestures{};
+    bool active{};
+    bool pending{};
+};
+
 struct InputPointerSnapshot {
     std::optional<Rect> video_rect; // Event-time active desktop rectangle in logical window units.
     std::optional<std::pair<double, double>> video_local; // Logical window units.
@@ -77,6 +89,7 @@ public:
     [[nodiscard]] TextMappingResult start_text(std::string_view text, Clock::time_point now = Clock::now());
     void cancel_text() noexcept;
     [[nodiscard]] TextMappingResult text_snapshot() const { return text_result_; }
+    [[nodiscard]] TextPasteSnapshot text_paste_snapshot() const noexcept;
 
     // Set the active desktop region, which may exclude bars inside the capture.
     // Use the same coordinate space as pointer/button/wheel events (SDL/ImGui
@@ -106,6 +119,7 @@ private:
     struct SpecialStep {
         Clock::time_point due;
         std::vector<KeyEdge> edges;
+        bool text_gesture{};
     };
 
     [[nodiscard]] bool sink_ready_released() const;
@@ -155,6 +169,7 @@ private:
     std::vector<SpecialStep> special_steps_;
     std::vector<TextGesture> text_gestures_;
     std::size_t next_text_gesture_{};
+    std::size_t scheduled_text_gestures_{};
     bool text_active_{};
     bool text_completion_pending_{};
     TextMappingResult text_result_;

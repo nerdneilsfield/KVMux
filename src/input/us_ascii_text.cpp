@@ -46,6 +46,7 @@ TextFilterResult filter_us_ascii_text(const std::string_view text) {
 
 TextMappingResult map_us_ascii_text(const std::string_view text) {
     TextMappingResult result;
+    result.source_bytes = text.size();
     std::vector<unsigned char> normalized;
     normalized.reserve(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {

@@ -15,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -328,6 +329,7 @@ int main(int argc, char** argv) {
     std::array<char, 4097> text_paste_buffer{};
     std::size_t text_paste_removed = 0;
     TextPasteError paste_error = TextPasteError::none;
+    std::size_t clipboard_loaded_bytes = 0, clipboard_loaded_characters = 0;
     std::vector<ImVec4> local_regions;
     Uint32 local_buttons = 0, remote_buttons = 0;
     FloatingMenuIcon menu_icon;
@@ -476,13 +478,13 @@ int main(int argc, char** argv) {
             }
         }
         if (debug) {
-            const auto paste = session->text_paste_snapshot();
+            const auto paste = session->text_paste_progress();
             const char* paste_status = debug_text_paste_error(paste.error);
             if (snapshot.text_paste_active) {
                 paste_status = "active";
                 paste_was_active = true;
             } else if (paste_was_active) {
-                paste_status = paste_cancelled ? "cancelled" : "complete";
+                paste_status = paste_cancelled ? "cancelled" : "scheduled";
                 paste_was_active = false;
                 paste_cancelled = false;
             }
@@ -493,6 +495,9 @@ int main(int argc, char** argv) {
                 " control=" + control_state(snapshot.control.state) +
                 " control-error=" + (snapshot.control.error.empty() ? "none" : "present") +
                 " input=" + input_state(snapshot.input_state) + " paste=" + paste_status +
+                " paste-bytes=" + std::to_string(paste.source_bytes) +
+                " paste-chars=" + std::to_string(paste.normalized_characters) +
+                " paste-scheduled=" + std::to_string(paste.scheduled_gestures) + "/" + std::to_string(paste.planned_gestures) +
                 " media=snapshot-" + snapshot_status + " recording=" + debug_recording_state(media_status.state) +
                 " session-error=" + (snapshot.session_error.empty() ? "none" : "present");
             if (status != last_status) { spdlog::debug("Session {}", status); last_status = status; }
@@ -500,9 +505,10 @@ int main(int argc, char** argv) {
         const bool temporary_status_visible = std::chrono::steady_clock::now() < temporary_status_until;
         if (!temporary_status_visible) temporary_status.clear();
         const auto text_paste_actions = [&] {
-            const auto paste = session->text_paste_snapshot();
+            const auto paste = session->text_paste_progress();
             if (snapshot.text_paste_active) {
-                ImGui::Text("Typing ASCII: %zu characters", paste.normalized_characters);
+                ImGui::Text("Typing ASCII: %zu/%zu scheduled", paste.scheduled_gestures,
+                            paste.planned_gestures);
                 if (ImGui::Button("Cancel typing")) {
                     paste_cancelled = true;
                     session->cancel_text_paste();
@@ -529,6 +535,8 @@ int main(int argc, char** argv) {
                 }
             }
             ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
+            const auto prepared = map_us_ascii_text(text_paste_buffer.data());
+            ImGui::Text("Prepared: %zu characters", prepared.normalized_characters);
             if (ImGui::Button("Type ASCII")) {
                 const auto result = session->start_text_paste(text_paste_buffer.data());
                 paste_error = result.error;
@@ -551,11 +559,21 @@ int main(int argc, char** argv) {
                 if (!clipboard) {
                     paste_error = TextPasteError::unsupported;
                 } else {
+                    clipboard_loaded_bytes = std::strlen(clipboard);
+                    const auto prepared = map_us_ascii_text(clipboard);
+                    clipboard_loaded_characters = prepared.normalized_characters;
+                    if (debug) spdlog::debug("Clipboard text loaded: bytes={} characters={} mapping={}",
+                                             clipboard_loaded_bytes, clipboard_loaded_characters,
+                                             debug_text_paste_error(prepared.error));
                     std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(), "%s", clipboard);
                     SDL_free(clipboard);
                     text_paste_removed = 0;
-                    paste_error = TextPasteError::none;
+                    paste_error = prepared.error;
                 }
+            }
+            if (clipboard_loaded_bytes) {
+                ImGui::Text("Clipboard loaded: %zu bytes, %zu characters", clipboard_loaded_bytes,
+                            clipboard_loaded_characters);
             }
         };
         const auto media_actions = [&] {

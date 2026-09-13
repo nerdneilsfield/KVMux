@@ -73,6 +73,7 @@ public:
     [[nodiscard]] TextMappingResult start_text_paste(std::string_view text);
     void cancel_text_paste() noexcept;
     [[nodiscard]] TextMappingResult text_paste_snapshot() const;
+    [[nodiscard]] TextPasteSnapshot text_paste_progress() const noexcept;
 
     void set_video_rect(Rect rect) noexcept;
     void handle_input(const InputEvent& event);

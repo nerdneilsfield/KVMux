@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -382,7 +383,6 @@ int main() {
         router.tick(start + std::chrono::milliseconds(49));
         require(sink.events.size() == 4, "next text character waits 50ms");
         router.tick(start + std::chrono::milliseconds(50));
-        router.tick(start + std::chrono::milliseconds(50));
         require(sink.events.size() == 8 && router.text_active(),
                 "final text edges retain their temporary lease for this tick");
         router.tick(start + std::chrono::milliseconds(51));
@@ -391,6 +391,29 @@ int main() {
         require(static_cast<bool>(active), "new text can start after completion");
         router.handle({InputKey{0x04, true, false}});
         require(!router.text_active() && sink.releases > 0, "physical key cancels text with release");
+    }
+
+    {
+        // Regression: a long ASCII paste must keep scheduling past the first 25 gestures.
+        FakeSink sink;
+        InputRouter router(sink);
+        router.set_video_fresh(true);
+        const auto start = InputRouter::Clock::now();
+        const std::string text(100, 'a');
+        require(static_cast<bool>(router.start_text(text, start)), "100-character text paste starts");
+        for (int milliseconds = 0; milliseconds <= 1250; ++milliseconds) {
+            router.tick(start + std::chrono::milliseconds(milliseconds));
+        }
+        auto progress = router.text_paste_snapshot();
+        require(progress.planned_gestures == 100 && progress.scheduled_gestures > 25 &&
+                    progress.scheduled_gestures < progress.planned_gestures && progress.active,
+                "long text remains active and schedules beyond 25 gestures after 1.25 seconds");
+        for (int milliseconds = 1251; milliseconds <= 5001; ++milliseconds) {
+            router.tick(start + std::chrono::milliseconds(milliseconds));
+        }
+        progress = router.text_paste_snapshot();
+        require(progress.scheduled_gestures == 100 && !progress.active && sink.events.size() == 200,
+                "100-character text paste schedules all gestures after its expected five seconds");
     }
 
     {
