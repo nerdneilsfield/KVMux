@@ -251,8 +251,31 @@ void paste_upload_contract() {
     check(complete.s.paste_begin({5,1,support::crc32_ieee(std::vector<std::uint8_t>{'a'})},at(0)).size==1);
     check(complete.s.paste_chunk({5,0,{'a'}},at(1)).items[0].paste_status->state==w::PasteState::complete);
     complete.proof(0, 0); complete.proof(9000, 9000); complete.proof(18000, 18000); complete.proof(27000, 27000);
-    complete.s.tick(at(30001)); // The challenge/session deadline does not alter the completed upload.
-    check(complete.s.paste_status()->state==w::PasteState::complete);
+    complete.s.tick(at(30001));
+    check(complete.s.paste_status()->state==w::PasteState::canceled);
+}
+
+void paste_owner_and_terminal_are_monotonic() {
+    Fixture f; f.establish();
+    const std::vector<std::uint8_t> text{'a'};
+    const auto crc=support::crc32_ieee(text);
+    // A provisional upload binds to its first owner proof and survives that proof.
+    f.s.paste_begin({71,1,crc},at(0)); f.proof(0,0);
+    check(f.s.paste_chunk({71,0,text},at(1)).items[0].paste_status->state==w::PasteState::complete);
+    // A newer intent cancels every nonterminal phase and retains its result.
+    f.c.set_intent(2,true,true,101); f.proof(50,50);
+    auto terminal=f.s.paste_status(); check(terminal && terminal->state==w::PasteState::canceled);
+    auto delayed=f.s.paste_authorize({71,1,1},at(51));
+    check(delayed.size==1 && delayed.items[0].paste_status &&
+        delayed.items[0].paste_status->state==terminal->state && delayed.items[0].paste_status->transaction_id==terminal->transaction_id);
+    // The old raw cancel acknowledges itself but cannot cancel intent 2's upload.
+    f.s.paste_begin({72,1,crc},at(52));
+    f.s.cancel({1,w::CancelReason::focus},at(53));
+    check(f.s.paste_status()->transaction_id==72 && f.s.paste_status()->state==w::PasteState::uploading);
+    auto canceled=f.s.paste_cancel({72},at(54));
+    check(canceled.items[0].paste_status->state==w::PasteState::canceled);
+    auto replay=f.s.paste_cancel({72},at(55));
+    check(replay.size==1 && replay.items[0].paste_status->state==w::PasteState::canceled);
 }
 
 void delayed_paste_upload_requires_a_new_proof_for_commit() {
@@ -293,7 +316,7 @@ void paste_keepalive_and_terminal_snapshot_precede_deadline_tick() {
     auto terminal=completed.s.update_ascii_paste({AsciiPasteState::completed,1,1},at(501));
     check(terminal.items[0].paste_status->state==w::PasteState::completed);
     check(!completed.s.tick(at(501)).items[0].paste_status.has_value());
-    check(!completed.s.paste_status().has_value());
+    check(completed.s.paste_status()->state==w::PasteState::completed);
 }
 
 void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {

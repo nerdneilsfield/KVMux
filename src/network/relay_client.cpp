@@ -339,8 +339,7 @@ struct RelayClient::Impl {
                 } else if (auto value = std::get_if<wire::PasteStatus>(&*message)) {
                     if (!paste || value->transaction_id != paste->snapshot.transaction_id ||
                         paste->epoch != control.epoch || paste->intent != intent) continue;
-                    if (paste->snapshot.state == PasteUploadState::canceled &&
-                        value->state != wire::PasteState::canceled) continue;
+                    if (paste->snapshot.terminal()) continue;
                     paste->snapshot.accepted_bytes = std::min(value->accepted_bytes, paste->snapshot.total_bytes);
                     paste->snapshot.completed_bytes = std::min(value->completed_bytes, paste->snapshot.total_bytes);
                     paste->snapshot.reason = value->reason;
@@ -362,7 +361,7 @@ struct RelayClient::Impl {
                     case wire::PasteState::expired: paste->snapshot.state = PasteUploadState::expired; paste->bytes.clear(); break;
                     }
                 } else if (auto value = std::get_if<wire::PasteAuthorized>(&*message)) {
-                    if (!paste || value->transaction_id != paste->snapshot.transaction_id ||
+                    if (!paste || paste->snapshot.terminal() || value->transaction_id != paste->snapshot.transaction_id ||
                         value->request_id != paste->authorization_request || !value->token ||
                         paste->epoch != control.epoch || paste->intent != intent) continue;
                     paste->authorization_token = value->token;
