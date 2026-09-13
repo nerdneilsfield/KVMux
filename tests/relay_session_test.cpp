@@ -1,4 +1,5 @@
 #include "network/relay_session.hpp"
+#include "support/crc32.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <source_location>
@@ -197,9 +198,30 @@ void challenge_ring_and_actions_bounded() {
     check(f.s.on_datagram(f.client,old,at(30000),{},true).size<=1);
     check(f.s.phase()==SessionPhase::established); check(count(f.s.tick(at(39950)),Kind::expired)==1);
 }
+
+void paste_upload_contract() {
+    Fixture f; f.establish();
+    const std::vector<std::uint8_t> text{'a','\r','\n','b'};
+    const auto crc=support::crc32_ieee(text); check(crc==0xf35534d7U);
+    auto a=f.s.paste_begin({9,4,crc},at(0)); check(a.items[0].paste_status->state==w::PasteState::uploading);
+    check(f.s.paste_begin({9,4,crc},at(1)).items[0].paste_status->next_chunk==0);
+    check(f.s.paste_begin({10,4,crc},at(1)).items[0].paste_status->reason==w::PasteStatusReason::conflict);
+    check(f.s.paste_chunk({9,0,text},at(2)).items[0].paste_status->state==w::PasteState::complete);
+    check(f.s.paste_chunk({9,0,text},at(3)).items[0].paste_status->accepted_bytes==4);
+    check(f.s.paste_commit({9},at(4)).items[0].paste_status->reason==w::PasteStatusReason::proof);
+    f.proof(50,50); f.barrier(50);
+    auto done=f.s.paste_commit({9},at(51)); check(done.items[0].paste_status->state==w::PasteState::executing);
+    check(f.s.pending_paste_bytes()->size()==4 && f.s.pending_paste_fence()->intent==1);
+    Fixture bad; bad.establish();
+    auto b=bad.s.paste_begin({3,2,0},at(0)); check(b.size==1);
+    auto rejected=bad.s.paste_chunk({3,0,{'x','\r'}},at(1)); check(rejected.items[0].paste_status->state==w::PasteState::complete);
+    auto r=bad.s.paste_commit({3},at(2)); check(r.items[0].paste_status->state==w::PasteState::rejected);
+    Fixture expiry; expiry.establish(); expiry.s.paste_begin({4,1,0},at(0)); auto x=expiry.s.tick(at(30000)); check(x.items[0].paste_status->state==w::PasteState::expired);
+}
+
 int main() {
     handshake_loss_duplicate_and_single_controller(); server_issue_time_not_receipt_lease();
     session_10s_input_250ms_separation(); cancellation_overtakes_kcp_and_tombstones();
-    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded();
+    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract();
     std::cout<<"relay_session: deterministic handshake/freshness/barrier checks passed\n";
 }

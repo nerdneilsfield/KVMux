@@ -36,6 +36,7 @@ add_library(kvmux_core STATIC
     src/network/udp_media.cpp
     src/network/kcp_channel.cpp
     src/support/build_info.cpp
+    src/support/crc32.cpp
     src/support/config.cpp
     src/support/diagnostics.cpp
     src/video/codec/codec_factory.cpp

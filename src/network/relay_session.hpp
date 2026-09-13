@@ -9,12 +9,13 @@ namespace kvmux::relay {
 using SessionTime = std::chrono::steady_clock::time_point;
 enum class SessionPhase { idle, pending, established };
 struct SessionAction {
-    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected };
+    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected, paste_ready };
     Kind kind{};
     udp::Endpoint peer;
     std::vector<std::uint8_t> datagram;
     std::optional<wire::StateAck> ack;
     std::optional<wire::BusyReason> rejection;
+    std::optional<wire::PasteStatus> paste_status;
 };
 // Fixed-capacity synchronous results. No internal output queue; consume each batch.
 struct SessionActions {
@@ -39,6 +40,16 @@ public:
     SessionActions tick(SessionTime);
     SessionActions update_control_snapshot(const ControlSnapshot&, SessionTime);
     SessionActions cancel(const wire::Cancel&, SessionTime); // Already tuple-validated KCP input.
+    // These reliable-control calls require the caller to have matched the current tuple.
+    // They retain no source outside the one bounded session upload.
+    SessionActions paste_begin(const wire::PasteBegin&, SessionTime);
+    SessionActions paste_chunk(const wire::PasteChunk&, SessionTime);
+    SessionActions paste_commit(const wire::PasteCommit&, SessionTime);
+    SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
+    [[nodiscard]] std::optional<wire::PasteStatus> paste_status() const;
+    // Available after an accepted commit until the relay server submits it to the serial owner.
+    [[nodiscard]] std::optional<std::span<const std::uint8_t>> pending_paste_bytes() const;
+    [[nodiscard]] std::optional<wire::StateAck> pending_paste_fence() const;
     [[nodiscard]] bool matches(const udp::Endpoint&, const wire::Tuple&) const;
     [[nodiscard]] InputGate check_sync(const wire::Sync&, SessionTime) const;
     // Call after synchronous sink admission; rejection must not create an ACK.

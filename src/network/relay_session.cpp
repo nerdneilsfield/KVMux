@@ -1,4 +1,5 @@
 #include "network/relay_session.hpp"
+#include "support/crc32.hpp"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -23,6 +24,20 @@ void send(SessionActions& out,const udp::Endpoint& peer,EnvelopeKind kind,
 bool ready(const ControlSnapshot& s) {
     return s.epoch!=0&&s.state==ControlConnectionState::ready&&s.target_usb_ready&&s.release_confirmed;
 }
+bool valid_paste_text(std::span<const std::uint8_t> text) {
+    if(text.empty()) return false;
+    for(std::size_t i=0;i<text.size();++i) {
+        const auto c=text[i];
+        if(c>=0x80) return false;
+        if(c=='\r') { if(i+1>=text.size()||text[++i]!='\n') return false; continue; }
+        if(!(c=='\t'||c=='\n'||(c>=0x20&&c<=0x7e))) return false;
+    }
+    return true;
+}
+void paste_action(SessionActions& out, const wire::PasteStatus& status) {
+    action(out, SessionAction::Kind::paste_ready);
+    out.items[out.size-1].paste_status=status;
+}
 bool same_sync(const wire::Sync& a,const wire::Sync& b) {
     return a.epoch==b.epoch&&a.intent==b.intent&&a.revision==b.revision&&a.edge_floor==b.edge_floor&&wire::same_state(a.state,b.state);
 }
@@ -39,21 +54,43 @@ struct ServerSession::Impl {
     std::size_t count{}, head{};
     std::uint64_t next_id{}, latest_proof{}, intent{}, canceled{}, revision{}, last_edge{};
     std::optional<SessionTime> execution;
+    struct PasteUpload {
+        wire::PasteBegin begin;
+        std::vector<std::uint8_t> bytes;
+        std::uint32_t next{};
+        SessionTime deadline{};
+        wire::PasteState state{wire::PasteState::uploading};
+        std::optional<wire::StateAck> fence;
+    };
+    std::optional<PasteUpload> paste;
     ControlSnapshot snapshot;
     std::optional<wire::Sync> pending_sync, completed_sync;
     bool barrier{};
     explicit Impl(VideoCodec c):codec(c) {
         if(c!=VideoCodec::mjpeg&&c!=VideoCodec::hevc) throw std::invalid_argument("session codec");
     }
+    wire::PasteStatus status(wire::PasteStatusReason reason=wire::PasteStatusReason::none) const {
+        if(!paste) return {};
+        const auto& p=*paste;
+        return {p.begin.transaction_id,p.state,p.next,static_cast<std::uint32_t>(p.bytes.size()),0,reason};
+    }
+    void clear_paste() { paste.reset(); }
+    void cancel_paste(SessionActions& out, wire::PasteStatusReason reason) {
+        if(!paste) return;
+        auto st=status(reason); st.state=wire::PasteState::canceled;
+        clear_paste(); paste_action(out,st);
+    }
     void revoke(SessionActions& out) {
+        if(paste && paste->state==wire::PasteState::executing) cancel_paste(out,wire::PasteStatusReason::canceled);
         if(execution||barrier||pending_sync) action(out,SessionAction::Kind::revoke_input);
         execution.reset(); barrier=false; pending_sync.reset(); completed_sync.reset();
     }
     void expire(SessionActions& out) {
         revoke(out); phase=SessionPhase::idle; action(out,SessionAction::Kind::expired);
-        tuple={}; count=head=0;
+        clear_paste(); tuple={}; count=head=0;
     }
     void deadlines(SessionActions& out,SessionTime now) {
+        if(paste && paste->state!=wire::PasteState::executing && now>=paste->deadline) { auto st=status(wire::PasteStatusReason::deadline); st.state=wire::PasteState::expired; clear_paste(); paste_action(out,st); }
         if(phase==SessionPhase::pending&&now>=pending_deadline) expire(out);
         else if(phase==SessionPhase::established) {
             if(now>=session_deadline) expire(out);
@@ -88,6 +125,7 @@ struct ServerSession::Impl {
     void cancellation(const wire::Cancel& c,SessionTime now,SessionActions& out) {
         deadlines(out,now);
         if(phase!=SessionPhase::established||!wire::encode_raw(c)) return;
+        cancel_paste(out,wire::PasteStatusReason::canceled);
         if(c.intent>canceled) {
             canceled=c.intent;
             if(c.intent>=intent) revoke(out);
@@ -117,7 +155,7 @@ SessionActions ServerSession::on_datagram(const udp::Endpoint& peer,std::span<co
         s.phase=SessionPhase::pending; s.peer=peer; s.tuple={ids.session,e->tuple.nonce,ids.conversation};
         s.welcome={s.codec,ids.generation}; s.pending_deadline=now+2s;
         s.count=s.head=0; s.next_id=s.latest_proof=s.intent=s.canceled=s.revision=s.last_edge=0;
-        s.execution.reset(); s.barrier=false; s.pending_sync.reset(); s.completed_sync.reset();
+        s.clear_paste(); s.execution.reset(); s.barrier=false; s.pending_sync.reset(); s.completed_sync.reset();
         send(out,peer,EnvelopeKind::welcome,s.tuple,s.welcome); return out;
     }
     if(s.phase==SessionPhase::idle||!(s.peer==peer)||!(s.tuple==e->tuple)) return out;
@@ -160,6 +198,58 @@ SessionActions ServerSession::update_control_snapshot(const ControlSnapshot& sna
 SessionActions ServerSession::cancel(const wire::Cancel& c,SessionTime now) {
     SessionActions out; impl_->cancellation(c,now,out); return out;
 }
+SessionActions ServerSession::paste_begin(const wire::PasteBegin& begin, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(s.phase!=SessionPhase::established || !begin.transaction_id || begin.normalized_bytes==0 || begin.normalized_bytes>65536) return out;
+    if(s.paste) {
+        const auto& p=*s.paste;
+        if(p.begin.transaction_id==begin.transaction_id && p.begin.normalized_bytes==begin.normalized_bytes && p.begin.crc32==begin.crc32) paste_action(out,s.status());
+        else { auto st=s.status(wire::PasteStatusReason::conflict); st.state=wire::PasteState::rejected; paste_action(out,st); }
+        return out;
+    }
+    ServerSession::Impl::PasteUpload p; p.begin=begin; p.bytes.reserve(begin.normalized_bytes); p.deadline=now+30s;
+    s.paste=std::move(p); paste_action(out,s.status()); return out;
+}
+SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(s.phase!=SessionPhase::established || !s.paste || chunk.transaction_id!=s.paste->begin.transaction_id) return out;
+    auto& p=*s.paste;
+    const auto fail=[&](wire::PasteStatusReason reason) { auto st=s.status(reason); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); };
+    if(chunk.payload.empty() || chunk.payload.size()>960) { fail(wire::PasteStatusReason::invalid); return out; }
+    if(chunk.chunk_index<p.next) {
+        const auto off=static_cast<std::size_t>(chunk.chunk_index)*960;
+        if(off+chunk.payload.size()<=p.bytes.size() && std::equal(chunk.payload.begin(),chunk.payload.end(),p.bytes.begin()+static_cast<std::ptrdiff_t>(off))) paste_action(out,s.status());
+        else fail(wire::PasteStatusReason::conflict);
+        return out;
+    }
+    if(chunk.chunk_index!=p.next || p.bytes.size()+chunk.payload.size()>p.begin.normalized_bytes ||
+       (p.bytes.size()+chunk.payload.size()<p.begin.normalized_bytes && chunk.payload.size()!=960)) { fail(wire::PasteStatusReason::invalid); return out; }
+    p.bytes.insert(p.bytes.end(),chunk.payload.begin(),chunk.payload.end()); ++p.next;
+    p.state=p.bytes.size()==p.begin.normalized_bytes ? wire::PasteState::complete : wire::PasteState::uploading;
+    paste_action(out,s.status()); return out;
+}
+SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(s.phase!=SessionPhase::established || !s.paste || commit.transaction_id!=s.paste->begin.transaction_id) return out;
+    auto& p=*s.paste;
+    if(p.bytes.size()!=p.begin.normalized_bytes) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
+    if(support::crc32_ieee(p.bytes)!=p.begin.crc32) { auto st=s.status(wire::PasteStatusReason::checksum); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
+    if(!valid_paste_text(p.bytes)) { auto st=s.status(wire::PasteStatusReason::invalid); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
+    if(!s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof)); return out; }
+    if(!s.barrier || !s.completed_sync || !ready(s.snapshot) || s.completed_sync->epoch!=s.snapshot.epoch || s.completed_sync->intent!=s.intent || s.intent<=s.canceled) { paste_action(out,s.status(wire::PasteStatusReason::fence)); return out; }
+    p.state=wire::PasteState::executing; p.fence=wire::StateAck{s.completed_sync->epoch,s.completed_sync->intent,s.completed_sync->revision,s.completed_sync->edge_floor,s.completed_sync->state};
+    paste_action(out,s.status()); return out;
+}
+SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(s.paste && s.paste->begin.transaction_id==cancel.transaction_id) s.cancel_paste(out,wire::PasteStatusReason::canceled);
+    return out;
+}
+std::optional<wire::PasteStatus> ServerSession::paste_status() const { return impl_->paste ? std::optional{impl_->status()} : std::nullopt; }
+std::optional<std::span<const std::uint8_t>> ServerSession::pending_paste_bytes() const {
+    const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
+}
+std::optional<wire::StateAck> ServerSession::pending_paste_fence() const { return impl_->paste ? impl_->paste->fence : std::nullopt; }
 bool ServerSession::matches(const udp::Endpoint& peer,const wire::Tuple& tuple) const {
     return impl_->phase==SessionPhase::established&&impl_->peer==peer&&impl_->tuple==tuple;
 }
