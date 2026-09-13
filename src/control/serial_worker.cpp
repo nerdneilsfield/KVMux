@@ -45,6 +45,10 @@ struct Ch9329ControlSink::Impl {
         std::size_t written{};
         Clock::time_point started{};
         bool stalled{};
+        std::uint64_t source_sequence{};
+        std::uint64_t epoch{};
+        const char* kind{};
+        bool ordinary{};
     };
 
     explicit Impl(SerialIo value) : io(std::move(value)) {
@@ -76,7 +80,17 @@ struct Ch9329ControlSink::Impl {
     }
 
     void fail(std::string message, bool reconnect) {
-        spdlog::debug("CH9329 failure: reason={} reconnect={}", message, reconnect);
+        if (transaction) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                Clock::now() - transaction->started).count();
+            spdlog::debug("CH9329 transaction failure: kind={} source_sequence={} epoch={} "
+                          "elapsed_ms={} command=0x{:02x} written={} total={} reason={} reconnect={}",
+                          transaction->kind, transaction->source_sequence, transaction->epoch, elapsed,
+                          transaction->frame.command, transaction->written, transaction->bytes.size(),
+                          message, reconnect);
+        } else {
+            spdlog::debug("CH9329 failure: reason={} reconnect={}", message, reconnect);
+        }
         io.close();
         open = false;
         transaction.reset();
@@ -102,14 +116,24 @@ struct Ch9329ControlSink::Impl {
         reconnect_at = Clock::now() + kReconnectInterval;
     }
 
-    void begin(ch9329::Frame frame, Purpose purpose, Clock::time_point now) {
-        Transaction next{std::move(frame), purpose, {}, 0, {}, false};
+    void begin(ch9329::Frame frame, Purpose purpose, Clock::time_point now,
+               std::uint64_t source_sequence = 0, std::uint64_t epoch = 0,
+               bool ordinary = false) {
+        const char* kind = purpose == Purpose::info ? "info" :
+                           purpose == Purpose::config ? "config" :
+                           (purpose == Purpose::sync_keyboard || purpose == Purpose::sync_mouse) ? "sync" :
+                           clear_step != ClearStep::none ? "clear" : "keyboard";
+        Transaction next{std::move(frame), purpose, {}, 0, {}, false, source_sequence, epoch, kind, ordinary};
         next.bytes = ch9329::encode(next.frame);
         next.started = now;
         if (purpose == Purpose::info || purpose == Purpose::config) {
             spdlog::debug("CH9329 {} request: address=0x{:02x} command=0x{:02x}",
                           purpose == Purpose::info ? "GET_INFO" : "GET_CONFIG",
                           next.frame.address, next.frame.command);
+        } else if (ordinary) {
+            // Do not log HID report bytes: they can reveal simulated typed text.
+            spdlog::debug("CH9329 keyboard transaction begin: source_sequence={} epoch={}",
+                          source_sequence, epoch);
         }
         transaction = std::move(next);
     }
@@ -217,6 +241,10 @@ struct Ch9329ControlSink::Impl {
         }
 
         const bool was_stalled = transaction->stalled;
+        if (transaction->ordinary) {
+            spdlog::debug("CH9329 keyboard ACK: source_sequence={} epoch={}",
+                          transaction->source_sequence, transaction->epoch);
+        }
         const auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(now - transaction->started);
         transaction.reset();
         update_snapshot([&](auto& value) {
@@ -448,14 +476,18 @@ struct Ch9329ControlSink::Impl {
             }
             const auto elapsed = now - transaction->started;
             if (elapsed >= kHardTimeout) {
-                spdlog::debug("CH9329 transaction timeout: command=0x{:02x} elapsed_ms={} written={} total={}",
+                spdlog::debug("CH9329 transaction timeout: kind={} source_sequence={} epoch={} "
+                              "command=0x{:02x} elapsed_ms={} written={} total={}",
+                              transaction->kind, transaction->source_sequence, transaction->epoch,
                               transaction->frame.command,
                               std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(),
                               transaction->written, transaction->bytes.size());
                 update_snapshot([](auto& value) { ++value.timeout_count; });
                 fail("CH9329 transaction timed out; release is unconfirmed", true);
             } else if (elapsed >= kStallTimeout && !transaction->stalled) {
-                spdlog::debug("CH9329 transaction stalled: command=0x{:02x} elapsed_ms={} written={} total={}",
+                spdlog::debug("CH9329 transaction stalled: kind={} source_sequence={} epoch={} "
+                              "command=0x{:02x} elapsed_ms={} written={} total={}",
+                              transaction->kind, transaction->source_sequence, transaction->epoch,
                               transaction->frame.command,
                               std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(),
                               transaction->written, transaction->bytes.size());
@@ -494,7 +526,7 @@ struct Ch9329ControlSink::Impl {
                 ordinary_sequence = event->sequence;
                 status.ordinary_input_pending = true;
                 if (auto frame = event_frame(std::move(*event))) {
-                    begin(std::move(frame->first), frame->second, now);
+                    begin(std::move(frame->first), frame->second, now, event->sequence, event->epoch, true);
                 }
                 return;
             }
