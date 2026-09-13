@@ -61,10 +61,10 @@ struct ServerSession::Impl {
         std::uint32_t next{};
         SessionTime deadline{};
         wire::PasteState state{wire::PasteState::uploading};
-        std::optional<wire::StateAck> fence;
         std::optional<SessionTime> lease;
         bool authorizing{};
         std::optional<std::uint64_t> authorization_token;
+        std::uint64_t authorization_request{}, completion_proof{};
     };
     std::optional<PasteUpload> paste;
     ControlSnapshot snapshot;
@@ -94,12 +94,15 @@ struct ServerSession::Impl {
         clear_paste(); tuple={}; count=head=0;
     }
     void deadlines(SessionActions& out,SessionTime now) {
-        if(paste && paste->state!=wire::PasteState::executing && now>=paste->deadline) { auto st=status(wire::PasteStatusReason::deadline); st.state=wire::PasteState::expired; clear_paste(); paste_action(out,st); }
+        if(paste && paste->state==wire::PasteState::uploading && now>=paste->deadline) { auto st=status(wire::PasteStatusReason::deadline); st.state=wire::PasteState::expired; clear_paste(); paste_action(out,st); }
         if(phase==SessionPhase::pending&&now>=pending_deadline) expire(out);
         else if(phase==SessionPhase::established) {
             if(now>=session_deadline) expire(out);
-            else if (paste && paste->state == wire::PasteState::executing && paste->lease && now >= *paste->lease) cancel_paste(out, wire::PasteStatusReason::deadline);
-            else if(execution&&now>=*execution && (!paste || paste->state != wire::PasteState::executing)) revoke(out);
+            else if (paste && (paste->state == wire::PasteState::executing || paste->authorizing) && paste->lease && now >= *paste->lease) {
+                if (paste->state == wire::PasteState::executing) cancel_paste(out, wire::PasteStatusReason::deadline);
+                else { paste->authorizing=false; paste->lease.reset(); paste_action(out,status(wire::PasteStatusReason::serial)); }
+            }
+            else if(execution&&now>=*execution && (!paste || (paste->state != wire::PasteState::executing && !paste->authorizing))) revoke(out);
         }
     }
     std::optional<SessionTime> issued(std::uint64_t id) const {
@@ -111,18 +114,20 @@ struct ServerSession::Impl {
         return phase==SessionPhase::established&&now<session_deadline&&execution&&now<*execution&&
             ready(snapshot)&&epoch==snapshot.epoch&&gen==intent&&gen>canceled&&time&&now>=*time&&now<*time+250ms;
     }
-    void proof(const wire::Proof& p,SessionTime now,bool video_valid,SessionActions& out) {
+    void proof(const wire::Proof& p, SessionTime now, SessionTime received_at, bool video_valid, SessionActions& out) {
         auto time=issued(p.challenge);
-        if(!time||now<*time||now>=*time+10s||p.challenge<=latest_proof) return;
+        // Validate a raw proof at packet receipt.  Its effects start at actual
+        // processing time because video completion can legitimately defer it.
+        if(!time || received_at > now || received_at < *time || received_at >= *time+250ms || p.challenge<=latest_proof) return;
+        const bool deferred = received_at != now;
         latest_proof=p.challenge;
-        session_deadline=std::max(session_deadline,*time+10s);
+        session_deadline=std::max(session_deadline, deferred ? now+10s : *time+10s);
         if(p.intent<=canceled||p.intent<intent) return;
         if(p.intent>intent) {
             revoke(out); intent=p.intent; revision=last_edge=0;
         }
-        if(!p.active||!p.video_fresh||!video_valid) { revoke(out, false); return; }
-        if(!ready(snapshot)||now>=*time+250ms) return;
-        auto deadline=*time+250ms;
+        if(!p.active||!p.video_fresh||!video_valid||!ready(snapshot)) { revoke(out, false); return; }
+        auto deadline=deferred ? now+250ms : *time+250ms;
         if(!execution||deadline>*execution) {
             execution=deadline; action(out,SessionAction::Kind::lease_changed);
         }
@@ -143,7 +148,8 @@ struct ServerSession::Impl {
 ServerSession::ServerSession(VideoCodec c):impl_(std::make_unique<Impl>(c)) {}
 ServerSession::~ServerSession()=default;
 SessionActions ServerSession::on_datagram(const udp::Endpoint& peer,std::span<const std::uint8_t> bytes,
-                                         SessionTime now,SessionIds ids,bool video_valid) {
+                                         SessionTime now,SessionIds ids,bool video_valid,
+                                         std::optional<SessionTime> proof_received_at) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     auto e=wire::decode_envelope(bytes); if(!e) return out;
     if(e->kind==EnvelopeKind::hello) {
@@ -173,7 +179,7 @@ SessionActions ServerSession::on_datagram(const udp::Endpoint& peer,std::span<co
         send(out,peer,EnvelopeKind::ready,s.tuple,s.welcome); return out;
     }
     if(s.phase!=SessionPhase::established) return out;
-    if(e->kind==EnvelopeKind::proof) s.proof(std::get<wire::Proof>(*wire::decode_raw(e->kind,e->body)),now,video_valid,out);
+    if(e->kind==EnvelopeKind::proof) s.proof(std::get<wire::Proof>(*wire::decode_raw(e->kind,e->body)),now,proof_received_at.value_or(now),video_valid,out);
     else if(e->kind==EnvelopeKind::cancel) s.cancellation(std::get<wire::Cancel>(*wire::decode_raw(e->kind,e->body)),now,out);
     return out;
 }
@@ -232,6 +238,7 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk, Session
     p.bytes.insert(p.bytes.end(),chunk.payload.begin(),chunk.payload.end());
     p.accepted_bytes=static_cast<std::uint32_t>(p.bytes.size()); ++p.next;
     p.state=p.bytes.size()==p.begin.normalized_bytes ? wire::PasteState::complete : wire::PasteState::uploading;
+    if (p.state == wire::PasteState::complete) p.completion_proof=s.latest_proof;
     paste_action(out,s.status()); return out;
 }
 SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, SessionTime now) {
@@ -239,12 +246,10 @@ SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, Sess
     if(s.phase!=SessionPhase::established || !s.paste || commit.transaction_id!=s.paste->begin.transaction_id) return out;
     auto& p=*s.paste;
     if (p.state == wire::PasteState::executing) { paste_action(out, s.status()); return out; }
-    if(p.bytes.size()!=p.begin.normalized_bytes) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
-    if(support::crc32_ieee(p.bytes)!=p.begin.crc32) { auto st=s.status(wire::PasteStatusReason::checksum); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
-    if(!valid_paste_text(p.bytes)) { auto st=s.status(wire::PasteStatusReason::invalid); st.state=wire::PasteState::rejected; s.clear_paste(); paste_action(out,st); return out; }
-    if(!s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof)); return out; }
-    if(!s.barrier || !s.completed_sync || !ready(s.snapshot) || s.completed_sync->epoch!=s.snapshot.epoch || s.completed_sync->intent!=s.intent || s.intent<=s.canceled) { paste_action(out,s.status(wire::PasteStatusReason::fence)); return out; }
-    p.state=wire::PasteState::executing; p.lease=now+500ms; p.fence=wire::StateAck{s.completed_sync->epoch,s.completed_sync->intent,s.completed_sync->revision,s.completed_sync->edge_floor,s.completed_sync->state};
+    if (!p.authorization_token || commit.authorization_token != *p.authorization_token) {
+        paste_action(out, s.status(wire::PasteStatusReason::authorization)); return out;
+    }
+    p.state=wire::PasteState::executing; p.lease=now+500ms;
     paste_action(out,s.status()); return out;
 }
 
@@ -252,11 +257,24 @@ SessionActions ServerSession::paste_authorize(const wire::PasteAuthorize& reques
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(s.phase!=SessionPhase::established || !s.paste || request.transaction_id!=s.paste->begin.transaction_id) return out;
     auto& p=*s.paste;
-    if(p.authorization_token) { paste_action(out,s.status()); return out; }
-    if(p.authorizing) { paste_action(out,s.status(wire::PasteStatusReason::authorization)); return out; }
+    if (p.authorization_token) {
+        // KCP may replay the request after the token response was lost. Repeat
+        // the same token instead of starting another authorization fence.
+        action(out, SessionAction::Kind::paste_authorized);
+        out.items[out.size - 1].paste_authorized = wire::PasteAuthorized{p.begin.transaction_id, p.authorization_request, *p.authorization_token};
+        return out;
+    }
+    // The server already owns one fence for this transaction. Duplicates are
+    // idempotent and deliberately silent while that fence is pending.
+    if (p.authorizing) return out;
     if(p.state!=wire::PasteState::complete || p.bytes.size()!=p.begin.normalized_bytes || support::crc32_ieee(p.bytes)!=p.begin.crc32 || !valid_paste_text(p.bytes)) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
-    if(!s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof_required)); return out; }
-    p.authorizing=true; paste_action(out,s.status(wire::PasteStatusReason::authorization)); return out;
+    // A current raw proof must arrive before this request. A challenge receipt alone is not proof.
+    if(!request.challenge || request.challenge != s.latest_proof || request.challenge <= p.completion_proof || !s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof_required)); return out; }
+    p.authorization_request=request.request_id; p.authorizing=true;
+    // The fence has its own short serial lease. It must not be canceled by the
+    // presentation-proof lease while the two synchronization reports finish.
+    p.lease=now+500ms;
+    paste_action(out,s.status(wire::PasteStatusReason::authorization)); return out;
 }
 std::optional<ServerSession::PasteAuthorization> ServerSession::pending_paste_authorization() const {
     const auto& s=*impl_; if(!s.paste || !s.paste->authorizing || s.paste->authorization_token || !ready(s.snapshot)) return {};
@@ -265,13 +283,13 @@ std::optional<ServerSession::PasteAuthorization> ServerSession::pending_paste_au
 SessionActions ServerSession::paste_authorized(std::uint64_t token, SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(!token || !s.paste || !s.paste->authorizing || s.paste->authorization_token) return out;
-    s.paste->authorizing=false; s.paste->authorization_token=token;
-    action(out,SessionAction::Kind::paste_authorized); out.items[out.size-1].paste_authorized=wire::PasteAuthorized{s.paste->begin.transaction_id,token}; return out;
+    s.paste->authorizing=false; s.paste->lease.reset(); s.paste->authorization_token=token;
+    action(out,SessionAction::Kind::paste_authorized); out.items[out.size-1].paste_authorized=wire::PasteAuthorized{s.paste->begin.transaction_id,s.paste->authorization_request,token}; return out;
 }
 SessionActions ServerSession::paste_authorization_failed(SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(!s.paste || !s.paste->authorizing) return out;
-    s.paste->authorizing=false; paste_action(out,s.status(wire::PasteStatusReason::serial)); return out;
+    s.paste->authorizing=false; s.paste->lease.reset(); paste_action(out,s.status(wire::PasteStatusReason::serial)); return out;
 }
 SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
@@ -279,11 +297,16 @@ SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, Sess
     return out;
 }
 SessionActions ServerSession::paste_keepalive(const wire::PasteKeepalive& keepalive, SessionTime now) {
-    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    // The relay drains reliable controls before its deadline pass. This lets a
+    // keepalive received in that pass renew an executing transaction at `now`.
+    auto& s=*impl_; SessionActions out;
     if (s.phase != SessionPhase::established || !s.paste || s.paste->state != wire::PasteState::executing ||
         s.paste->begin.transaction_id != keepalive.transaction_id || !s.paste->lease) return out;
     // This lease follows the reliable control connection, not transient video presentation.
     s.paste->lease = now + 500ms;
+    // Acknowledging receipt lets the client replace its one coalesced keepalive.
+    // RelayServer coalesces this status to 50 ms, so progress traffic stays bounded.
+    paste_action(out, s.status());
     return out;
 }
 SessionActions ServerSession::paste_started(SessionTime now) {
@@ -300,7 +323,10 @@ SessionActions ServerSession::paste_start_failed(SessionTime now) {
     s.clear_paste(); paste_action(out,st); return out;
 }
 SessionActions ServerSession::update_ascii_paste(const AsciiPasteSnapshot& snapshot, SessionTime now) {
-    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    // The relay samples terminal serial state before its deadline pass, so a
+    // completed job observed at `now` cannot be canceled by that same pass.
+    (void)now;
+    auto& s=*impl_; SessionActions out;
     if (!s.paste || s.paste->state != wire::PasteState::executing) return out;
     auto st=s.status(); st.completed_bytes=static_cast<std::uint32_t>(
         st.accepted_bytes * (snapshot.total_gestures ? snapshot.completed_gestures : 0) /
@@ -316,7 +342,6 @@ std::optional<wire::PasteStatus> ServerSession::paste_status() const { return im
 std::optional<std::span<const std::uint8_t>> ServerSession::pending_paste_bytes() const {
     const auto& s=*impl_; if(!s.paste || s.paste->state!=wire::PasteState::executing || s.paste->bytes.empty()) return {}; return std::span<const std::uint8_t>(s.paste->bytes);
 }
-std::optional<wire::StateAck> ServerSession::pending_paste_fence() const { return impl_->paste ? impl_->paste->fence : std::nullopt; }
 bool ServerSession::matches(const udp::Endpoint& peer,const wire::Tuple& tuple) const {
     return impl_->phase==SessionPhase::established&&impl_->peer==peer&&impl_->tuple==tuple;
 }
@@ -355,7 +380,7 @@ std::uint64_t ServerSession::canceled_through() const { return impl_->canceled; 
 std::optional<SessionTime> ServerSession::execution_deadline() const { return impl_->execution; }
 std::optional<SessionTime> ServerSession::control_deadline() const {
     const auto& s=*impl_;
-    if (s.paste && s.paste->state == wire::PasteState::executing) return s.paste->lease;
+    if (s.paste && (s.paste->state == wire::PasteState::executing || s.paste->authorizing)) return s.paste->lease;
     return s.execution;
 }
 std::size_t ServerSession::challenge_count() const { return impl_->count; }

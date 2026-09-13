@@ -174,9 +174,9 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,Directi
         else if constexpr(std::is_same_v<T,RefreshRequest>) { type=6; w.ok &= b.generation!=0; w.integer(b.generation,8); w.mapped(index(reasons,b.reason)); w.zeros(7); }
         else if constexpr(std::is_same_v<T,PasteBegin>) { type=8; w.ok &= b.transaction_id && b.normalized_bytes>=1 && b.normalized_bytes<=65536; w.integer(b.transaction_id,8); w.integer(b.normalized_bytes,4); w.integer(b.crc32,4); }
         else if constexpr(std::is_same_v<T,PasteChunk>) { type=9; w.ok &= b.transaction_id && !b.payload.empty() && b.payload.size()<=960; w.integer(b.transaction_id,8); w.integer(b.chunk_index,4); w.integer(b.payload.size(),2); w.zeros(2); w.bytes.insert(w.bytes.end(),b.payload.begin(),b.payload.end()); }
-        else if constexpr(std::is_same_v<T,PasteCommit>) { type=10; w.ok &= b.transaction_id; w.integer(b.transaction_id,8); }
-        else if constexpr(std::is_same_v<T,PasteAuthorize>) { type=16; w.ok &= b.transaction_id; w.integer(b.transaction_id,8); }
-        else if constexpr(std::is_same_v<T,PasteAuthorized>) { type=17; w.ok &= b.transaction_id && b.token; w.integer(b.transaction_id,8); w.integer(b.token,8); }
+        else if constexpr(std::is_same_v<T,PasteCommit>) { type=10; w.ok &= b.transaction_id && b.authorization_token; w.integer(b.transaction_id,8); w.integer(b.authorization_token,8); }
+        else if constexpr(std::is_same_v<T,PasteAuthorize>) { type=16; w.ok &= b.transaction_id && b.challenge && b.request_id; w.integer(b.transaction_id,8); w.integer(b.challenge,8); w.integer(b.request_id,8); }
+        else if constexpr(std::is_same_v<T,PasteAuthorized>) { type=17; w.ok &= b.transaction_id && b.request_id && b.token; w.integer(b.transaction_id,8); w.integer(b.request_id,8); w.integer(b.token,8); }
         else if constexpr(std::is_same_v<T,PasteCancel>) { type=11; auto reason=static_cast<unsigned>(b.reason); w.ok &= b.transaction_id && reason>=1 && reason<=5; w.integer(b.transaction_id,8); w.integer(reason,1); w.zeros(7); }
         else if constexpr(std::is_same_v<T,PasteKeepalive>) { type=13; w.ok &= b.transaction_id; w.integer(b.transaction_id,8); }
         else if constexpr(std::is_same_v<T,PasteStatus>) { type=12; auto state=static_cast<unsigned>(b.state), reason=static_cast<unsigned>(b.reason); w.ok &= b.transaction_id && state>=1 && state<=7 && reason<=12; w.integer(b.transaction_id,8); w.integer(state,1); w.zeros(3); w.integer(b.next_chunk,4); w.integer(b.accepted_bytes,4); w.integer(b.completed_bytes,4); w.integer(reason,1); w.zeros(3); }
@@ -204,12 +204,12 @@ std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,Direct
     case 7: { MediaFeedback b; b.generation=r.integer(8); auto& s=b.stats; s.received_frames=r.integer(8); s.recovered_fragments=r.integer(8); s.recovered_frames=r.integer(8); s.lost_frames=r.integer(8); s.last_completed=r.integer(8); s.age_losses=r.integer(8); s.capacity_losses=r.integer(8); s.gap_losses=r.integer(8); s.unrecoverable=r.integer(8); s.waiting_idr=r.boolean(); r.zeros(7); r.ok &= b.generation!=0; c=b; break; }
     case 8: { PasteBegin b{r.integer(8), static_cast<std::uint32_t>(r.integer(4)), static_cast<std::uint32_t>(r.integer(4))}; r.ok &= b.transaction_id && b.normalized_bytes>=1 && b.normalized_bytes<=65536; c=b; break; }
     case 9: { PasteChunk b; b.transaction_id=r.integer(8); b.chunk_index=static_cast<std::uint32_t>(r.integer(4)); auto n=r.u16(); r.zeros(2); r.ok &= b.transaction_id && n>=1 && n<=960 && n<=r.bytes.size()-r.pos; if(r.ok) b.payload.assign(r.bytes.begin()+static_cast<std::ptrdiff_t>(r.pos),r.bytes.begin()+static_cast<std::ptrdiff_t>(r.pos+n)), r.pos+=n; c=std::move(b); break; }
-    case 10: { PasteCommit b{r.integer(8)}; r.ok &= b.transaction_id; c=b; break; }
-    case 16: { PasteAuthorize b{r.integer(8)}; r.ok &= b.transaction_id; c=b; break; }
-    case 17: { PasteAuthorized b{r.integer(8),r.integer(8)}; r.ok &= b.transaction_id&&b.token; c=b; break; }
+    case 10: { PasteCommit b{r.integer(8),r.integer(8)}; r.ok &= b.transaction_id&&b.authorization_token; c=b; break; }
+    case 16: { PasteAuthorize b{r.integer(8),r.integer(8),r.integer(8)}; r.ok &= b.transaction_id&&b.challenge&&b.request_id; c=b; break; }
+    case 17: { PasteAuthorized b{r.integer(8),r.integer(8),r.integer(8)}; r.ok &= b.transaction_id&&b.request_id&&b.token; c=b; break; }
     case 11: { PasteCancel b; b.transaction_id=r.integer(8); auto reason=r.u8(); r.zeros(7); r.ok &= b.transaction_id && reason>=1 && reason<=5; if(reason>=1&&reason<=5) b.reason=static_cast<PasteCancelReason>(reason); c=b; break; }
     case 13: { PasteKeepalive b{r.integer(8)}; r.ok &= b.transaction_id; c=b; break; }
-    case 12: { PasteStatus b; b.transaction_id=r.integer(8); auto state=r.u8(); r.zeros(3); b.next_chunk=static_cast<std::uint32_t>(r.integer(4)); b.accepted_bytes=static_cast<std::uint32_t>(r.integer(4)); b.completed_bytes=static_cast<std::uint32_t>(r.integer(4)); auto reason=r.u8(); r.zeros(3); r.ok &= b.transaction_id && state>=1 && state<=7 && reason<=12; if(state>=1&&state<=7) b.state=static_cast<PasteState>(state); if(reason<=10) b.reason=static_cast<PasteStatusReason>(reason); c=b; break; }
+    case 12: { PasteStatus b; b.transaction_id=r.integer(8); auto state=r.u8(); r.zeros(3); b.next_chunk=static_cast<std::uint32_t>(r.integer(4)); b.accepted_bytes=static_cast<std::uint32_t>(r.integer(4)); b.completed_bytes=static_cast<std::uint32_t>(r.integer(4)); auto reason=r.u8(); r.zeros(3); r.ok &= b.transaction_id && state>=1 && state<=7 && reason<=12; if(state>=1&&state<=7) b.state=static_cast<PasteState>(state); if(reason<=12) b.reason=static_cast<PasteStatusReason>(reason); c=b; break; }
     }
     if(!r.done()) return {}; return c;
 }

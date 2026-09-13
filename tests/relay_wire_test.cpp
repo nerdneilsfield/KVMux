@@ -77,7 +77,9 @@ void paste_control_contract() {
     using D=w::Direction; auto c=D::client_to_server, s=D::server_to_client;
     control(w::PasteBegin{0x0102030405060708,65536,0x10203040},c,8,16);
     control(w::PasteChunk{1,2,{0xaa,0xbb}},c,9,18);
-    control(w::PasteCommit{1},c,10,8);
+    control(w::PasteCommit{1,2},c,10,16);
+    control(w::PasteAuthorize{1,2,3},c,16,24);
+    control(w::PasteAuthorized{1,2,3},s,17,24);
     control(w::PasteCancel{1,w::PasteCancelReason::disconnect},c,11,16);
     control(w::PasteStatus{1,w::PasteState::executing,2,960,10,w::PasteStatusReason::proof},s,12,28);
     control(w::PasteKeepalive{1},c,13,8);
@@ -88,7 +90,7 @@ void paste_control_contract() {
     Bytes max(960,0x5a); auto chunk=w::encode_control(w::PasteChunk{1,0,max},c); check(chunk&&chunk->size()==980);
     check(!w::encode_control(w::PasteBegin{0,1,0},c)); check(!w::encode_control(w::PasteBegin{1,0,0},c)); check(!w::encode_control(w::PasteBegin{1,65537,0},c));
     check(!w::encode_control(w::PasteChunk{1,0,{}},c)); check(!w::encode_control(w::PasteChunk{1,0,Bytes(961)},c));
-    check(!w::encode_control(w::PasteCommit{0},c)); check(!w::encode_control(w::PasteCancel{0,w::PasteCancelReason::user},c));
+    check(!w::encode_control(w::PasteCommit{0,1},c)); check(!w::encode_control(w::PasteCommit{1,0},c)); check(!w::encode_control(w::PasteCancel{0,w::PasteCancelReason::user},c));
     auto bad=*chunk; bad[18]=1; check(!w::decode_control(bad,c)); // chunk reserved
     bad=*chunk; bad[2]=3; bad[3]=0xbf; check(!w::decode_control(bad,c)); // payload size mismatch
     bad=*w::encode_control(w::PasteStatus{1,w::PasteState::uploading,0,0,0,w::PasteStatusReason::none},s); bad[13]=1; check(!w::decode_control(bad,s));

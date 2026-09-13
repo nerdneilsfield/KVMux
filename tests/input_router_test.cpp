@@ -446,6 +446,33 @@ int main() {
     }
 
     {
+        // The remote transport maps each upload/authorization/commit phase to
+        // active. The router must retain its temporary intent for every such
+        // nonterminal snapshot, and only release it at a terminal snapshot.
+        FakeSink sink;
+        sink.snapshot_value.recoverable_transport = true;
+        InputRouter router(sink);
+        router.set_video_fresh(true);
+        const auto start = InputRouter::Clock::now();
+        require(static_cast<bool>(router.start_text("A", start)), "remote transaction starts");
+        const auto& sync = sink.syncs.back();
+        sink.snapshot_value.applied = {true, sync.epoch, sync.intent_generation,
+                                      sync.revision, sync.state};
+        router.tick(start + std::chrono::milliseconds(1));
+        require(sink.paste_text_starts == 1, "remote transaction passed its barrier");
+        for ([[maybe_unused]] const auto phase : {"uploading", "complete", "authorizing", "authorized", "commit pending", "executing"}) {
+            sink.paste_value = {AsciiPasteState::active, 1, 0};
+            router.tick(start + std::chrono::milliseconds(2));
+            require(router.text_active() && router.injected_active(),
+                    "every nonterminal remote paste phase retains the input lease");
+        }
+        sink.paste_value = {AsciiPasteState::completed, 1, 1};
+        router.tick(start + std::chrono::milliseconds(3));
+        require(!router.text_active() && !router.injected_active(),
+                "only a terminal remote paste state releases the input lease");
+    }
+
+    {
         const std::string text(65536, 'a');
         const auto mapped = map_us_ascii_text(text);
         require(mapped && mapped.gestures.size() == text.size(), "mapper accepts the relay transaction limit");

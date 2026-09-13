@@ -190,9 +190,10 @@ struct RelayServer::Impl {
         struct Sent { std::uint64_t sequence{}; Clock::time_point arrival{}, completed{}; };
         std::deque<Sent> history;
         std::optional<Sent> sending;
-        std::optional<udp::Datagram> pending_proof;
-        Clock::time_point pending_proof_at{};
+        struct PendingProof { udp::Datagram packet; Clock::time_point received_at; };
+        std::optional<PendingProof> pending_proof;
         auto status_at = Clock::time_point{};
+        auto paste_status_at = Clock::time_point{};
         bool fatal{};
         auto request_refresh = [&] { std::lock_guard lock(media_mutex); keyframe = true; media_wake.notify_one(); };
         auto revoke = [&] { sink.cancel_ascii_paste(); sink.set_control_active(false); sink.release_all(); ack.reset(); };
@@ -212,7 +213,7 @@ struct RelayServer::Impl {
                         snapshot.transport_bytes_per_second = options.transport_bytes_per_second;
                         admission.emplace(snapshot.generation, nominal);
                     }
-                    history.clear(); sending.reset(); pending.reset(); pending_proof.reset(); ack.reset(); status_at = {};
+                    history.clear(); sending.reset(); pending.reset(); pending_proof.reset(); ack.reset(); status_at = {}; paste_status_at = {};
                     control_output.clear(); control_index = 0;
                     revoke();
                     { std::lock_guard lock(media_mutex); media_generation = session.welcome().generation; offer.reset(); credit = true; keyframe = true; }
@@ -246,8 +247,6 @@ struct RelayServer::Impl {
         };
         while (!stopping && !fatal) {
             auto now = Clock::now();
-            actions(session.tick(now));
-            actions(session.update_control_snapshot(sink.snapshot(), now));
             std::vector<udp::Datagram> received;
             received.reserve(32);
             for (unsigned i = 0; i < 32; ++i) {
@@ -278,11 +277,11 @@ struct RelayServer::Impl {
                         // frame; ServerSession still checks original issue time.
                         bool newer = true;
                         if (pending_proof) {
-                            const auto previous = wire::decode_envelope(pending_proof->bytes);
+                            const auto previous = wire::decode_envelope(pending_proof->packet.bytes);
                             const auto value = std::get<wire::Proof>(*wire::decode_raw(previous->kind, previous->body));
                             newer = proof.challenge > value.challenge;
                         }
-                        if (newer) { pending_proof = packet; pending_proof_at = now; }
+                        if (newer) pending_proof = PendingProof{packet, now};
                         continue;
                     }
                     valid_video = std::any_of(history.begin(), history.end(), [&](const Sent& frame) {
@@ -298,20 +297,23 @@ struct RelayServer::Impl {
                 if (session.matches(packet.source, envelope->tuple)) peer = packet.source;
             }
             now = Clock::now();
-            if (pending_proof && now - pending_proof_at >= 250ms) pending_proof.reset();
             if (pending_proof) {
-                const auto envelope = wire::decode_envelope(pending_proof->bytes);
+                const auto envelope = wire::decode_envelope(pending_proof->packet.bytes);
                 const auto proof = std::get<wire::Proof>(*wire::decode_raw(envelope->kind, envelope->body));
                 const bool complete = std::any_of(history.begin(), history.end(), [&](const Sent& frame) {
                     return frame.sequence == proof.presented_sequence && now - frame.arrival < 500ms;
                 });
-                if (complete || !sending || sending->sequence != proof.presented_sequence) {
-                    auto packet = std::move(*pending_proof); pending_proof.reset();
-                    actions(session.on_datagram(packet.source, packet.bytes, now, {}, complete));
+                if (complete) {
+                    auto pending = std::move(*pending_proof); pending_proof.reset();
+                    // The proof was on time when received. Only a completed frame
+                    // may authorize it; session leases start at this real instant.
+                    actions(session.on_datagram(pending.packet.source, pending.packet.bytes, now, {}, true, pending.received_at));
+                } else if (!sending || sending->sequence != proof.presented_sequence) {
+                    // Never turn an unsent frame into an invalid proof that can
+                    // affect the current control lease.
+                    pending_proof.reset();
                 }
             }
-            actions(session.tick(now));
-            actions(session.update_control_snapshot(sink.snapshot(), now));
             if (authorization_fence) {
                 const auto snapshot = sink.snapshot(); const auto& fence = *authorization_fence; const auto& applied = snapshot.applied;
                 if (snapshot.epoch != fence.epoch || snapshot.state != ControlConnectionState::ready || !snapshot.target_usb_ready || !snapshot.release_confirmed) {
@@ -330,7 +332,6 @@ struct RelayServer::Impl {
                 auto message = wire::decode_control(*bytes, wire::Direction::client_to_server);
                 if (!message) continue;
                 now = Clock::now();
-                actions(session.tick(now));
                 if (!kcp) break;
                 if (auto value = std::get_if<wire::Cancel>(&*message)) actions(session.cancel(*value, now));
                 else if (auto value = std::get_if<wire::Sync>(&*message)) {
@@ -364,6 +365,11 @@ struct RelayServer::Impl {
                 } else if (auto value = std::get_if<wire::PasteAuthorize>(&*message)) {
                     actions(session.paste_authorize(*value, now));
                     if (!authorization_fence) if (auto request = session.pending_paste_authorization()) {
+                        // paste_authorize just installed the fence lease, but this KCP
+                        // pass is after the ordinary heartbeat update. Refresh it before
+                        // submitting so the serial sink can accept this synchronization.
+                        sink.set_control_active(true);
+                        sink.update_ui_heartbeat();
                         // High-bit revisions are relay-private and never enter ServerSession's GUI revision namespace.
                         const auto revision = (std::uint64_t{1} << 63) | next_authorization_revision++;
                         if (sink.synchronize({request->epoch, request->intent, revision, request->state}) == kvmux::SubmitResult::accepted)
@@ -385,9 +391,13 @@ struct RelayServer::Impl {
             }
             if (!kcp) continue;
             now = Clock::now();
-            // Serial progress advances only after each HID report ACK. Poll it at
-            // the same bounded cadence as the normal control status.
-            if (now - status_at >= 50ms) actions(session.update_ascii_paste(sink.ascii_paste_snapshot(), now));
+            // KCP controls and terminal serial state take precedence over expiry
+            // at this instant. Status transmission may remain coalesced, but the
+            // snapshot must be applied every loop before the deadline pass.
+            actions(session.update_ascii_paste(sink.ascii_paste_snapshot(), now));
+            actions(session.tick(now));
+            actions(session.update_control_snapshot(sink.snapshot(), now));
+            // Serial progress status is coalesced after its state was sampled.
             if (now - status_at >= 50ms) {
                 const auto value = sink.snapshot();
                 status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through(), value.ordinary_input_pending, value.completed_ordinary_sequence};
@@ -398,19 +408,33 @@ struct RelayServer::Impl {
                 return bytes && kcp->submit(*bytes) == SubmitResult::accepted;
             };
             if (ack && submit(*ack)) ack.reset();
-            if (paste_status && submit(*paste_status)) paste_status.reset();
+            // Progress snapshots are lossy by design. Keep the latest one, but
+            // publish at most once per 50 ms so they cannot starve keepalives.
+            if (paste_status && now - paste_status_at >= 50ms && submit(*paste_status)) {
+                paste_status.reset();
+                paste_status_at = now;
+            }
             if (paste_authorized && submit(*paste_authorized)) paste_authorized.reset();
             if (status && submit(*status)) status.reset();
+            // Retain a bounded KCP batch across UDP would-block. Updating before
+            // it drains makes KCP append to its bounded callback queue and fails
+            // a healthy connection under temporary socket backpressure.
+            auto drain_control = [&] {
+                for (unsigned i = 0; i < 32 && control_index < control_output.size(); ++i) {
+                    auto bytes = wire::encode_envelope({wire::EnvelopeKind::kcp, session.tuple(), control_output[control_index]});
+                    if (!bytes) { fatal = true; return false; }
+                    auto result = control_socket->send_to(peer, *bytes);
+                    if (result == udp::SendStatus::would_block) return false;
+                    if (result != udp::SendStatus::sent) { fatal = true; return false; }
+                    ++control_index;
+                }
+                return control_index == control_output.size();
+            };
+            if (!drain_control()) continue;
             kcp->update(milliseconds(now));
             if (kcp->failed()) { fatal = true; continue; }
-            if (control_index == control_output.size()) { control_output = kcp->take_datagrams(); control_index = 0; }
-            for (unsigned i = 0; i < 32 && control_index < control_output.size(); ++i) {
-                auto bytes = wire::encode_envelope({wire::EnvelopeKind::kcp, session.tuple(), control_output[control_index]});
-                auto result = control_socket->send_to(peer, *bytes);
-                if (result == udp::SendStatus::would_block) break;
-                if (result != udp::SendStatus::sent) { fatal = true; break; }
-                ++control_index;
-            }
+            control_output = kcp->take_datagrams(); control_index = 0;
+            (void)drain_control();
             if (!pacer) continue;
             now = Clock::now();
             admission->poll(now);

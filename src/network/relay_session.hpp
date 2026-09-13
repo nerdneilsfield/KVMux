@@ -36,8 +36,12 @@ public:
     // Caller supplies newly random nonzero IDs when accepting a free hello.
     // video_valid defaults false: caller must validate actual current-generation
     // presentation against bounded sender history, not trust the sequence alone.
+    // `now` is processing time.  A relay may defer a raw proof until its video
+    // frame is fully sent; in that case it supplies the packet receipt time so
+    // challenge freshness is checked at receipt without backdating leases.
     SessionActions on_datagram(const udp::Endpoint&, std::span<const std::uint8_t>,
-                               SessionTime, SessionIds = {}, bool video_valid = false);
+                               SessionTime now, SessionIds = {}, bool video_valid = false,
+                               std::optional<SessionTime> proof_received_at = {});
     SessionActions tick(SessionTime);
     SessionActions update_control_snapshot(const ControlSnapshot&, SessionTime);
     SessionActions cancel(const wire::Cancel&, SessionTime); // Already tuple-validated KCP input.
@@ -53,15 +57,17 @@ public:
     SessionActions paste_authorized(std::uint64_t token, SessionTime);
     SessionActions paste_authorization_failed(SessionTime);
     SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
+    // Call for an already decoded KCP control before tick(now), so a keepalive
+    // received at its deadline renews the executing transaction.
     SessionActions paste_keepalive(const wire::PasteKeepalive&, SessionTime);
     // Transfers the validated upload to the serial owner, then reports ACK-derived progress.
+    // Call before tick(now), so a terminal serial observation wins at that instant.
     SessionActions paste_started(SessionTime);
     SessionActions paste_start_failed(SessionTime);
     SessionActions update_ascii_paste(const AsciiPasteSnapshot&, SessionTime);
     [[nodiscard]] std::optional<wire::PasteStatus> paste_status() const;
     // Available after an accepted commit until the relay server submits it to the serial owner.
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> pending_paste_bytes() const;
-    [[nodiscard]] std::optional<wire::StateAck> pending_paste_fence() const;
     [[nodiscard]] bool matches(const udp::Endpoint&, const wire::Tuple&) const;
     [[nodiscard]] InputGate check_sync(const wire::Sync&, SessionTime) const;
     // Call after synchronous sink admission; rejection must not create an ACK.

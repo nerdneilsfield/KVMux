@@ -103,6 +103,20 @@ void server_issue_time_not_receipt_lease() {
     check(f.s.on_datagram(f.client,proof,at(301),{},true).size==0);
     check(f.s.execution_deadline()==at(550));
 }
+void deferred_proof_uses_receipt_time_without_backdating_lease() {
+    Fixture f; f.establish();
+    auto challenge=packet(f.s.tick(at(0)),w::EnvelopeKind::challenge);
+    auto proof=packet(f.c.on_datagram(f.server,challenge,at(249)),w::EnvelopeKind::proof);
+    // Frame transmission completes later.  The on-time receipt is valid, but
+    // the lease must begin now rather than revive an already elapsed deadline.
+    check(count(f.s.on_datagram(f.client,proof,at(400),{},true,at(249)),Kind::lease_changed)==1);
+    check(f.s.execution_deadline()==at(650));
+    Fixture late; late.establish();
+    auto late_challenge=packet(late.s.tick(at(0)),w::EnvelopeKind::challenge);
+    auto late_proof=packet(late.c.on_datagram(late.server,late_challenge,at(250)),w::EnvelopeKind::proof);
+    check(count(late.s.on_datagram(late.client,late_proof,at(400),{},true,at(250)),Kind::lease_changed)==0);
+    check(!late.s.execution_deadline());
+}
 void session_10s_input_250ms_separation() {
     for(int blackout:{100,300,800,2000}) {
         Fixture f; f.establish(); f.proof(0,0); f.barrier(); auto tuple=f.s.tuple();
@@ -208,10 +222,18 @@ void paste_upload_contract() {
     check(f.s.paste_begin({10,4,crc},at(1)).items[0].paste_status->reason==w::PasteStatusReason::conflict);
     check(f.s.paste_chunk({9,0,text},at(2)).items[0].paste_status->state==w::PasteState::complete);
     check(f.s.paste_chunk({9,0,text},at(3)).items[0].paste_status->accepted_bytes==4);
-    check(f.s.paste_commit({9},at(4)).items[0].paste_status->reason==w::PasteStatusReason::proof);
+    check(f.s.paste_commit({9,1},at(4)).items[0].paste_status->reason==w::PasteStatusReason::authorization);
+    check(f.s.paste_authorize({9,1,1},at(5)).items[0].paste_status->reason==w::PasteStatusReason::proof_required);
     f.proof(50,50); f.barrier(50);
-    auto done=f.s.paste_commit({9},at(51)); check(done.items[0].paste_status->state==w::PasteState::executing);
-    check(f.s.pending_paste_bytes()->size()==4 && f.s.pending_paste_fence()->intent==1);
+    check(f.s.paste_authorize({9,1,2},at(51)).items[0].paste_status->reason==w::PasteStatusReason::authorization);
+    // Duplicate reliable authorizations stay silent while the one server fence is pending.
+    check(f.s.paste_authorize({9,1,2},at(52)).size==0);
+    f.s.paste_authorized(7,at(102));
+    // A replay after token delivery receives the original token, never a new fence/token.
+    auto replay=f.s.paste_authorize({9,1,2},at(102));
+    check(replay.size==1 && replay.items[0].paste_authorized && replay.items[0].paste_authorized->token==7 && replay.items[0].paste_authorized->request_id==2);
+    auto done=f.s.paste_commit({9,7},at(103)); check(done.items[0].paste_status->state==w::PasteState::executing);
+    check(f.s.pending_paste_bytes()->size()==4);
     check(f.s.check_edge({1,1,1,1,1,KeyEdge{4,true}},at(51))==InputGate::rejected);
     f.s.paste_started(at(51)); check(!f.s.pending_paste_bytes());
     auto progress=f.s.update_ascii_paste({AsciiPasteState::active,2,1},at(52));
@@ -221,8 +243,16 @@ void paste_upload_contract() {
     Fixture bad; bad.establish();
     auto b=bad.s.paste_begin({3,2,0},at(0)); check(b.size==1);
     auto rejected=bad.s.paste_chunk({3,0,{'x','\r'}},at(1)); check(rejected.items[0].paste_status->state==w::PasteState::complete);
-    auto r=bad.s.paste_commit({3},at(2)); check(r.items[0].paste_status->state==w::PasteState::rejected);
+    auto r=bad.s.paste_authorize({3,1,1},at(2)); check(r.items[0].paste_status->state==w::PasteState::complete && r.items[0].paste_status->reason==w::PasteStatusReason::invalid);
     Fixture expiry; expiry.establish(); expiry.s.paste_begin({4,1,0},at(0)); auto x=expiry.s.tick(at(30000)); check(x.items[0].paste_status->state==w::PasteState::expired);
+    // Once all bytes are complete, the 30-second upload deadline cannot destroy
+    // a transaction that is waiting for a fresh proof and authorization fence.
+    Fixture complete; complete.establish();
+    check(complete.s.paste_begin({5,1,support::crc32_ieee(std::vector<std::uint8_t>{'a'})},at(0)).size==1);
+    check(complete.s.paste_chunk({5,0,{'a'}},at(1)).items[0].paste_status->state==w::PasteState::complete);
+    complete.proof(0, 0); complete.proof(9000, 9000); complete.proof(18000, 18000); complete.proof(27000, 27000);
+    complete.s.tick(at(30001)); // The challenge/session deadline does not alter the completed upload.
+    check(complete.s.paste_status()->state==w::PasteState::complete);
 }
 
 void delayed_paste_upload_requires_a_new_proof_for_commit() {
@@ -232,10 +262,38 @@ void delayed_paste_upload_requires_a_new_proof_for_commit() {
     check(f.s.paste_chunk({23, 0, {text.begin(), text.begin() + 960}}, at(1)).size == 1);
     // Upload spans the 250ms proof lease. Complete upload alone cannot execute.
     check(f.s.paste_chunk({23, 1, {text.begin() + 960, text.end()}}, at(300)).items[0].paste_status->state == w::PasteState::complete);
-    check(f.s.paste_commit({23}, at(301)).items[0].paste_status->reason == w::PasteStatusReason::proof);
-    // A current presentation proof renews admission; a retry can now execute.
+    check(f.s.paste_authorize({23,1,1}, at(301)).items[0].paste_status->reason == w::PasteStatusReason::proof_required);
+    // A current presentation proof renews admission; authorization then permits commit.
     f.proof(350, 350); f.barrier(350);
-    check(f.s.paste_commit({23}, at(351)).items[0].paste_status->state == w::PasteState::executing);
+    check(f.s.paste_authorize({23,1,2}, at(351)).items[0].paste_status->reason == w::PasteStatusReason::authorization);
+    f.s.paste_authorized(7, at(352));
+    check(f.s.paste_commit({23,7}, at(353)).items[0].paste_status->state == w::PasteState::executing);
+}
+
+void paste_keepalive_and_terminal_snapshot_precede_deadline_tick() {
+    const std::vector<std::uint8_t> text{'a'};
+    auto executing = [&](Fixture& f, std::uint64_t id) {
+        f.establish();
+        check(f.s.paste_begin({id,1,support::crc32_ieee(text)},at(0)).size==1);
+        check(f.s.paste_chunk({id,0,text},at(1)).size==1);
+        f.proof(0,0); f.barrier(0);
+        check(f.s.paste_authorize({id,1,1},at(1)).items[0].paste_status->reason==w::PasteStatusReason::authorization);
+        f.s.paste_authorized(7,at(1));
+        check(f.s.paste_commit({id,7},at(1)).items[0].paste_status->state==w::PasteState::executing);
+        f.s.paste_started(at(1));
+    };
+    // Models a KCP keepalive already decoded in the relay loop at lease expiry.
+    Fixture renewed; executing(renewed, 31);
+    auto renewed_status = renewed.s.paste_keepalive({31},at(501));
+    check(renewed_status.size==1 && renewed_status.items[0].paste_status->state==w::PasteState::executing);
+    check(!renewed.s.tick(at(501)).items[0].paste_status.has_value());
+    check(renewed.s.paste_status()->state==w::PasteState::executing);
+    // Models the terminal serial snapshot observed in that same loop before tick.
+    Fixture completed; executing(completed, 32);
+    auto terminal=completed.s.update_ascii_paste({AsciiPasteState::completed,1,1},at(501));
+    check(terminal.items[0].paste_status->state==w::PasteState::completed);
+    check(!completed.s.tick(at(501)).items[0].paste_status.has_value());
+    check(!completed.s.paste_status().has_value());
 }
 
 void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
@@ -244,12 +302,14 @@ void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
     check(f.s.paste_begin({19,1,support::crc32_ieee(text)},at(0)).size==1);
     check(f.s.paste_chunk({19,0,text},at(1)).size==1);
     f.proof(0,0); f.barrier(0);
-    check(f.s.paste_commit({19},at(1)).items[0].paste_status->state==w::PasteState::executing);
+    check(f.s.paste_authorize({19,1,1},at(1)).items[0].paste_status->reason==w::PasteStatusReason::authorization);
+    f.s.paste_authorized(7,at(1));
+    check(f.s.paste_commit({19,7},at(1)).items[0].paste_status->state==w::PasteState::executing);
     f.s.paste_started(at(1));
     // Presentation proof expires at 250ms. The transaction continues while the
     // client GUI/control loop renews its explicit lease.
     check(!f.s.tick(at(251)).items[0].paste_status.has_value());
-    check(f.s.paste_keepalive({19},at(400)).size==0);
+    check(f.s.paste_keepalive({19},at(400)).size==1);
     check(!f.s.tick(at(800)).items[0].paste_status.has_value());
     auto expired=f.s.tick(at(900));
     check(count(expired, Kind::paste_ready)==1);
@@ -262,7 +322,8 @@ void paste_execution_lease_survives_video_gap_and_expires_without_heartbeat() {
 
 int main() {
     handshake_loss_duplicate_and_single_controller(); server_issue_time_not_receipt_lease();
+    deferred_proof_uses_receipt_time_without_backdating_lease();
     session_10s_input_250ms_separation(); cancellation_overtakes_kcp_and_tombstones();
-    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract(); delayed_paste_upload_requires_a_new_proof_for_commit(); paste_execution_lease_survives_video_gap_and_expires_without_heartbeat();
+    immutable_state_ack_and_barrier(); edge_floor_gap_and_no_uncertain_replay(); challenge_ring_and_actions_bounded(); paste_upload_contract(); delayed_paste_upload_requires_a_new_proof_for_commit(); paste_keepalive_and_terminal_snapshot_precede_deadline_tick(); paste_execution_lease_survives_video_gap_and_expires_without_heartbeat();
     std::cout<<"relay_session: deterministic handshake/freshness/barrier checks passed\n";
 }

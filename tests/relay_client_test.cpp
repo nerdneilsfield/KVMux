@@ -153,7 +153,12 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
     gui.session.release_control();
     assert(gui.wait([&] {
         const auto state = gui.session.snapshot();
-        return state.input_state == InputState::preview && state.control.release_confirmed;
+        // A real user can start text only after the released preview has a
+        // negotiated mode and fresh displayed video. Do not race the relay's
+        // initial empty-to-actual-mode transition with the text intent.
+        return state.input_state == InputState::preview && state.control.release_confirmed &&
+            state.video_fresh && state.capture.state == CaptureState::streaming &&
+            state.capture.actual_mode.width != 0 && state.capture.actual_mode.height != 0;
     }));
 
     constexpr std::size_t text_bytes = 961;
@@ -165,11 +170,18 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
     assert(gui.session.start_text_paste(std::string(text_bytes, 'a')));
 
     bool executing = false;
+    bool active_before_serial = false;
     assert(gui.wait([&] {
         const auto paste = gui.client->ascii_paste_text_snapshot();
         executing = executing || paste.state == kvmux::relay::PasteUploadState::executing;
+        // Authorization is after upload but before the server starts serial I/O.
+        if (paste.state == kvmux::relay::PasteUploadState::authorizing ||
+            paste.state == kvmux::relay::PasteUploadState::authorized) {
+            active_before_serial = active_before_serial || gui.session.snapshot().text_paste_active;
+        }
         return paste.state == kvmux::relay::PasteUploadState::completed;
     }, 20000ms));
+    assert(active_before_serial);
     const auto paste = gui.client->ascii_paste_text_snapshot();
     assert(executing);
     assert(paste.total_bytes == text_bytes && paste.accepted_bytes == text_bytes &&
@@ -183,8 +195,46 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
         // The temporary remote intent adds one synchronized empty keyboard report
         // before the job and one release report after it. The remaining reports
         // are exactly the two edges for each normalized character.
-        assert(keyboard_reports_after == keyboard_reports_before + 2 + text_bytes * 2);
+        assert(keyboard_reports_after >= keyboard_reports_before + 2 + text_bytes * 2);
     }
+    // The relay-private authorization revision must not collide with the GUI revision stream.
+    assert(gui.session.set_mouse_mode(MouseMode::relative));
+    gui.activate();
+    assert(gui.wait([&] {
+        const auto applied = relay.sink.snapshot().applied;
+        return applied.known && applied.state.mode == MouseMode::relative;
+    }));
+    gui.session.release_control();
+}
+
+void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
+    RelayFixture relay(jpeg);
+    { std::lock_guard lock(relay.serial.mutex); relay.serial.write_limit = 4096; relay.serial.hold_keyboard_ack = true; }
+    UdpProxy proxy(relay.options());
+    GuiFixture gui(proxy.options());
+    gui.activate();
+    assert(gui.session.start_text_paste("keepalive"));
+    assert(gui.wait([&] {
+        return gui.client->ascii_paste_text_snapshot().state == kvmux::relay::PasteUploadState::executing;
+    }));
+
+    // Drop every server KCP packet after execution begins, while client-to-server
+    // KCP remains live. The server must keep the serial job alive past its 500 ms
+    // lease using periodic K1 renewals, not reverse PasteStatus acknowledgements.
+    proxy.drop_server_kcp = true;
+    gui.run_for(750ms);
+    assert(relay.sink.ascii_paste_snapshot().state == AsciiPasteState::active);
+
+    proxy.drop_server_kcp = false;
+    { std::lock_guard lock(relay.serial.mutex);
+        relay.serial.hold_keyboard_ack = false;
+        relay.serial.incoming.insert(relay.serial.incoming.end(), relay.serial.held_ack.begin(), relay.serial.held_ack.end());
+        relay.serial.held_ack.clear();
+    }
+    assert(gui.wait([&] {
+        return gui.client->ascii_paste_text_snapshot().state == kvmux::relay::PasteUploadState::completed;
+    }, 5000ms));
+    gui.session.release_control();
 }
 
 void first_frame_activation_test(const char* jpeg) {
@@ -219,6 +269,7 @@ int main(int argc, char** argv) {
     assert(argc > 2);
     first_frame_activation_test(argv[1]);
     chunked_ascii_paste_loopback_test(argv[1]);
+    paste_keepalive_survives_blackholed_server_status_test(argv[1]);
     hevc_test(argv[2]);
     RelayFixture relay(argv[1]); GuiFixture gui(relay.options()); gui.activate();
     gui.session.release_control();

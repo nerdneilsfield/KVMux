@@ -40,7 +40,7 @@ struct UdpProxy {
     kvmux::udp::Socket control, video, backend;
     kvmux::udp::Endpoint server_control, server_video;
     std::optional<kvmux::udp::Endpoint> client;
-    std::atomic<bool> blackout{}, done{};
+    std::atomic<bool> blackout{}, drop_server_kcp{}, done{};
     std::atomic<unsigned> drop_welcome{}, drop_ready{};
     std::atomic<bool> wrong_source_only{}, wrong_tuple_only{};
     std::atomic<std::uint64_t> session_id{}, challenges{}, proofs{}, media{}, last_presented{}, drop_media_sequence{}, last_media_sequence{};
@@ -81,7 +81,7 @@ struct UdpProxy {
                         last_media_sequence = sequence;
                         if (sequence == drop_media_sequence) continue;
                     }
-                    if (blackout) continue;
+                    if (blackout || (drop_server_kcp && envelope->kind == Kind::kcp)) continue;
                     if (packet.datagram.source == server_control) (void)control.send_to(*client, packet.datagram.bytes);
                     else if (packet.datagram.source == server_video) {
                         if (wrong_tuple_only) packet.datagram.bytes[15] ^= 0x01;

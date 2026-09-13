@@ -27,7 +27,10 @@ struct ClientVideoSnapshot {
 // envelope and retransmissions. Excludes UDP/IP headers.
 // stop()/start() preserve totals; a new client starts at zero. An in-flight
 // packet may finish after stop(), which does not wait for network workers.
-enum class PasteUploadState { idle, uploading, complete, executing, completed, canceled, rejected, expired };
+enum class PasteUploadState {
+    idle, uploading, complete, authorizing, authorized, executing,
+    completed, canceled, rejected, expired
+};
 struct PasteUploadSnapshot {
     PasteUploadState state{PasteUploadState::idle};
     std::uint64_t transaction_id{};

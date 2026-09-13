@@ -33,10 +33,10 @@ struct RefreshRequest { std::uint64_t generation{}; MediaReason reason{MediaReas
 struct MediaFeedback { std::uint64_t generation{}; MediaStats stats; };
 struct PasteBegin { std::uint64_t transaction_id{}; std::uint32_t normalized_bytes{}, crc32{}; };
 struct PasteChunk { std::uint64_t transaction_id{}; std::uint32_t chunk_index{}; std::vector<std::uint8_t> payload; };
-struct PasteCommit { std::uint64_t transaction_id{}; };
-// Requests proof-gated authorization. The server returns one PasteAuthorized token after its private serial fence completes.
-struct PasteAuthorize { std::uint64_t transaction_id{}; };
-struct PasteAuthorized { std::uint64_t transaction_id{}, token{}; };
+struct PasteCommit { std::uint64_t transaction_id{}, authorization_token{}; };
+// Requests a proof-bound authorization. The server echoes request_id with its token.
+struct PasteAuthorize { std::uint64_t transaction_id{}, challenge{}, request_id{}; };
+struct PasteAuthorized { std::uint64_t transaction_id{}, request_id{}, token{}; };
 // Renews an executing transaction lease. It asserts the local GUI/control loop is alive; it is not a video proof.
 struct PasteKeepalive { std::uint64_t transaction_id{}; };
 enum class PasteCancelReason { user=1, host=2, focus=3, release=4, disconnect=5 };

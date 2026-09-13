@@ -33,7 +33,9 @@ struct RelayClient::Impl {
         PasteUploadSnapshot snapshot;
         std::uint64_t epoch{}, intent{};
         std::uint32_t next_chunk{};
-        bool begin_sent{}, commit_sent{}, cancel_pending{};
+        bool begin_sent{}, authorize_sent{}, commit_sent{}, cancel_pending{};
+        std::uint64_t authorization_request{}, authorization_token{}, proof_retry_after{};
+        Clock::time_point authorization_requested_at{};
     };
     std::optional<PasteUpload> paste;
     std::uint64_t next_paste_id{};
@@ -346,9 +348,12 @@ struct RelayClient::Impl {
                     case wire::PasteState::uploading: paste->snapshot.state = PasteUploadState::uploading; break;
                     case wire::PasteState::complete:
                         paste->snapshot.state = PasteUploadState::complete;
-                        // Commit admission is proof-gated. Re-arm only after the
-                        // server refuses it for lack of a current proof.
-                        if (value->reason == wire::PasteStatusReason::proof) paste->commit_sent = false;
+                        if (value->reason == wire::PasteStatusReason::proof_required) {
+                            paste->snapshot.state = PasteUploadState::complete;
+                            paste->authorize_sent = false;
+                            paste->proof_retry_after = session.latest_challenge();
+                        }
+                        if (value->reason == wire::PasteStatusReason::authorization) paste->commit_sent = false;
                         break;
                     case wire::PasteState::executing: paste->snapshot.state = PasteUploadState::executing; paste->bytes.clear(); break;
                     case wire::PasteState::completed: paste->snapshot.state = PasteUploadState::completed; paste->bytes.clear(); break;
@@ -356,6 +361,13 @@ struct RelayClient::Impl {
                     case wire::PasteState::rejected: paste->snapshot.state = PasteUploadState::rejected; paste->bytes.clear(); break;
                     case wire::PasteState::expired: paste->snapshot.state = PasteUploadState::expired; paste->bytes.clear(); break;
                     }
+                } else if (auto value = std::get_if<wire::PasteAuthorized>(&*message)) {
+                    if (!paste || value->transaction_id != paste->snapshot.transaction_id ||
+                        value->request_id != paste->authorization_request || !value->token ||
+                        paste->epoch != control.epoch || paste->intent != intent) continue;
+                    paste->authorization_token = value->token;
+                    paste->snapshot.state = PasteUploadState::authorized;
+                    paste->commit_sent = false;
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
                         value->revision == pending_sync->revision && value->edge_floor == pending_sync->edge_floor &&
@@ -369,14 +381,19 @@ struct RelayClient::Impl {
                 auto bytes = wire::encode_control(value, wire::Direction::client_to_server);
                 return bytes && kcp->submit(*bytes, reserve_slots) == SubmitResult::accepted;
             };
-            if (auto cancellation = session.pending_cancel(); cancellation && cancellation->intent != reliable_cancel) {
-                if (submit(*cancellation)) reliable_cancel = cancellation->intent;
-            }
             bool paste_lifecycle_pending = false;
             {
                 std::lock_guard lock(mutex);
                 paste_lifecycle_pending = paste && paste->epoch == control.epoch && paste->intent == intent &&
                     (paste->cancel_pending || !paste->snapshot.terminal() || paste->snapshot.state == PasteUploadState::executing);
+            }
+            // Cancellation ends the transaction in KCP order, so it may take the
+            // one bounded transaction-control slot. No later keepalive can overtake it.
+            if (auto cancellation = session.pending_cancel(); cancellation && cancellation->intent != reliable_cancel) {
+                if (submit(*cancellation)) reliable_cancel = cancellation->intent;
+            }
+            {
+                std::lock_guard lock(mutex);
                 if (requested_sync && ready(now) && active && challenge_at > sync_requested_at) {
                     const auto& request = *requested_sync;
                     wire::Sync value{request.epoch, request.intent_generation, request.revision, session.latest_challenge(), wire_sequence, request.state};
@@ -385,13 +402,22 @@ struct RelayClient::Impl {
                 if (paste && paste->epoch == control.epoch && paste->intent == intent) {
                     auto& job = *paste;
                     if (job.cancel_pending) {
+                        // Cancel is ordered before any later keepalive, so it can consume
+                        // the reserved slot and stop the server-side transaction.
                         if (submit(wire::PasteCancel{job.snapshot.transaction_id, wire::PasteCancelReason::user})) job.cancel_pending = false;
                     } else if (job.snapshot.state == PasteUploadState::executing) {
                         // A completed transaction keeps its own control lease. Video may recover independently.
-                        if (now - paste_keepalive_at >= 100ms && submit(wire::PasteKeepalive{job.snapshot.transaction_id})) paste_keepalive_at = now;
+                        // Status is optional progress feedback, not a transport ACK. Send one
+                        // coalesced renewal per interval, with KCP's bounded window as the
+                        // backpressure limit, so dropped server statuses cannot end the lease.
+                        if (now - paste_keepalive_at >= 100ms &&
+                            submit(wire::PasteKeepalive{job.snapshot.transaction_id})) {
+                            paste_keepalive_at = now;
+                        }
                     } else if (!job.snapshot.terminal() && barrier && ready(now) && active) {
                         if (!job.begin_sent) {
-                            if (submit(wire::PasteBegin{job.snapshot.transaction_id, job.snapshot.total_bytes, support::crc32_ieee(job.bytes)})) job.begin_sent = true;
+                            if (submit(wire::PasteBegin{job.snapshot.transaction_id, job.snapshot.total_bytes,
+                                    support::crc32_ieee(job.bytes)}, 1)) job.begin_sent = true;
                         } else if (job.next_chunk * 960U < job.bytes.size()) {
                             const auto offset = static_cast<std::size_t>(job.next_chunk) * 960U;
                             const auto count = std::min<std::size_t>(960, job.bytes.size() - offset);
@@ -399,8 +425,21 @@ struct RelayClient::Impl {
                                 std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
                             // The final chunk must leave a slot for PasteCommit.
                             if (submit(chunk, 1)) ++job.next_chunk;
+                        } else if (!job.authorization_token) {
+                            // An authorization is reliable. Do not send it on every network
+                            // iteration; retry only after an explicit proof request or a bounded timeout.
+                            if (job.authorize_sent && now - job.authorization_requested_at >= 1s) job.authorize_sent = false;
+                            if (!job.authorize_sent && session.latest_challenge() > job.proof_retry_after) {
+                                ++job.authorization_request;
+                                if (submit(wire::PasteAuthorize{job.snapshot.transaction_id, session.latest_challenge(),
+                                        job.authorization_request}, 1)) {
+                                    job.authorize_sent = true;
+                                    job.authorization_requested_at = now;
+                                    job.snapshot.state = PasteUploadState::authorizing;
+                                }
+                            }
                         } else if (!job.commit_sent) {
-                            if (submit(wire::PasteCommit{job.snapshot.transaction_id})) job.commit_sent = true;
+                            if (submit(wire::PasteCommit{job.snapshot.transaction_id, job.authorization_token}, 1)) job.commit_sent = true;
                         }
                     }
                 }
@@ -414,18 +453,26 @@ struct RelayClient::Impl {
             // Feedback is optional and coalesced. Do not let it consume the lifecycle slot.
             if (!paste_lifecycle_pending && refresh && submit(*refresh, 1)) refresh.reset();
             if (!paste_lifecycle_pending && feedback && submit(*feedback, 1)) feedback.reset();
+            // Do not call ikcp_update while UDP still owns an unsent output batch.
+            // Its output callback is bounded, so advancing KCP here would turn a
+            // recoverable socket would-block into a transport failure.
+            auto drain_output = [&] {
+                for (unsigned i = 0; i < 32 && output_index < output.size(); ++i) {
+                    auto bytes = wire::encode_envelope({wire::EnvelopeKind::kcp, session.tuple(), output[output_index]});
+                    if (!bytes) { fail("Invalid KCP envelope"); return false; }
+                    auto result = socket->send_to(*control_peer, *bytes);
+                    if (result == udp::SendStatus::would_block) return false;
+                    if (result != udp::SendStatus::sent) { fail("UDP KCP send failed"); return false; }
+                    { std::lock_guard lock(mutex); traffic.control_sent_bytes += bytes->size(); }
+                    ++output_index;
+                }
+                return output_index == output.size();
+            };
+            if (!drain_output()) continue;
             kcp->update(static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()));
             if (kcp->failed()) { fail("KCP queue or transport failure"); break; }
-            if (output_index == output.size()) { output = kcp->take_datagrams(); output_index = 0; }
-            for (unsigned i = 0; i < 32 && output_index < output.size(); ++i) {
-                auto bytes = wire::encode_envelope({wire::EnvelopeKind::kcp, session.tuple(), output[output_index]});
-                if (!bytes) break;
-                auto result = socket->send_to(*control_peer, *bytes);
-                if (result == udp::SendStatus::would_block) break;
-                if (result != udp::SendStatus::sent) { fail("UDP KCP send failed"); break; }
-                { std::lock_guard lock(mutex); traffic.control_sent_bytes += bytes->size(); }
-                ++output_index;
-            }
+            output = kcp->take_datagrams(); output_index = 0;
+            (void)drain_output();
         }
         { std::lock_guard lock(mutex); decode_done = true; decode_wake.notify_all(); }
     }
@@ -474,7 +521,9 @@ void RelayClient::mouse_mode(MouseMode mode) {
 }
 void RelayClient::active(bool active) noexcept {
     std::lock_guard lock(impl_->mutex);
-    if (active && impl_->intent_canceled) return;
+    // A later router intent may reacquire temporary control after a confirmed
+    // release. `intent_canceled` fences the old generation at synchronization;
+    // it must not permanently suppress this local liveness request.
     if (active || impl_->events.empty()) impl_->active = active;
 }
 void RelayClient::gui_progress() noexcept {
@@ -552,7 +601,10 @@ PasteUploadSnapshot RelayClient::ascii_paste_text_snapshot() const { std::lock_g
 AsciiPasteSnapshot NetworkControlSink::ascii_paste_snapshot() const {
     const auto paste = client_->ascii_paste_text_snapshot();
     AsciiPasteState state = AsciiPasteState::idle;
-    if (paste.state == PasteUploadState::uploading || paste.state == PasteUploadState::complete || paste.state == PasteUploadState::executing) state = AsciiPasteState::active;
+    // `complete` means the server has all uploaded bytes. Authorization and
+    // commit still have to run, so every nonterminal transaction owns the
+    // input lease until the server reports its terminal outcome.
+    if (paste.state != PasteUploadState::idle && !paste.terminal()) state = AsciiPasteState::active;
     else if (paste.state == PasteUploadState::completed) state = AsciiPasteState::completed;
     else if (paste.state == PasteUploadState::canceled || paste.state == PasteUploadState::expired) state = AsciiPasteState::canceled;
     else if (paste.state == PasteUploadState::rejected) state = AsciiPasteState::failed;

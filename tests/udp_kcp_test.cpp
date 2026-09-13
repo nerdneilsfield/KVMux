@@ -52,6 +52,15 @@ void bounds() {
     check(reserved.submit(Bytes{7}, 1) == SubmitResult::full);
     check(reserved.submit(Bytes{8}) == SubmitResult::accepted);
 
+    // Paste chunks and ordinary traffic reserve one bounded lifecycle slot.
+    // A coalesced executing keepalive therefore still enters when all ordinary
+    // capacity is occupied; no retry queue is needed.
+    KcpChannel executing(42);
+    for (int i = 0; i < 127; ++i)
+        check(executing.submit(Bytes{7}, 1) == SubmitResult::accepted);
+    check(executing.submit(Bytes{13}) == SubmitResult::accepted); // PasteKeepalive
+    check(executing.submit(Bytes{9}) == SubmitResult::full);
+
     sender.update(0);
     auto packets = sender.take_datagrams();
     check(packets.size() == 128);
@@ -92,6 +101,20 @@ void bounds() {
     for (std::uint32_t t = 0; t <= 2000 && !overflow.failed(); t += 10) overflow.update(t);
     check(overflow.failed());
     check(overflow.take_datagrams().size() == 256);
+
+    // A relay must retain a taken batch while its UDP send would-blocks and not
+    // call update again. Once the batch drains, normal updates remain healthy.
+    KcpChannel held(42);
+    for (int i = 0; i < 128; ++i) check(held.submit(Bytes(1024)) == SubmitResult::accepted);
+    held.update(0);
+    auto held_batch = held.take_datagrams();
+    check(held_batch.size() == 128);
+    // Simulated would-block: relay holds held_batch and deliberately skips update.
+    check(!held.failed());
+    held_batch.clear(); // Socket becomes writable and the retained batch drains.
+    held.update(10);
+    check(!held.failed());
+    check(held.take_datagrams().size() <= 128);
 
     // A stopped application reader advertises zero window; ingress remains bounded.
     KcpChannel slow(42);
