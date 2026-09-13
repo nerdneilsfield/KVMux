@@ -93,7 +93,7 @@ ControlPayload edge_body(Reader& r) {
     default: r.ok=false; return KeyEdge{};
     }
 }
-bool direction(unsigned type,Direction d) { return (type==1||type==3) ? d==Direction::server_to_client : d==Direction::client_to_server; }
+bool direction(unsigned type,Direction d) { return (type==1||type==3||type==12) ? d==Direction::server_to_client : d==Direction::client_to_server; }
 }
 bool valid_state(const DesiredInputState& s) {
     if(s.buttons>7 || s.absolute_x>4095 || s.absolute_y>4095 || (s.mode!=MouseMode::absolute&&s.mode!=MouseMode::relative)) return false;
@@ -139,7 +139,7 @@ std::optional<RawBody> decode_raw(EnvelopeKind kind,std::span<const std::uint8_t
 std::optional<Envelope> decode_envelope(std::span<const std::uint8_t> bytes) {
     if(bytes.size()<32||bytes.size()>1200) return {};
     Reader r{bytes.first(32)};
-    if(r.integer(4)!=0x4b564d58||r.u8()!=3) return {};
+    if(r.integer(4)!=0x4b564d58||r.u8()!=4) return {};
     auto k=r.u8(); if(k<1||k>11) return {};
     auto n=r.u16(); Tuple t; t.session=r.integer(8); t.nonce=r.integer(8); t.conversation=static_cast<std::uint32_t>(r.integer(4)); r.zeros(4);
     if(!r.done()||bytes.size()!=32U+n||!t.nonce) return {};
@@ -155,7 +155,7 @@ std::optional<Envelope> decode_envelope(std::span<const std::uint8_t> bytes) {
 std::optional<std::vector<std::uint8_t>> encode_envelope(const Envelope& e) {
     if(e.body.size()>1168) return {};
     auto k=index(kinds,e.kind); if(k<0) return {};
-    Writer w; w.integer(0x4b564d58,4); w.integer(3,1); w.integer(static_cast<unsigned>(k+1),1); w.integer(e.body.size(),2);
+    Writer w; w.integer(0x4b564d58,4); w.integer(4,1); w.integer(static_cast<unsigned>(k+1),1); w.integer(e.body.size(),2);
     w.integer(e.tuple.session,8); w.integer(e.tuple.nonce,8); w.integer(e.tuple.conversation,4); w.zeros(4);
     w.bytes.insert(w.bytes.end(),e.body.begin(),e.body.end());
     if(!decode_envelope(w.bytes)) return {}; return w.bytes;
@@ -172,6 +172,11 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,Directi
         } else if constexpr(std::is_same_v<T,Edge>) { type=4; w.ok &= b.epoch&&b.intent&&b.sequence&&b.challenge; w.integer(b.epoch,8); w.integer(b.intent,8); w.integer(b.sequence,8); w.integer(b.source_sequence,8); w.integer(b.challenge,8); edge_body(w,b.payload); }
         else if constexpr(std::is_same_v<T,Cancel>) { type=5; cancel_body(w,b); }
         else if constexpr(std::is_same_v<T,RefreshRequest>) { type=6; w.ok &= b.generation!=0; w.integer(b.generation,8); w.mapped(index(reasons,b.reason)); w.zeros(7); }
+        else if constexpr(std::is_same_v<T,PasteBegin>) { type=8; w.ok &= b.transaction_id && b.normalized_bytes>=1 && b.normalized_bytes<=65536; w.integer(b.transaction_id,8); w.integer(b.normalized_bytes,4); w.integer(b.crc32,4); }
+        else if constexpr(std::is_same_v<T,PasteChunk>) { type=9; w.ok &= b.transaction_id && !b.payload.empty() && b.payload.size()<=960; w.integer(b.transaction_id,8); w.integer(b.chunk_index,4); w.integer(b.payload.size(),2); w.zeros(2); w.bytes.insert(w.bytes.end(),b.payload.begin(),b.payload.end()); }
+        else if constexpr(std::is_same_v<T,PasteCommit>) { type=10; w.ok &= b.transaction_id; w.integer(b.transaction_id,8); }
+        else if constexpr(std::is_same_v<T,PasteCancel>) { type=11; auto reason=static_cast<unsigned>(b.reason); w.ok &= b.transaction_id && reason>=1 && reason<=5; w.integer(b.transaction_id,8); w.integer(reason,1); w.zeros(7); }
+        else if constexpr(std::is_same_v<T,PasteStatus>) { type=12; auto state=static_cast<unsigned>(b.state), reason=static_cast<unsigned>(b.reason); w.ok &= b.transaction_id && state>=1 && state<=7 && reason<=10; w.integer(b.transaction_id,8); w.integer(state,1); w.zeros(3); w.integer(b.next_chunk,4); w.integer(b.accepted_bytes,4); w.integer(b.completed_bytes,4); w.integer(reason,1); w.zeros(3); }
         else { type=7; w.ok &= b.generation!=0; w.integer(b.generation,8); const auto& s=b.stats;
             for(auto v:{s.received_frames,s.recovered_fragments,s.recovered_frames,s.lost_frames,s.last_completed,s.age_losses,s.capacity_losses,s.gap_losses,s.unrecoverable}) w.integer(v,8);
             w.integer(s.waiting_idr,1); w.zeros(7);
@@ -184,7 +189,7 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,Directi
 std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,Direction d) {
     if(bytes.size()<4||bytes.size()>1024) return {};
     Reader h{bytes.first(4)}; auto type=h.u8(); h.zeros(1); auto n=h.u16();
-    if(!h.done()||n!=bytes.size()-4||type<1||type>7||!direction(type,d)) return {};
+    if(!h.done()||n!=bytes.size()-4||type<1||type>12||!direction(type,d)) return {};
     Reader r{bytes.subspan(4)}; Control c;
     switch(type) {
     case 1: { Status b; b.epoch=r.integer(8); auto conn=r.u8(),flags=r.u8(); r.zeros(2); b.canceled_through=r.integer(8); b.completed_ordinary_sequence=r.integer(8); r.ok &= b.epoch!=0&&conn<=8&&flags<=7; if(conn<=8)b.connection=connections[conn]; b.usb_ready=(flags&1)!=0; b.release_confirmed=(flags&2)!=0; b.ordinary_input_pending=(flags&4)!=0; c=b; break; }
@@ -194,6 +199,11 @@ std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,Direct
     case 5: c=cancel_body(r); break;
     case 6: { RefreshRequest b; b.generation=r.integer(8); auto reason=r.u8(); r.zeros(7); r.ok &= b.generation!=0&&reason<std::size(reasons); if(reason<std::size(reasons)) b.reason=reasons[reason]; c=b; break; }
     case 7: { MediaFeedback b; b.generation=r.integer(8); auto& s=b.stats; s.received_frames=r.integer(8); s.recovered_fragments=r.integer(8); s.recovered_frames=r.integer(8); s.lost_frames=r.integer(8); s.last_completed=r.integer(8); s.age_losses=r.integer(8); s.capacity_losses=r.integer(8); s.gap_losses=r.integer(8); s.unrecoverable=r.integer(8); s.waiting_idr=r.boolean(); r.zeros(7); r.ok &= b.generation!=0; c=b; break; }
+    case 8: { PasteBegin b{r.integer(8), static_cast<std::uint32_t>(r.integer(4)), static_cast<std::uint32_t>(r.integer(4))}; r.ok &= b.transaction_id && b.normalized_bytes>=1 && b.normalized_bytes<=65536; c=b; break; }
+    case 9: { PasteChunk b; b.transaction_id=r.integer(8); b.chunk_index=static_cast<std::uint32_t>(r.integer(4)); auto n=r.u16(); r.zeros(2); r.ok &= b.transaction_id && n>=1 && n<=960 && n<=r.bytes.size()-r.pos; if(r.ok) b.payload.assign(r.bytes.begin()+static_cast<std::ptrdiff_t>(r.pos),r.bytes.begin()+static_cast<std::ptrdiff_t>(r.pos+n)), r.pos+=n; c=std::move(b); break; }
+    case 10: { PasteCommit b{r.integer(8)}; r.ok &= b.transaction_id; c=b; break; }
+    case 11: { PasteCancel b; b.transaction_id=r.integer(8); auto reason=r.u8(); r.zeros(7); r.ok &= b.transaction_id && reason>=1 && reason<=5; if(reason>=1&&reason<=5) b.reason=static_cast<PasteCancelReason>(reason); c=b; break; }
+    case 12: { PasteStatus b; b.transaction_id=r.integer(8); auto state=r.u8(); r.zeros(3); b.next_chunk=static_cast<std::uint32_t>(r.integer(4)); b.accepted_bytes=static_cast<std::uint32_t>(r.integer(4)); b.completed_bytes=static_cast<std::uint32_t>(r.integer(4)); auto reason=r.u8(); r.zeros(3); r.ok &= b.transaction_id && state>=1 && state<=7 && reason<=10; if(state>=1&&state<=7) b.state=static_cast<PasteState>(state); if(reason<=10) b.reason=static_cast<PasteStatusReason>(reason); c=b; break; }
     }
     if(!r.done()) return {}; return c;
 }

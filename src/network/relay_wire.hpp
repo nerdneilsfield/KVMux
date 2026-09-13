@@ -31,7 +31,16 @@ struct StateAck { std::uint64_t epoch{}, intent{}, revision{}, edge_floor{}; Des
 struct Edge { std::uint64_t epoch{}, intent{}, sequence{}, source_sequence{}, challenge{}; ControlPayload payload; };
 struct RefreshRequest { std::uint64_t generation{}; MediaReason reason{MediaReason::none}; };
 struct MediaFeedback { std::uint64_t generation{}; MediaStats stats; };
-using Control = std::variant<Status, Sync, StateAck, Edge, Cancel, RefreshRequest, MediaFeedback>;
+struct PasteBegin { std::uint64_t transaction_id{}; std::uint32_t normalized_bytes{}, crc32{}; };
+struct PasteChunk { std::uint64_t transaction_id{}; std::uint32_t chunk_index{}; std::vector<std::uint8_t> payload; };
+struct PasteCommit { std::uint64_t transaction_id{}; };
+enum class PasteCancelReason { user=1, host=2, focus=3, release=4, disconnect=5 };
+struct PasteCancel { std::uint64_t transaction_id{}; PasteCancelReason reason{PasteCancelReason::user}; };
+enum class PasteState { uploading=1, complete=2, executing=3, completed=4, canceled=5, rejected=6, expired=7 };
+enum class PasteStatusReason { none=0, busy=1, invalid=2, conflict=3, checksum=4, deadline=5, session=6, proof=7, fence=8, serial=9, canceled=10 };
+struct PasteStatus { std::uint64_t transaction_id{}; PasteState state{PasteState::uploading}; std::uint32_t next_chunk{}, accepted_bytes{}, completed_bytes{}; PasteStatusReason reason{PasteStatusReason::none}; };
+using Control = std::variant<Status, Sync, StateAck, Edge, Cancel, RefreshRequest, MediaFeedback,
+    PasteBegin, PasteChunk, PasteCommit, PasteCancel, PasteStatus>;
 enum class Direction { client_to_server, server_to_client };
 [[nodiscard]] bool valid_state(const DesiredInputState&);
 [[nodiscard]] bool same_state(const DesiredInputState&, const DesiredInputState&);

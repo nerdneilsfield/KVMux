@@ -13,19 +13,19 @@ void check(bool ok,std::source_location loc=std::source_location::current()) {
 }
 void control(const w::Control& c,w::Direction d,std::uint8_t type,std::size_t payload) {
     auto b=w::encode_control(c,d); check(b.has_value());
-    check(b->size()==payload+4&&(*b)[0]==type&&(*b)[1]==0&&(*b)[2]==0&&(*b)[3]==payload);
+    check(b->size()==payload+4&&(*b)[0]==type&&(*b)[1]==0&&(*b)[2]==payload/256&&(*b)[3]==payload%256);
     auto decoded=w::decode_control(*b,d); check(decoded.has_value()); check(w::encode_control(*decoded,d)==b);
     auto other=d==w::Direction::client_to_server?w::Direction::server_to_client:w::Direction::client_to_server;
     check(!w::decode_control(*b,other)); check(!w::encode_control(c,other));
     for(std::size_t n=0;n<b->size();++n) check(!w::decode_control(std::span(*b).first(n),d));
     auto bad=*b; bad.push_back(0); check(!w::decode_control(bad,d));
     bad=*b; bad[1]=1; check(!w::decode_control(bad,d));
-    bad=*b; bad[0]=8; check(!w::decode_control(bad,d));
+    bad=*b; bad[0]=13; check(!w::decode_control(bad,d));
 }
 void envelope_golden_offsets_and_1200_ceiling() {
     Bytes body(1168,0x5a); w::Tuple tuple{0x0102030405060708,0x1112131415161718,0x21222324};
     auto b=w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}); check(b&&b->size()==1200);
-    Bytes header{0x4b,0x56,0x4d,0x58,3,6,4,0x90,1,2,3,4,5,6,7,8,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x21,0x22,0x23,0x24,0,0,0,0};
+    Bytes header{0x4b,0x56,0x4d,0x58,4,6,4,0x90,1,2,3,4,5,6,7,8,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x21,0x22,0x23,0x24,0,0,0,0};
     check(std::equal(header.begin(),header.end(),b->begin()));
     check(w::encode_envelope({w::EnvelopeKind::media,tuple,body}).has_value());
     body.push_back(0); check(!w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}));
@@ -72,6 +72,33 @@ void control_golden_vectors_and_exact_lengths() {
     for(auto offset:{16,17,23}) { auto bad=proof; bad[static_cast<std::size_t>(offset)]=255; check(!w::decode_raw(w::EnvelopeKind::proof,bad)); }
     check(!w::encode_raw(w::Proof{1,0,true,true,3})); check(!w::encode_raw(w::Proof{1,2,true,true,0}));
 }
+
+void paste_control_contract() {
+    using D=w::Direction; auto c=D::client_to_server, s=D::server_to_client;
+    control(w::PasteBegin{0x0102030405060708,65536,0x10203040},c,8,16);
+    control(w::PasteChunk{1,2,{0xaa,0xbb}},c,9,18);
+    control(w::PasteCommit{1},c,10,8);
+    control(w::PasteCancel{1,w::PasteCancelReason::disconnect},c,11,16);
+    control(w::PasteStatus{1,w::PasteState::executing,2,960,10,w::PasteStatusReason::proof},s,12,28);
+    auto begin=*w::encode_control(w::PasteBegin{0x0102030405060708,65536,0x10203040},c);
+    check(begin==Bytes({8,0,0,16,1,2,3,4,5,6,7,8,0,1,0,0,0x10,0x20,0x30,0x40}));
+    auto status=*w::encode_control(w::PasteStatus{1,w::PasteState::completed,2,960,960,w::PasteStatusReason::none},s);
+    check(status==Bytes({12,0,0,28,0,0,0,0,0,0,0,1,4,0,0,0,0,0,0,2,0,0,3,0xc0,0,0,3,0xc0,0,0,0,0}));
+    Bytes max(960,0x5a); auto chunk=w::encode_control(w::PasteChunk{1,0,max},c); check(chunk&&chunk->size()==980);
+    check(!w::encode_control(w::PasteBegin{0,1,0},c)); check(!w::encode_control(w::PasteBegin{1,0,0},c)); check(!w::encode_control(w::PasteBegin{1,65537,0},c));
+    check(!w::encode_control(w::PasteChunk{1,0,{}},c)); check(!w::encode_control(w::PasteChunk{1,0,Bytes(961)},c));
+    check(!w::encode_control(w::PasteCommit{0},c)); check(!w::encode_control(w::PasteCancel{0,w::PasteCancelReason::user},c));
+    auto bad=*chunk; bad[18]=1; check(!w::decode_control(bad,c)); // chunk reserved
+    bad=*chunk; bad[2]=3; bad[3]=0xbf; check(!w::decode_control(bad,c)); // payload size mismatch
+    bad=*w::encode_control(w::PasteStatus{1,w::PasteState::uploading,0,0,0,w::PasteStatusReason::none},s); bad[13]=1; check(!w::decode_control(bad,s));
+    for(auto n:{std::size_t(0),std::size_t(1),std::size_t(7),std::size_t(15),std::size_t(16),std::size_t(17),chunk->size()-1}) check(!w::decode_control(std::span(*chunk).first(n),c));
+    Bytes oversized(1025); check(!w::decode_control(oversized,c));
+}
+void v3_envelopes_are_rejected() {
+    Bytes body(1,0); w::Tuple tuple{1,2,3};
+    auto b=*w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}); b[4]=3; check(!w::decode_envelope(b));
+}
+
 void desired_state_matches_serial_domain() {
     DesiredInputState s; s.keys={4,0,0x73,0x7f,0x85,0x8f}; s.buttons=7; s.absolute_x=s.absolute_y=4095;
     check(w::valid_state(s)); s.keys[1]=4; check(!w::valid_state(s)); s.keys[1]=0xe0; check(!w::valid_state(s));
@@ -93,6 +120,6 @@ void edge_binary64_roundtrip() {
 }
 int main() {
     envelope_golden_offsets_and_1200_ceiling(); control_golden_vectors_and_exact_lengths();
-    desired_state_matches_serial_domain(); edge_binary64_roundtrip();
+    desired_state_matches_serial_domain(); edge_binary64_roundtrip(); paste_control_contract(); v3_envelopes_are_rejected();
     std::cout<<"relay_wire: all binary/domain checks passed\n";
 }
