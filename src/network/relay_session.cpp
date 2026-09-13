@@ -63,6 +63,8 @@ struct ServerSession::Impl {
         wire::PasteState state{wire::PasteState::uploading};
         std::optional<wire::StateAck> fence;
         std::optional<SessionTime> lease;
+        bool authorizing{};
+        std::optional<std::uint64_t> authorization_token;
     };
     std::optional<PasteUpload> paste;
     ControlSnapshot snapshot;
@@ -245,6 +247,32 @@ SessionActions ServerSession::paste_commit(const wire::PasteCommit& commit, Sess
     p.state=wire::PasteState::executing; p.lease=now+500ms; p.fence=wire::StateAck{s.completed_sync->epoch,s.completed_sync->intent,s.completed_sync->revision,s.completed_sync->edge_floor,s.completed_sync->state};
     paste_action(out,s.status()); return out;
 }
+
+SessionActions ServerSession::paste_authorize(const wire::PasteAuthorize& request, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(s.phase!=SessionPhase::established || !s.paste || request.transaction_id!=s.paste->begin.transaction_id) return out;
+    auto& p=*s.paste;
+    if(p.authorization_token) { paste_action(out,s.status()); return out; }
+    if(p.authorizing) { paste_action(out,s.status(wire::PasteStatusReason::authorization)); return out; }
+    if(p.state!=wire::PasteState::complete || p.bytes.size()!=p.begin.normalized_bytes || support::crc32_ieee(p.bytes)!=p.begin.crc32 || !valid_paste_text(p.bytes)) { paste_action(out,s.status(wire::PasteStatusReason::invalid)); return out; }
+    if(!s.execution || now>=*s.execution) { paste_action(out,s.status(wire::PasteStatusReason::proof_required)); return out; }
+    p.authorizing=true; paste_action(out,s.status(wire::PasteStatusReason::authorization)); return out;
+}
+std::optional<ServerSession::PasteAuthorization> ServerSession::pending_paste_authorization() const {
+    const auto& s=*impl_; if(!s.paste || !s.paste->authorizing || s.paste->authorization_token || !ready(s.snapshot)) return {};
+    return PasteAuthorization{s.snapshot.epoch,s.intent,s.snapshot.applied.state};
+}
+SessionActions ServerSession::paste_authorized(std::uint64_t token, SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(!token || !s.paste || !s.paste->authorizing || s.paste->authorization_token) return out;
+    s.paste->authorizing=false; s.paste->authorization_token=token;
+    action(out,SessionAction::Kind::paste_authorized); out.items[out.size-1].paste_authorized=wire::PasteAuthorized{s.paste->begin.transaction_id,token}; return out;
+}
+SessionActions ServerSession::paste_authorization_failed(SessionTime now) {
+    auto& s=*impl_; SessionActions out; s.deadlines(out,now);
+    if(!s.paste || !s.paste->authorizing) return out;
+    s.paste->authorizing=false; paste_action(out,s.status(wire::PasteStatusReason::serial)); return out;
+}
 SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel, SessionTime now) {
     auto& s=*impl_; SessionActions out; s.deadlines(out,now);
     if(s.paste && s.paste->begin.transaction_id==cancel.transaction_id) s.cancel_paste(out,wire::PasteStatusReason::canceled);
@@ -308,7 +336,7 @@ SessionActions ServerSession::sync_submitted(const wire::Sync& sync,kvmux::Submi
 }
 InputGate ServerSession::check_edge(const wire::Edge& edge,SessionTime now) const {
     const auto& s=*impl_;
-    if(!wire::encode_control(edge,wire::Direction::client_to_server)||!s.eligible(edge.epoch,edge.intent,edge.challenge,now)||!s.barrier || (s.paste && s.paste->state==wire::PasteState::executing)) return InputGate::rejected;
+    if(!wire::encode_control(edge,wire::Direction::client_to_server)||!s.eligible(edge.epoch,edge.intent,edge.challenge,now)||!s.barrier || (s.paste && (s.paste->state==wire::PasteState::executing || s.paste->authorizing))) return InputGate::rejected;
     if(edge.sequence<=s.last_edge) return InputGate::duplicate;
     if(s.last_edge==std::numeric_limits<std::uint64_t>::max()||edge.sequence!=s.last_edge+1) return InputGate::recovery_required;
     return InputGate::allowed;

@@ -9,13 +9,14 @@ namespace kvmux::relay {
 using SessionTime = std::chrono::steady_clock::time_point;
 enum class SessionPhase { idle, pending, established };
 struct SessionAction {
-    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected, paste_ready };
+    enum class Kind { send_raw, established, expired, revoke_input, lease_changed, state_ack, rejected, paste_ready, paste_authorized };
     Kind kind{};
     udp::Endpoint peer;
     std::vector<std::uint8_t> datagram;
     std::optional<wire::StateAck> ack;
     std::optional<wire::BusyReason> rejection;
     std::optional<wire::PasteStatus> paste_status;
+    std::optional<wire::PasteAuthorized> paste_authorized;
 };
 // Fixed-capacity synchronous results. No internal output queue; consume each batch.
 struct SessionActions {
@@ -45,6 +46,12 @@ public:
     SessionActions paste_begin(const wire::PasteBegin&, SessionTime);
     SessionActions paste_chunk(const wire::PasteChunk&, SessionTime);
     SessionActions paste_commit(const wire::PasteCommit&, SessionTime);
+    SessionActions paste_authorize(const wire::PasteAuthorize&, SessionTime);
+    // The relay server owns this serial fence revision namespace.
+    struct PasteAuthorization { std::uint64_t epoch{}, intent{}; DesiredInputState state; };
+    [[nodiscard]] std::optional<PasteAuthorization> pending_paste_authorization() const;
+    SessionActions paste_authorized(std::uint64_t token, SessionTime);
+    SessionActions paste_authorization_failed(SessionTime);
     SessionActions paste_cancel(const wire::PasteCancel&, SessionTime);
     SessionActions paste_keepalive(const wire::PasteKeepalive&, SessionTime);
     // Transfers the validated upload to the serial owner, then reports ACK-derived progress.
