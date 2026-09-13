@@ -363,16 +363,19 @@ int main(int argc, char** argv) {
                 }
             }
             if (!remote_input) ImGui_ImplSDL3_ProcessEvent(&event);
-            // A local popup owns all input, not just its pointer clicks. This keeps
-            // editor keystrokes from reaching the remote input path.
-            if ((local_click || popup_open) && !remote_input) continue;
-            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
-            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
             if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
             if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session->minimized();
+            const bool injectable_event = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP ||
+                event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL;
+            // A local popup owns injectable input, but SDL and ImGui still receive
+            // close and window-management events.
+            if ((local_click || popup_open) && !remote_input && injectable_event) continue;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_MOUSE_MOTION && config.mouse_mode == MouseMode::relative) session->handle_input({InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
-            else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL) session->handle_input(to_input(event));
+            else if (injectable_event) session->handle_input(to_input(event));
         }
         if (devices_future.valid() && devices_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) devices = devices_future.get();
         if (modes_future && modes_future->wait_for(std::chrono::seconds(0)) == std::future_status::ready) { modes = modes_future->get(); selected_mode = modes.empty() ? -1 : 0; modes_future.reset(); }
@@ -489,7 +492,6 @@ int main(int argc, char** argv) {
                 if (result) {
                     text_paste_buffer.fill('\0');
                     text_paste_removed = 0;
-                    ImGui::CloseCurrentPopup();
                 }
             }
             ImGui::EndDisabled();
