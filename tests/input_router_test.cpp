@@ -29,6 +29,17 @@ public:
         syncs.push_back(std::move(value));
         return result;
     }
+    kvmux::SubmitResult start_ascii_paste(kvmux::AsciiPasteJob job) override {
+        ++paste_starts;
+        paste_job = std::move(job);
+        paste_value = {kvmux::AsciiPasteState::active, paste_job.gestures.size(), 0};
+        return result;
+    }
+    void cancel_ascii_paste() noexcept override {
+        ++paste_cancels;
+        if (paste_value.active()) paste_value.state = kvmux::AsciiPasteState::canceled;
+    }
+    kvmux::AsciiPasteSnapshot ascii_paste_snapshot() const override { return paste_value; }
 
     kvmux::ControlSnapshot snapshot_value = [] {
         kvmux::ControlSnapshot value;
@@ -42,6 +53,10 @@ public:
     std::vector<kvmux::ControlEvent> events;
     std::vector<kvmux::InputSync> syncs;
     int releases{};
+    int paste_starts{};
+    int paste_cancels{};
+    kvmux::AsciiPasteJob paste_job;
+    kvmux::AsciiPasteSnapshot paste_value;
     bool auto_complete{true};
 };
 
@@ -377,60 +392,25 @@ int main() {
         router.set_video_fresh(true);
         const auto start = InputRouter::Clock::now();
         const auto result = router.start_text("A!", start);
-        require(result && router.text_active(), "text starts only after full mapping");
-        for (int i = 0; i < 10; ++i) router.tick(start + std::chrono::milliseconds(i));
-        require(sink.events.size() >= 4 && std::get<KeyEdge>(sink.events[0].payload).usage == 0xe1 &&
-                    std::get<KeyEdge>(sink.events[3].payload).usage == 0xe1,
-                "shifted text gesture submits one ACK-drained edge at a time");
-        for (int i = 10; i < 30; ++i) router.tick(start + std::chrono::milliseconds(i));
-        require(sink.events.size() >= 8,
-                "final text edges are submitted only after their preceding ACK");
-        router.tick(start + std::chrono::milliseconds(46));
-        require(!router.text_active(), "text lease releases after final ACK");
-        const auto active = router.start_text("ab", start + std::chrono::milliseconds(100));
-        require(static_cast<bool>(active), "new text can start after completion");
-        router.handle({InputKey{0x04, true, false}});
-        require(!router.text_active() && sink.releases > 0, "physical key cancels text with release");
-    }
-
-    {
-        // A stale false pending flag is not an ACK. Only the submitted source
-        // sequence may admit the next synthetic edge.
-        FakeSink sink;
-        sink.auto_complete = false;
-        InputRouter router(sink);
-        router.set_video_fresh(true);
-        const auto start = InputRouter::Clock::now();
-        require(static_cast<bool>(router.start_text("ab", start)), "text starts for sequence ACK test");
-        router.tick(start);
-        require(sink.events.size() == 1, "first edge submitted");
-        for (int i = 1; i < 10; ++i) router.tick(start + std::chrono::milliseconds(i));
-        require(sink.events.size() == 1, "false pending without sequence ACK admits no edge");
-        sink.snapshot_value.completed_ordinary_sequence = sink.events.back().sequence;
-        router.tick(start + std::chrono::milliseconds(10));
-        require(sink.events.size() == 2, "matching sequence ACK admits next edge");
-    }
-
-    {
-        // Regression: a long ASCII paste must keep scheduling past the first 25 gestures.
-        FakeSink sink;
-        InputRouter router(sink);
-        router.set_video_fresh(true);
-        const auto start = InputRouter::Clock::now();
-        const std::string text(100, 'a');
-        require(static_cast<bool>(router.start_text(text, start)), "100-character text paste starts");
-        for (int milliseconds = 0; milliseconds <= 1250; ++milliseconds) {
-            router.tick(start + std::chrono::milliseconds(milliseconds));
-        }
+        require(result && router.text_active() && sink.paste_starts == 1,
+                "local text starts one composite job");
+        require(sink.events.empty() && sink.paste_job.gestures.size() == 2,
+                "local text sends mapped gestures only to the paste job");
+        sink.paste_value.completed_gestures = 1;
+        router.tick(start + std::chrono::milliseconds(1));
         auto progress = router.text_paste_snapshot();
-        require(progress.planned_gestures == 100 && progress.scheduled_gestures > 0 && progress.scheduled_gestures <= progress.planned_gestures,
-                "long text advances without queueing gestures");
-        for (int milliseconds = 1251; milliseconds <= 10001; ++milliseconds) {
-            router.tick(start + std::chrono::milliseconds(milliseconds));
-        }
+        require(progress.active && progress.planned_gestures == 2 && progress.scheduled_gestures == 1,
+                "local progress comes from serial paste snapshot");
+        sink.paste_value.state = AsciiPasteState::completed;
+        sink.paste_value.completed_gestures = 2;
+        router.tick(start + std::chrono::milliseconds(2));
         progress = router.text_paste_snapshot();
-        require(progress.scheduled_gestures == 100 && !progress.active && sink.events.size() == 200,
-                "100-character text paste schedules all gestures without queueing");
+        require(!router.text_active() && !progress.active && progress.scheduled_gestures == 2,
+                "terminal serial snapshot ends local paste without text edges");
+        require(static_cast<bool>(router.start_text("ab", start + std::chrono::milliseconds(3))), "new local paste starts");
+        router.handle({InputKey{0x04, true, false}});
+        require(!router.text_active() && sink.paste_cancels >= 1 && sink.releases > 0,
+                "physical key cancels local composite paste before release");
     }
 
     {

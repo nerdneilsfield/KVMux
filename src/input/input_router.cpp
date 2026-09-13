@@ -273,7 +273,7 @@ void InputRouter::recover() noexcept {
     if (!capture_intended()) return;
     state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; pointer_ = {};
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; direct_ascii_paste_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; pointer_ = {};
 }
 void InputRouter::synchronize(Clock::time_point now) {
     const auto snapshot = sink_.snapshot();
@@ -321,7 +321,15 @@ void InputRouter::tick(const Clock::time_point now) {
     if (text_completion_pending_) {
         text_completion_pending_ = false;
         text_active_ = false;
+        direct_ascii_paste_ = false;
         temporary_intent_ = false;
+    }
+    if (direct_ascii_paste_) {
+        direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+        if (!direct_paste_snapshot_.active()) {
+            text_active_ = false;
+            direct_ascii_paste_ = false;
+        }
     }
     if (snapshot.recoverable_transport &&
         (state_ == InputState::recovering || pending_special_ ||
@@ -334,7 +342,7 @@ void InputRouter::tick(const Clock::time_point now) {
             if (!submit(edge)) { special_steps_.clear(); return; }
         }
     }
-    if (text_active_) {
+    if (text_active_ && !direct_ascii_paste_) {
         // One text edge is admitted only after the previous ordinary report has
         // completed at the control sink. This prevents synthetic text from
         // filling the bounded serial queue.
@@ -371,8 +379,12 @@ void InputRouter::tick(const Clock::time_point now) {
 }
 
 void InputRouter::begin_release() noexcept {
+    if (direct_ascii_paste_) {
+        sink_.cancel_ascii_paste();
+        direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    }
     pointer_ = {};
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; temporary_intent_ = false;
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; direct_ascii_paste_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; temporary_intent_ = false;
     sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -385,7 +397,13 @@ void InputRouter::release() noexcept { if (state_ != InputState::preview || inje
 void InputRouter::focus_lost() noexcept { begin_release(); }
 void InputRouter::minimized() noexcept { begin_release(); }
 void InputRouter::video_stale() noexcept { video_fresh_ = false; if (sink_.snapshot().recoverable_transport) recover(); else begin_release(); }
-void InputRouter::fail() noexcept { pointer_ = {}; sink_.release_all(); release_requested_ = true; state_ = InputState::fault; }
+void InputRouter::fail() noexcept {
+    if (direct_ascii_paste_) {
+        sink_.cancel_ascii_paste();
+        direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    }
+    pointer_ = {}; sink_.release_all(); release_requested_ = true; state_ = InputState::fault;
+}
 void InputRouter::clear_fault() noexcept {
     if (state_ == InputState::fault && sink_ready_released()) {
         release_requested_ = false;
@@ -417,10 +435,26 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     scheduled_text_gestures_ = 0;
     text_active_ = true;
     temporary_intent_ = true;
-    if (sink_.snapshot().recoverable_transport) {
-        if (!video_fresh_) { cancel_text(); return text_result_; }
-        ++intent_; revision_ = 0; synchronize(now);
+    direct_ascii_paste_ = !sink_.snapshot().recoverable_transport;
+    direct_paste_snapshot_ = {};
+    if (direct_ascii_paste_) {
+        // The local serial worker owns the complete mapped job and its ACK-derived progress.
+        AsciiPasteJob job;
+        job.gestures.reserve(text_gestures_.size());
+        for (auto& gesture : text_gestures_) job.gestures.push_back(std::move(gesture.edges));
+        text_gestures_.clear();
+        if (sink_.start_ascii_paste(std::move(job)) != SubmitResult::accepted) {
+            text_active_ = false;
+            direct_ascii_paste_ = false;
+            temporary_intent_ = false;
+            text_result_.error = TextPasteError::unsupported;
+        } else {
+            direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+        }
+        return text_result_;
     }
+    if (!video_fresh_) { cancel_text(); return text_result_; }
+    ++intent_; revision_ = 0; synchronize(now);
     return text_result_;
 }
 
@@ -429,6 +463,11 @@ void InputRouter::cancel_text() noexcept {
 }
 
 TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
+    if (direct_ascii_paste_ || direct_paste_snapshot_.state != AsciiPasteState::idle) {
+        const auto& paste = direct_paste_snapshot_;
+        return {text_result_.error, text_result_.source_bytes, text_result_.normalized_characters,
+                paste.total_gestures, paste.completed_gestures, paste.active(), false};
+    }
     return {text_result_.error, text_result_.source_bytes, text_result_.normalized_characters,
             text_result_.gestures.size(), scheduled_text_gestures_, text_active_,
             text_active_ && !special_steps_.empty()};

@@ -175,6 +175,9 @@ private:
     std::uint64_t text_inflight_sequence_{};
     std::size_t scheduled_text_gestures_{};
     bool text_active_{};
+    // Local sinks own the mapped paste and report ACK-derived progress.
+    bool direct_ascii_paste_{};
+    AsciiPasteSnapshot direct_paste_snapshot_{};
     bool text_completion_pending_{};
     TextMappingResult text_result_;
 };
