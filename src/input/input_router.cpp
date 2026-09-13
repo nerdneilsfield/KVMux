@@ -137,7 +137,7 @@ void InputRouter::handle_key(const InputKey& key) {
     }
 
     if (key.usb_usage == host_usage_) {
-        if (key.pressed && (capture_intended() || special_active())) {
+        if (key.pressed && (capture_intended() || injected_active())) {
             swallowed_host_releases_.insert(key.usb_usage);
             begin_release();
         } else if (!key.pressed) {
@@ -272,7 +272,7 @@ void InputRouter::recover() noexcept {
     if (!capture_intended()) return;
     state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_gestures_.clear(); next_text_gesture_ = 0; pointer_ = {};
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = 0; pointer_ = {};
 }
 void InputRouter::synchronize(Clock::time_point now) {
     const auto snapshot = sink_.snapshot();
@@ -292,7 +292,9 @@ void InputRouter::synchronize(Clock::time_point now) {
                 barrier_epoch_ = snapshot.epoch;
                 if (pending_special_) {
                     auto keys = *pending_special_; pending_special_.reset(); schedule_special(keys, now);
-                } else state_ = InputState::captured;
+                } else if (!text_active_) {
+                    state_ = InputState::captured;
+                }
                 return;
             }
         } else if (snapshot.epoch != sync_->epoch || now - sync_at_ >= std::chrono::milliseconds(500)) sync_.reset();
@@ -315,8 +317,18 @@ void InputRouter::tick(const Clock::time_point now) {
     } else if (state_ == InputState::releasing && snapshot.release_confirmed) {
         state_ = InputState::preview; release_requested_ = false;
     }
-    if (snapshot.recoverable_transport && (state_ == InputState::recovering || pending_special_)) synchronize(now);
-    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size()) {
+    if (text_completion_pending_) {
+        text_completion_pending_ = false;
+        text_active_ = false;
+        temporary_intent_ = false;
+    }
+    if (snapshot.recoverable_transport &&
+        (state_ == InputState::recovering || pending_special_ ||
+         (text_active_ && barrier_epoch_ != snapshot.epoch))) {
+        synchronize(now);
+    }
+    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size() &&
+        (!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch)) {
         schedule_text(now);
     }
     while (!special_steps_.empty() && special_steps_.front().due <= now) {
@@ -326,8 +338,8 @@ void InputRouter::tick(const Clock::time_point now) {
         }
     }
     if (text_active_ && special_steps_.empty() && next_text_gesture_ == text_gestures_.size()) {
-        text_active_ = false;
-        temporary_intent_ = false;
+        // Keep the temporary lease through this tick so the final up edges can drain.
+        text_completion_pending_ = true;
     }
     if (temporary_intent_ && !pending_special_ && special_steps_.empty() && !text_active_) {
         // Keep the final up edges inside the active lease until the next UI turn.
@@ -337,7 +349,7 @@ void InputRouter::tick(const Clock::time_point now) {
 
 void InputRouter::begin_release() noexcept {
     pointer_ = {};
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_gestures_.clear(); next_text_gesture_ = 0; temporary_intent_ = false;
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = 0; temporary_intent_ = false;
     sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -346,7 +358,7 @@ void InputRouter::begin_release() noexcept {
     state_ = InputState::releasing;
 }
 
-void InputRouter::release() noexcept { if (state_ != InputState::preview || special_active()) begin_release(); }
+void InputRouter::release() noexcept { if (state_ != InputState::preview || injected_active()) begin_release(); }
 void InputRouter::focus_lost() noexcept { begin_release(); }
 void InputRouter::minimized() noexcept { begin_release(); }
 void InputRouter::video_stale() noexcept { video_fresh_ = false; if (sink_.snapshot().recoverable_transport) recover(); else begin_release(); }
@@ -375,6 +387,7 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     }
     text_gestures_ = text_result_.gestures;
     next_text_gesture_ = 0;
+    text_completion_pending_ = false;
     text_active_ = true;
     temporary_intent_ = true;
     if (sink_.snapshot().recoverable_transport) {

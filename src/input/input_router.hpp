@@ -71,6 +71,8 @@ public:
     [[nodiscard]] bool capture_intended() const noexcept { return state_ == InputState::captured || state_ == InputState::recovering || (state_ == InputState::arming && activation_released_); }
 
     [[nodiscard]] bool special_active() const noexcept { return pending_special_.has_value() || !special_steps_.empty(); }
+    // Synthetic input needs the same temporary control lease as special-key gestures.
+    [[nodiscard]] bool injected_active() const noexcept { return special_active() || text_active_; }
     [[nodiscard]] bool text_active() const noexcept { return text_active_; }
     [[nodiscard]] TextMappingResult start_text(std::string_view text, Clock::time_point now = Clock::now());
     void cancel_text() noexcept;
@@ -154,6 +156,7 @@ private:
     std::vector<TextGesture> text_gestures_;
     std::size_t next_text_gesture_{};
     bool text_active_{};
+    bool text_completion_pending_{};
     TextMappingResult text_result_;
 };
 

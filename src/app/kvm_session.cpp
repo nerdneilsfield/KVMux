@@ -136,7 +136,7 @@ bool KvmSession::set_mouse_mode(MouseMode mode) {
 
 void KvmSession::set_video_rect(Rect rect) noexcept { input_.set_video_rect(rect); }
 void KvmSession::handle_input(const InputEvent& event) {
-    control_->set_control_active(input_.capture_intended() || input_.special_active());
+    control_->set_control_active(input_.capture_intended() || input_.injected_active());
     input_.handle(event);
 }
 
@@ -208,16 +208,16 @@ void KvmSession::tick(Clock::time_point now) {
     const auto decoded = video_.snapshot();
     input_.set_video_fresh(fresh && decoded.processed_frames > 0 &&
         decoded.latest_arrival != Clock::time_point{} && now - decoded.latest_arrival < kStaleAfter);
-    if ((input_.capture_intended() || input_.special_active()) &&
+    if ((input_.capture_intended() || input_.injected_active()) &&
         control_->snapshot().state != ControlConnectionState::ready) release = true;
     if (release) {
         if (control_->snapshot().recoverable_transport) input_.video_stale();
         else request_release();
     }
-    control_->set_control_active(input_.capture_intended() || input_.special_active());
+    control_->set_control_active(input_.capture_intended() || input_.injected_active());
     input_.clear_fault();
     input_.tick(now);
-    control_->set_control_active(input_.capture_intended() || input_.special_active());
+    control_->set_control_active(input_.capture_intended() || input_.injected_active());
 }
 
 std::optional<VideoFrame> KvmSession::take_latest_frame() {

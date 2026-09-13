@@ -23,6 +23,10 @@ public:
     }
     void release_all() noexcept override { ++releases; snapshot_value.release_confirmed = false; }
     kvmux::ControlSnapshot snapshot() const override { return snapshot_value; }
+    kvmux::SubmitResult synchronize(kvmux::InputSync value) override {
+        syncs.push_back(std::move(value));
+        return result;
+    }
 
     kvmux::ControlSnapshot snapshot_value = [] {
         kvmux::ControlSnapshot value;
@@ -34,6 +38,7 @@ public:
     }();
     kvmux::SubmitResult result{kvmux::SubmitResult::accepted};
     std::vector<kvmux::ControlEvent> events;
+    std::vector<kvmux::InputSync> syncs;
     int releases{};
 };
 
@@ -378,11 +383,38 @@ int main() {
         require(sink.events.size() == 4, "next text character waits 50ms");
         router.tick(start + std::chrono::milliseconds(50));
         router.tick(start + std::chrono::milliseconds(50));
-        require(sink.events.size() == 8 && !router.text_active(), "second gesture follows at pacing interval");
+        require(sink.events.size() == 8 && router.text_active(),
+                "final text edges retain their temporary lease for this tick");
+        router.tick(start + std::chrono::milliseconds(51));
+        require(!router.text_active(), "text lease releases on the following tick");
         const auto active = router.start_text("ab", start + std::chrono::milliseconds(100));
         require(static_cast<bool>(active), "new text can start after completion");
         router.handle({InputKey{0x04, true, false}});
         require(!router.text_active() && sink.releases > 0, "physical key cancels text with release");
+    }
+
+    {
+        // A relay must apply the empty-state barrier before it accepts synthetic edges.
+        FakeSink sink;
+        sink.snapshot_value.recoverable_transport = true;
+        InputRouter router(sink);
+        router.set_video_fresh(true);
+        const auto start = InputRouter::Clock::now();
+        require(router.start_text("A", start) && router.injected_active(),
+                "text owns the temporary injected-input lease");
+        require(sink.syncs.size() == 1 && sink.events.empty(),
+                "relay text begins with a synchronization barrier, not an edge");
+        router.tick(start + std::chrono::milliseconds(1));
+        require(sink.events.empty(), "text waits for the applied synchronization ACK");
+        const auto& sync = sink.syncs.back();
+        sink.snapshot_value.applied = {true, sync.epoch, sync.intent_generation,
+                                      sync.revision, sync.state};
+        router.tick(start + std::chrono::milliseconds(2));
+        require(sink.events.size() == 4 && router.text_active() && router.injected_active(),
+                "applied ACK admits text edges while final up edges retain the lease");
+        router.tick(start + std::chrono::milliseconds(3));
+        require(!router.text_active() && !router.injected_active(),
+                "text completion releases the lease on the following tick");
     }
 
     return EXIT_SUCCESS;

@@ -137,6 +137,28 @@ const char* text_paste_error(TextPasteError error) {
     }
     return "Could not prepare text.";
 }
+const char* debug_text_paste_error(TextPasteError error) {
+    switch (error) {
+    case TextPasteError::none: return "idle";
+    case TextPasteError::empty: return "error-empty";
+    case TextPasteError::bare_carriage_return: return "error-line-ending";
+    case TextPasteError::non_ascii: return "error-non-ascii";
+    case TextPasteError::unsupported: return "error-unsupported";
+    case TextPasteError::too_long: return "error-too-long";
+    }
+    return "error-unknown";
+}
+const char* debug_recording_state(RecordingState state) {
+    switch (state) {
+    case RecordingState::idle: return "idle";
+    case RecordingState::starting: return "starting";
+    case RecordingState::recording: return "recording";
+    case RecordingState::paused: return "paused";
+    case RecordingState::stopping: return "stopping";
+    case RecordingState::failed: return "failed";
+    }
+    return "unknown";
+}
 std::string mode_text(const CaptureMode& mode) {
     return std::to_string(mode.width) + "x" + std::to_string(mode.height) + " @ " +
         std::to_string(mode.frame_rate.numerator) + "/" + std::to_string(mode.frame_rate.denominator) +
@@ -318,6 +340,8 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::time_point temporary_status_until{};
     std::filesystem::path displayed_snapshot_path;
     std::string displayed_snapshot_error;
+    bool snapshot_queued = false;
+    bool paste_was_active = false, paste_cancelled = false;
     std::string last_status;
 
     while (running) {
@@ -390,13 +414,6 @@ int main(int argc, char** argv) {
             recorded_frame = std::pair{current_frame->generation, current_frame->sequence};
             if (recording.status().state == RecordingState::recording) (void)recording.append(*current_frame);
         }
-        if (debug) {
-            const auto status = std::string("capture=") + capture_state(snapshot.capture.state) +
-                " error=" + snapshot.capture.error + " control=" + control_state(snapshot.control.state) +
-                " error=" + snapshot.control.error + " input=" + input_state(snapshot.input_state) +
-                " session-error=" + snapshot.session_error;
-            if (status != last_status) { spdlog::debug("Session {}", status); last_status = status; }
-        }
         const std::string resolution = current_frame && current_frame->frame
             ? std::to_string(current_frame->frame->width) + "x" + std::to_string(current_frame->frame->height)
             : "--";
@@ -445,15 +462,40 @@ int main(int argc, char** argv) {
         const auto media_status = recording.status();
         if (media_status.snapshot_error != displayed_snapshot_error) {
             displayed_snapshot_error = media_status.snapshot_error;
-            if (!displayed_snapshot_error.empty())
+            if (!displayed_snapshot_error.empty()) {
+                snapshot_queued = false;
                 media_message = "Screenshot error: " + displayed_snapshot_error;
+            }
         }
         if (media_status.last_snapshot_path != displayed_snapshot_path) {
             displayed_snapshot_path = media_status.last_snapshot_path;
             if (!displayed_snapshot_path.empty()) {
+                snapshot_queued = false;
                 temporary_status = "Screenshot saved: " + displayed_snapshot_path.string();
                 temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
+        }
+        if (debug) {
+            const auto paste = session->text_paste_snapshot();
+            const char* paste_status = debug_text_paste_error(paste.error);
+            if (snapshot.text_paste_active) {
+                paste_status = "active";
+                paste_was_active = true;
+            } else if (paste_was_active) {
+                paste_status = paste_cancelled ? "cancelled" : "complete";
+                paste_was_active = false;
+                paste_cancelled = false;
+            }
+            const char* const snapshot_status = !media_status.snapshot_error.empty() ? "failed" :
+                snapshot_queued ? "queued" : !media_status.last_snapshot_path.empty() ? "saved" : "idle";
+            const auto status = std::string("capture=") + capture_state(snapshot.capture.state) +
+                " capture-error=" + (snapshot.capture.error.empty() ? "none" : "present") +
+                " control=" + control_state(snapshot.control.state) +
+                " control-error=" + (snapshot.control.error.empty() ? "none" : "present") +
+                " input=" + input_state(snapshot.input_state) + " paste=" + paste_status +
+                " media=snapshot-" + snapshot_status + " recording=" + debug_recording_state(media_status.state) +
+                " session-error=" + (snapshot.session_error.empty() ? "none" : "present");
+            if (status != last_status) { spdlog::debug("Session {}", status); last_status = status; }
         }
         const bool temporary_status_visible = std::chrono::steady_clock::now() < temporary_status_until;
         if (!temporary_status_visible) temporary_status.clear();
@@ -462,6 +504,7 @@ int main(int argc, char** argv) {
             if (snapshot.text_paste_active) {
                 ImGui::Text("Typing ASCII: %zu characters", paste.normalized_characters);
                 if (ImGui::Button("Cancel typing")) {
+                    paste_cancelled = true;
                     session->cancel_text_paste();
                     text_paste_buffer.fill('\0');
                     text_paste_removed = 0;
@@ -523,6 +566,7 @@ int main(int argc, char** argv) {
             ImGui::BeginDisabled(!valid_visible_cpu_frame);
             if (ImGui::MenuItem("Save screenshot")) {
                 if (recording.snapshot(*current_frame)) {
+                    snapshot_queued = true;
                     temporary_status = "Screenshot queued.";
                     temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
                     ImGui::CloseCurrentPopup();
