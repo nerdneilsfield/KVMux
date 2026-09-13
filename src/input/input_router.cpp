@@ -327,6 +327,12 @@ void InputRouter::tick(const Clock::time_point now) {
          (text_active_ && barrier_epoch_ != snapshot.epoch))) {
         synchronize(now);
     }
+    while (!special_steps_.empty() && special_steps_.front().due <= now) {
+        auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
+        for (const auto edge : step.edges) {
+            if (!submit(edge)) { special_steps_.clear(); return; }
+        }
+    }
     if (text_active_) {
         // One text edge is admitted only after the previous ordinary report has
         // completed at the control sink. This prevents synthetic text from
