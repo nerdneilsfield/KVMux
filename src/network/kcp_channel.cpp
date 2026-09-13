@@ -23,9 +23,9 @@ KcpChannel::KcpChannel(std::uint32_t conversation) : kcp_(ikcp_create(conversati
     ikcp_nodelay(kcp_, 1, 10, 2, 1);
 }
 KcpChannel::~KcpChannel() { if (kcp_) ikcp_release(kcp_); }
-SubmitResult KcpChannel::submit(std::span<const std::uint8_t> message) {
-    if (failed_ || message.empty() || message.size() > max_message) return SubmitResult::invalid;
-    if (ikcp_waitsnd(kcp_) >= static_cast<int>(window)) return SubmitResult::full;
+SubmitResult KcpChannel::submit(std::span<const std::uint8_t> message, unsigned reserve_slots) {
+    if (failed_ || message.empty() || message.size() > max_message || reserve_slots >= window) return SubmitResult::invalid;
+    if (ikcp_waitsnd(kcp_) >= static_cast<int>(window - reserve_slots)) return SubmitResult::full;
     if (ikcp_send(kcp_, reinterpret_cast<const char*>(message.data()), static_cast<int>(message.size())) < 0) {
         failed_ = true;
         return SubmitResult::invalid;

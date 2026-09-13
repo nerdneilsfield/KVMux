@@ -43,6 +43,15 @@ void bounds() {
     check(sender.submit(Bytes(1025)) == SubmitResult::invalid);
     for (int i = 0; i < 128; ++i) check(sender.submit(Bytes(1024, 7)) == SubmitResult::accepted);
     check(sender.submit(Bytes{8}) == SubmitResult::full);
+
+    // Optional traffic may fill only 127 slots while a paste lifecycle message
+    // needs the final bounded slot. Its Commit can then enter immediately.
+    KcpChannel reserved(42);
+    for (int i = 0; i < 127; ++i)
+        check(reserved.submit(Bytes{7}, 1) == SubmitResult::accepted);
+    check(reserved.submit(Bytes{7}, 1) == SubmitResult::full);
+    check(reserved.submit(Bytes{8}) == SubmitResult::accepted);
+
     sender.update(0);
     auto packets = sender.take_datagrams();
     check(packets.size() == 128);

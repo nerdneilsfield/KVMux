@@ -365,25 +365,22 @@ struct RelayClient::Impl {
                     }
                 }
             }
-            auto submit = [&](const wire::Control& value) {
+            auto submit = [&](const wire::Control& value, unsigned reserve_slots = 0) {
                 auto bytes = wire::encode_control(value, wire::Direction::client_to_server);
-                return bytes && kcp->submit(*bytes) == SubmitResult::accepted;
+                return bytes && kcp->submit(*bytes, reserve_slots) == SubmitResult::accepted;
             };
             if (auto cancellation = session.pending_cancel(); cancellation && cancellation->intent != reliable_cancel) {
                 if (submit(*cancellation)) reliable_cancel = cancellation->intent;
             }
+            bool paste_lifecycle_pending = false;
             {
                 std::lock_guard lock(mutex);
+                paste_lifecycle_pending = paste && paste->epoch == control.epoch && paste->intent == intent &&
+                    (paste->cancel_pending || !paste->snapshot.terminal() || paste->snapshot.state == PasteUploadState::executing);
                 if (requested_sync && ready(now) && active && challenge_at > sync_requested_at) {
                     const auto& request = *requested_sync;
                     wire::Sync value{request.epoch, request.intent_generation, request.revision, session.latest_challenge(), wire_sequence, request.state};
-                    if (submit(value)) { pending_sync = value; requested_sync.reset(); }
-                }
-                for (unsigned i = 0; i < 32 && barrier && ready(now) && active && !events.empty(); ++i) {
-                    auto& event = events.front();
-                    wire::Edge edge{control.epoch, intent, wire_sequence + 1, event.sequence, session.latest_challenge(), event.payload};
-                    if (!submit(edge)) break;
-                    ++wire_sequence; events.pop_front();
+                    if (submit(value, paste_lifecycle_pending ? 1 : 0)) { pending_sync = value; requested_sync.reset(); }
                 }
                 if (paste && paste->epoch == control.epoch && paste->intent == intent) {
                     auto& job = *paste;
@@ -400,15 +397,23 @@ struct RelayClient::Impl {
                             const auto count = std::min<std::size_t>(960, job.bytes.size() - offset);
                             wire::PasteChunk chunk{job.snapshot.transaction_id, job.next_chunk,
                                 std::vector<std::uint8_t>(job.bytes.begin() + static_cast<std::ptrdiff_t>(offset), job.bytes.begin() + static_cast<std::ptrdiff_t>(offset + count))};
-                            if (submit(chunk)) ++job.next_chunk;
+                            // The final chunk must leave a slot for PasteCommit.
+                            if (submit(chunk, 1)) ++job.next_chunk;
                         } else if (!job.commit_sent) {
                             if (submit(wire::PasteCommit{job.snapshot.transaction_id})) job.commit_sent = true;
                         }
                     }
                 }
+                for (unsigned i = 0; i < 32 && barrier && ready(now) && active && !events.empty(); ++i) {
+                    auto& event = events.front();
+                    wire::Edge edge{control.epoch, intent, wire_sequence + 1, event.sequence, session.latest_challenge(), event.payload};
+                    if (!submit(edge, paste_lifecycle_pending ? 1 : 0)) break;
+                    ++wire_sequence; events.pop_front();
+                }
             }
-            if (refresh && submit(*refresh)) refresh.reset();
-            if (feedback && submit(*feedback)) feedback.reset();
+            // Feedback is optional and coalesced. Do not let it consume the lifecycle slot.
+            if (!paste_lifecycle_pending && refresh && submit(*refresh, 1)) refresh.reset();
+            if (!paste_lifecycle_pending && feedback && submit(*feedback, 1)) feedback.reset();
             kcp->update(static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()));
             if (kcp->failed()) { fail("KCP queue or transport failure"); break; }
             if (output_index == output.size()) { output = kcp->take_datagrams(); output_index = 0; }

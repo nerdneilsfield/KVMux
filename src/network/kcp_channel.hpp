@@ -17,7 +17,8 @@ public:
     ~KcpChannel();
     KcpChannel(const KcpChannel&) = delete;
     KcpChannel& operator=(const KcpChannel&) = delete;
-    [[nodiscard]] SubmitResult submit(std::span<const std::uint8_t> message);
+    // Keep reserve_slots entries available for a message that must follow this one.
+    [[nodiscard]] SubmitResult submit(std::span<const std::uint8_t> message, unsigned reserve_slots = 0);
     [[nodiscard]] bool input(std::span<const std::uint8_t> packet);
     void update(std::uint32_t monotonic_ms);
     [[nodiscard]] std::vector<std::vector<std::uint8_t>> take_datagrams();
