@@ -84,10 +84,11 @@ bool InputRouter::sink_ready_released() const {
            value.release_confirmed;
 }
 
-bool InputRouter::submit(ControlPayload payload) {
+std::optional<std::uint64_t> InputRouter::submit(ControlPayload payload) {
     const auto snapshot = sink_.snapshot();
+    const auto sequence = ++sequence_;
     const auto result = sink_.submit(
-        {snapshot.epoch, ++sequence_, Clock::now(), payload});
+        {snapshot.epoch, sequence, Clock::now(), payload});
     if (result != SubmitResult::accepted) { if (snapshot.recoverable_transport) recover(); else fail(); return false; }
     std::visit([this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
@@ -104,7 +105,7 @@ bool InputRouter::submit(ControlPayload payload) {
             pointer_.submitted_relative = {static_cast<int>(value.dx), static_cast<int>(value.dy)};
         }
     }, payload);
-    return true;
+    return sequence;
 }
 
 void InputRouter::handle(const InputEvent& event) {
@@ -272,7 +273,7 @@ void InputRouter::recover() noexcept {
     if (!capture_intended()) return;
     state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_pending_observed_ = false; text_completion_floor = 0; pointer_ = {};
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; pointer_ = {};
 }
 void InputRouter::synchronize(Clock::time_point now) {
     const auto snapshot = sink_.snapshot();
@@ -338,21 +339,21 @@ void InputRouter::tick(const Clock::time_point now) {
         // completed at the control sink. This prevents synthetic text from
         // filling the bounded serial queue.
         if (text_edge_inflight_) {
-            if (snapshot.ordinary_input_pending) { text_pending_observed_ = true; return; }
-            // A sink can report the completed state directly without exposing
-            // an intermediate pending snapshot.
+            // Completion is correlated to this exact source event. A pending
+            // flag can arrive late (or be briefly false) across the relay.
+            if (snapshot.epoch != text_inflight_epoch_ ||
+                snapshot.completed_ordinary_sequence < text_inflight_sequence_) return;
             text_edge_inflight_ = false;
-            text_pending_observed_ = false;
         }
         if ((!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch) &&
             next_text_gesture_ < text_gestures_.size()) {
             const auto& gesture = text_gestures_[next_text_gesture_];
             const auto edge = gesture.edges[next_text_edge_];
-            const auto floor = snapshot.completed_ordinary_sequence;
-            if (!submit(edge)) return;
-            text_completion_floor = floor;
+            const auto submitted = submit(edge);
+            if (!submitted) return;
+            text_inflight_epoch_ = snapshot.epoch;
+            text_inflight_sequence_ = *submitted;
             text_edge_inflight_ = true;
-            text_pending_observed_ = snapshot.ordinary_input_pending;
             if (++next_text_edge_ == gesture.edges.size()) {
                 next_text_edge_ = 0;
                 ++next_text_gesture_; ++scheduled_text_gestures_;
@@ -371,7 +372,7 @@ void InputRouter::tick(const Clock::time_point now) {
 
 void InputRouter::begin_release() noexcept {
     pointer_ = {};
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_pending_observed_ = false; text_completion_floor = 0; temporary_intent_ = false;
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_inflight_epoch_ = text_inflight_sequence_ = 0; temporary_intent_ = false;
     sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -411,8 +412,7 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     next_text_gesture_ = 0;
     next_text_edge_ = 0;
     text_edge_inflight_ = false;
-    text_pending_observed_ = false;
-    text_completion_floor = 0;
+    text_inflight_epoch_ = text_inflight_sequence_ = 0;
     text_completion_pending_ = false;
     scheduled_text_gestures_ = 0;
     text_active_ = true;

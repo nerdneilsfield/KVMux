@@ -39,16 +39,16 @@ void envelope_golden_offsets_and_1200_ceiling() {
 void control_golden_vectors_and_exact_lengths() {
     using D=w::Direction; auto c=D::client_to_server,s=D::server_to_client;
     DesiredInputState state; state.keys={4,0,5,0,0,0}; state.absolute_x=4095;
-    control(w::Status{1,ControlConnectionState::ready,true,true,2},s,1,20);
+    control(w::Status{1,ControlConnectionState::ready,true,true,2,false,9},s,1,28);
     control(w::Sync{1,2,3,4,5,state},c,2,53); control(w::StateAck{1,2,3,5,state},s,3,45);
-    control(w::Edge{1,2,3,4,KeyEdge{4,true}},c,4,35);
+    control(w::Edge{1,2,3,4,5,KeyEdge{4,true}},c,4,43);
     control(w::Cancel{2,w::CancelReason::host},c,5,16);
     control(w::RefreshRequest{1,relay::MediaReason::skipped_access_unit},c,6,16);
     control(w::MediaFeedback{1,{}},c,7,88);
     auto sync=*w::encode_control(w::Sync{1,2,3,4,5,state},c);
     check(sync[11]==1&&sync[19]==2&&sync[27]==3&&sync[35]==4&&sync[43]==5&&sync[45]==4&&sync[47]==5&&sync[53]==0x0f&&sync[54]==0xff);
-    auto status=*w::encode_control(w::Status{1,ControlConnectionState::ready,true,true,2},s);
-    check(status==Bytes({1,0,0,20,0,0,0,0,0,0,0,1,4,3,0,0,0,0,0,0,0,0,0,2}));
+    auto status=*w::encode_control(w::Status{1,ControlConnectionState::ready,true,true,2,false,9},s);
+    check(status==Bytes({1,0,0,28,0,0,0,0,0,0,0,1,4,3,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,9}));
     for(auto offset:{12,13,14,15}) { auto bad=status; bad[static_cast<std::size_t>(offset)]=255; check(!w::decode_control(bad,s)); }
     auto refresh=*w::encode_control(w::RefreshRequest{1,relay::MediaReason::none},c);
     for(auto reason:{15,16,255}) { refresh[12]=static_cast<std::uint8_t>(reason); check(!w::decode_control(refresh,c)); }
@@ -81,14 +81,14 @@ void desired_state_matches_serial_domain() {
 void edge_binary64_roundtrip() {
     using D=w::Direction; auto d=D::client_to_server;
     double precise=0.123456789012345; std::vector<ControlPayload> payloads{AbsoluteMotion{precise,-0.0},RelativeMotion{-0.125,precise},ButtonEdge{2,true,precise,1},VerticalWheel{-0.5,precise,0}};
-    for(auto& payload:payloads) { w::Edge e{1,2,3,4,payload}; auto b=w::encode_control(e,d); check(b.has_value()); auto v=w::decode_control(*b,d); check(v&&w::encode_control(*v,d)==b); }
-    auto encoded=*w::encode_control(w::Edge{1,2,3,4,AbsoluteMotion{precise,-0.0}},d);
+    for(auto& payload:payloads) { w::Edge e{1,2,3,4,5,payload}; auto b=w::encode_control(e,d); check(b.has_value()); auto v=w::decode_control(*b,d); check(v&&w::encode_control(*v,d)==b); }
+    auto encoded=*w::encode_control(w::Edge{1,2,3,3,4,AbsoluteMotion{precise,-0.0}},d);
     auto decoded=std::get<AbsoluteMotion>(std::get<w::Edge>(*w::decode_control(encoded,d)).payload);
     check(std::bit_cast<std::uint64_t>(decoded.x)==std::bit_cast<std::uint64_t>(precise)); check(std::signbit(decoded.y));
-    for(auto bad:{std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) check(!w::encode_control(w::Edge{1,2,3,4,RelativeMotion{bad,0}},d));
-    check(!w::encode_control(w::Edge{1,2,3,4,AbsoluteMotion{1.1,0}},d));
-    check(!w::encode_control(w::Edge{1,2,3,4,KeyEdge{0,true}},d)); check(!w::encode_control(w::Edge{1,2,3,4,ButtonEdge{3,true,0,0}},d));
-    auto key=*w::encode_control(w::Edge{1,2,3,4,KeyEdge{0xe7,true}},d); key.back()=2; check(!w::decode_control(key,d));
+    for(auto bad:{std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) check(!w::encode_control(w::Edge{1,2,3,3,4,RelativeMotion{bad,0}},d));
+    check(!w::encode_control(w::Edge{1,2,3,3,4,AbsoluteMotion{1.1,0}},d));
+    check(!w::encode_control(w::Edge{1,2,3,3,4,KeyEdge{0,true}},d)); check(!w::encode_control(w::Edge{1,2,3,3,4,ButtonEdge{3,true,0,0}},d));
+    auto key=*w::encode_control(w::Edge{1,2,3,3,4,KeyEdge{0xe7,true}},d); key.back()=2; check(!w::decode_control(key,d));
     encoded[37]=0x7f; encoded[38]=0xf0; std::fill(encoded.begin()+39,encoded.begin()+45,0); check(!w::decode_control(encoded,d));
 }
 int main() {

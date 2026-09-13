@@ -20,6 +20,7 @@ class FakeSink final : public kvmux::ControlSink {
 public:
     kvmux::SubmitResult submit(kvmux::ControlEvent event) override {
         events.push_back(std::move(event));
+        if (auto_complete) snapshot_value.completed_ordinary_sequence = events.back().sequence;
         return result;
     }
     void release_all() noexcept override { ++releases; snapshot_value.release_confirmed = false; }
@@ -41,6 +42,7 @@ public:
     std::vector<kvmux::ControlEvent> events;
     std::vector<kvmux::InputSync> syncs;
     int releases{};
+    bool auto_complete{true};
 };
 
 void capture(kvmux::InputRouter& router, FakeSink& sink, double x = 50, double y = 50) {
@@ -389,6 +391,24 @@ int main() {
         require(static_cast<bool>(active), "new text can start after completion");
         router.handle({InputKey{0x04, true, false}});
         require(!router.text_active() && sink.releases > 0, "physical key cancels text with release");
+    }
+
+    {
+        // A stale false pending flag is not an ACK. Only the submitted source
+        // sequence may admit the next synthetic edge.
+        FakeSink sink;
+        sink.auto_complete = false;
+        InputRouter router(sink);
+        router.set_video_fresh(true);
+        const auto start = InputRouter::Clock::now();
+        require(static_cast<bool>(router.start_text("ab", start)), "text starts for sequence ACK test");
+        router.tick(start);
+        require(sink.events.size() == 1, "first edge submitted");
+        for (int i = 1; i < 10; ++i) router.tick(start + std::chrono::milliseconds(i));
+        require(sink.events.size() == 1, "false pending without sequence ACK admits no edge");
+        sink.snapshot_value.completed_ordinary_sequence = sink.events.back().sequence;
+        router.tick(start + std::chrono::milliseconds(10));
+        require(sink.events.size() == 2, "matching sequence ACK admits next edge");
     }
 
     {

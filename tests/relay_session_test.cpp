@@ -92,7 +92,7 @@ void server_issue_time_not_receipt_lease() {
     check(f.s.execution_deadline()==at(250)); f.barrier(249);
     check(count(f.s.tick(at(250)),Kind::revoke_input)==1); check(!f.s.barrier_complete());
     check(count(f.s.tick(at(251)),Kind::revoke_input)==0);
-    auto old=w::Edge{7,1,1,1,RelativeMotion{0.25,-0.5}};
+    auto old=w::Edge{7,1,1,1,1,RelativeMotion{0.25,-0.5}};
     f.proof(300,300); check(f.s.check_edge(old,at(300))==InputGate::rejected);
     auto request=f.sync(2); f.s.sync_submitted(request,kvmux::SubmitResult::accepted,at(300)); f.apply(request,300);
     check(f.s.check_edge(old,at(300))==InputGate::rejected);
@@ -123,7 +123,7 @@ void cancellation_overtakes_kcp_and_tombstones() {
     auto first=f.s.on_datagram(f.client,body,at(10)); check(count(first,Kind::revoke_input)==1&&f.s.canceled_through()==1);
     check(count(f.s.on_datagram(f.client,body,at(11)),Kind::revoke_input)==0);
     check(f.s.check_sync(old,at(11))==InputGate::rejected);
-    check(f.s.check_edge({7,1,1,1,ButtonEdge{0,true,0,0}},at(11))==InputGate::rejected);
+    check(f.s.check_edge({7,1,1,1,1,ButtonEdge{0,true,0,0}},at(11))==InputGate::rejected);
     check(packet(f.c.tick(at(60)),w::EnvelopeKind::cancel)==body);
     f.c.on_datagram(f.server,packet(first,w::EnvelopeKind::cancel_ack),at(60)); check(!f.c.pending_cancel());
     f.c.set_intent(1,true,true,100); f.proof(100,100); check(!f.s.execution_deadline());
@@ -148,7 +148,7 @@ void immutable_state_ack_and_barrier() {
     f.snapshot.applied.known=true; f.snapshot.applied.revision=2; check(count(f.s.update_control_snapshot(f.snapshot,at(2)),Kind::state_ack)==0);
     f.snapshot.applied.revision=1; f.snapshot.applied.state.buttons=2; check(count(f.s.update_control_snapshot(f.snapshot,at(3)),Kind::state_ack)==0);
     f.apply(request,4); check(f.s.check_sync(request,at(4))==InputGate::duplicate);
-    w::Edge edge{7,1,1,1,KeyEdge{4,false}};
+    w::Edge edge{7,1,1,1,1,KeyEdge{4,false}};
     check(f.s.check_edge(edge,at(5))==InputGate::allowed); f.s.edge_submitted(edge,kvmux::SubmitResult::accepted,at(5));
     f.snapshot.applied.known=false; f.s.update_control_snapshot(f.snapshot,at(6)); check(f.s.barrier_complete());
     f.snapshot.epoch=8; check(count(f.s.update_control_snapshot(f.snapshot,at(7)),Kind::revoke_input)==1);
@@ -174,7 +174,7 @@ void immutable_state_ack_and_barrier() {
 }
 void edge_floor_gap_and_no_uncertain_replay() {
     Fixture f; f.establish(); f.proof(0,0); auto sync=f.sync(1,10); f.s.sync_submitted(sync,kvmux::SubmitResult::accepted,at(0)); f.apply(sync,0);
-    w::Edge e{7,1,10,1,RelativeMotion{0.5,-0.25}}; check(f.s.check_edge(e,at(1))==InputGate::duplicate);
+    w::Edge e{7,1,10,10,1,RelativeMotion{0.5,-0.25}}; check(f.s.check_edge(e,at(1))==InputGate::duplicate);
     e.sequence=12; check(f.s.check_edge(e,at(1))==InputGate::recovery_required); check(count(f.s.edge_submitted(e,kvmux::SubmitResult::not_ready,at(1)),Kind::revoke_input)==1);
     f.proof(50,50); sync=f.sync(2,12); f.s.sync_submitted(sync,kvmux::SubmitResult::accepted,at(50)); f.apply(sync,50);
     e.challenge=2; check(f.s.check_edge(e,at(51))==InputGate::duplicate);

@@ -123,7 +123,7 @@ private:
     };
 
     [[nodiscard]] bool sink_ready_released() const;
-    bool submit(ControlPayload payload);
+    std::optional<std::uint64_t> submit(ControlPayload payload);
     void handle_key(const InputKey& key);
     void handle_pointer(const InputPointerMotion& motion);
     void handle_relative(const InputRelativeMotion& motion);
@@ -171,8 +171,8 @@ private:
     std::size_t next_text_gesture_{};
     std::size_t next_text_edge_{};
     bool text_edge_inflight_{};
-    bool text_pending_observed_{};
-    std::uint64_t text_completion_floor{};
+    std::uint64_t text_inflight_epoch_{};
+    std::uint64_t text_inflight_sequence_{};
     std::size_t scheduled_text_gestures_{};
     bool text_active_{};
     bool text_completion_pending_{};

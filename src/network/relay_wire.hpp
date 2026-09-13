@@ -25,10 +25,10 @@ struct Proof { std::uint64_t challenge{}, intent{}; bool active{}, video_fresh{}
 enum class CancelReason { focus, host, release, disconnect };
 struct Cancel { std::uint64_t intent{}; CancelReason reason{CancelReason::release}; };
 using RawBody = std::variant<Hello, Welcome, Busy, Challenge, Proof, Cancel>;
-struct Status { std::uint64_t epoch{}; ControlConnectionState connection{}; bool usb_ready{}, release_confirmed{}; std::uint64_t canceled_through{}; bool ordinary_input_pending{}; };
+struct Status { std::uint64_t epoch{}; ControlConnectionState connection{}; bool usb_ready{}, release_confirmed{}; std::uint64_t canceled_through{}; bool ordinary_input_pending{}; std::uint64_t completed_ordinary_sequence{}; };
 struct Sync { std::uint64_t epoch{}, intent{}, revision{}, challenge{}, edge_floor{}; DesiredInputState state; };
 struct StateAck { std::uint64_t epoch{}, intent{}, revision{}, edge_floor{}; DesiredInputState state; };
-struct Edge { std::uint64_t epoch{}, intent{}, sequence{}, challenge{}; ControlPayload payload; };
+struct Edge { std::uint64_t epoch{}, intent{}, sequence{}, source_sequence{}, challenge{}; ControlPayload payload; };
 struct RefreshRequest { std::uint64_t generation{}; MediaReason reason{MediaReason::none}; };
 struct MediaFeedback { std::uint64_t generation{}; MediaStats stats; };
 using Control = std::variant<Status, Sync, StateAck, Edge, Cancel, RefreshRequest, MediaFeedback>;

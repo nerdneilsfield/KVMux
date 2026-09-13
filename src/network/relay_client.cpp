@@ -311,9 +311,11 @@ struct RelayClient::Impl {
                     if (value->epoch != control.epoch || value->connection != ControlConnectionState::ready ||
                         !value->usb_ready || !value->release_confirmed || intent <= value->canceled_through) suspend();
                     if (cancel_inflight && value->canceled_through >= intent) cancel_inflight = false;
+                    const bool same_epoch = value->epoch == control.epoch;
                     control.epoch = value->epoch; control.state = value->connection;
                     control.target_usb_ready = value->usb_ready; control.release_confirmed = value->release_confirmed;
                     control.ordinary_input_pending = value->ordinary_input_pending;
+                    control.completed_ordinary_sequence = same_epoch ? value->completed_ordinary_sequence : 0;
                     status_at = now;
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
@@ -340,7 +342,7 @@ struct RelayClient::Impl {
                 }
                 for (unsigned i = 0; i < 32 && barrier && ready(now) && active && !events.empty(); ++i) {
                     auto& event = events.front();
-                    wire::Edge edge{control.epoch, intent, wire_sequence + 1, session.latest_challenge(), event.payload};
+                    wire::Edge edge{control.epoch, intent, wire_sequence + 1, event.sequence, session.latest_challenge(), event.payload};
                     if (!submit(edge)) break;
                     ++wire_sequence; events.pop_front();
                 }
@@ -440,7 +442,7 @@ kvmux::SubmitResult RelayClient::submit(ControlEvent event) {
     if (!p.ready(Clock::now()) || !p.barrier || !p.active || event.epoch != p.control.epoch || event.sequence <= p.last_source_sequence)
         return kvmux::SubmitResult::not_ready;
     if (p.events.size() >= 128) { p.suspend(); return kvmux::SubmitResult::overloaded; }
-    if (!wire::encode_control(wire::Edge{event.epoch, p.intent, 1, 1, event.payload}, wire::Direction::client_to_server))
+    if (!wire::encode_control(wire::Edge{event.epoch, p.intent, 1, event.sequence, 1, event.payload}, wire::Direction::client_to_server))
         return kvmux::SubmitResult::not_ready;
     p.last_source_sequence = event.sequence;
     // Source IDs are diagnostic only; wire IDs are assigned after adjacent merging.

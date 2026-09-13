@@ -316,7 +316,7 @@ struct RelayServer::Impl {
                 } else if (auto value = std::get_if<wire::Edge>(&*message)) {
                     auto gate = session.check_edge(*value, now);
                     if (gate == InputGate::allowed) actions(session.edge_submitted(*value,
-                        sink.submit({value->epoch, value->sequence, now, value->payload}), now));
+                        sink.submit({value->epoch, value->source_sequence, now, value->payload}), now));
                     else if (gate == InputGate::recovery_required) actions(session.edge_submitted(*value, kvmux::SubmitResult::not_ready, now));
                 } else if (auto value = std::get_if<wire::MediaFeedback>(&*message)) {
                     if (admission && admission->feedback(value->generation, value->stats, now)) {
@@ -331,7 +331,7 @@ struct RelayServer::Impl {
             now = Clock::now();
             if (now - status_at >= 50ms) {
                 const auto value = sink.snapshot();
-                status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through(), value.ordinary_input_pending};
+                status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through(), value.ordinary_input_pending, value.completed_ordinary_sequence};
                 status_at = now;
             }
             auto submit = [&](const wire::Control& value) {

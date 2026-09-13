@@ -109,6 +109,8 @@ int main() {
             return frame.command == 0x02 && !frame.data.empty() && frame.data[0] == 1;
         });
     }), "key down sent");
+    require(eventually([&] { return sink.snapshot().completed_ordinary_sequence == 1; }),
+            "ordinary completion reports the ACKed ControlEvent sequence");
 
     // Release while a keyboard transaction awaits its ACK. The next epoch
     // must not rebuild a report from the previous held modifiers or keys.
