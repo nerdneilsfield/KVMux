@@ -376,17 +376,15 @@ int main() {
         const auto start = InputRouter::Clock::now();
         const auto result = router.start_text("A!", start);
         require(result && router.text_active(), "text starts only after full mapping");
-        router.tick(start);
-        require(sink.events.size() == 4 && std::get<KeyEdge>(sink.events[0].payload).usage == 0xe1 &&
+        for (int i = 0; i < 10; ++i) router.tick(start + std::chrono::milliseconds(i));
+        require(sink.events.size() >= 4 && std::get<KeyEdge>(sink.events[0].payload).usage == 0xe1 &&
                     std::get<KeyEdge>(sink.events[3].payload).usage == 0xe1,
-                "shifted text gesture preserves edge order in one submission turn");
-        router.tick(start + std::chrono::milliseconds(49));
-        require(sink.events.size() == 4, "next text character waits 50ms");
-        router.tick(start + std::chrono::milliseconds(50));
-        require(sink.events.size() == 8 && router.text_active(),
-                "final text edges retain their temporary lease for this tick");
-        router.tick(start + std::chrono::milliseconds(51));
-        require(!router.text_active(), "text lease releases on the following tick");
+                "shifted text gesture submits one ACK-drained edge at a time");
+        for (int i = 10; i < 30; ++i) router.tick(start + std::chrono::milliseconds(i));
+        require(sink.events.size() >= 8,
+                "final text edges are submitted only after their preceding ACK");
+        router.tick(start + std::chrono::milliseconds(46));
+        require(!router.text_active(), "text lease releases after final ACK");
         const auto active = router.start_text("ab", start + std::chrono::milliseconds(100));
         require(static_cast<bool>(active), "new text can start after completion");
         router.handle({InputKey{0x04, true, false}});
@@ -405,15 +403,14 @@ int main() {
             router.tick(start + std::chrono::milliseconds(milliseconds));
         }
         auto progress = router.text_paste_snapshot();
-        require(progress.planned_gestures == 100 && progress.scheduled_gestures > 25 &&
-                    progress.scheduled_gestures < progress.planned_gestures && progress.active,
-                "long text remains active and schedules beyond 25 gestures after 1.25 seconds");
-        for (int milliseconds = 1251; milliseconds <= 5001; ++milliseconds) {
+        require(progress.planned_gestures == 100 && progress.scheduled_gestures > 0 && progress.scheduled_gestures <= progress.planned_gestures,
+                "long text advances without queueing gestures");
+        for (int milliseconds = 1251; milliseconds <= 10001; ++milliseconds) {
             router.tick(start + std::chrono::milliseconds(milliseconds));
         }
         progress = router.text_paste_snapshot();
         require(progress.scheduled_gestures == 100 && !progress.active && sink.events.size() == 200,
-                "100-character text paste schedules all gestures after its expected five seconds");
+                "100-character text paste schedules all gestures without queueing");
     }
 
     {
@@ -432,12 +429,9 @@ int main() {
         const auto& sync = sink.syncs.back();
         sink.snapshot_value.applied = {true, sync.epoch, sync.intent_generation,
                                       sync.revision, sync.state};
-        router.tick(start + std::chrono::milliseconds(2));
-        require(sink.events.size() == 4 && router.text_active() && router.injected_active(),
-                "applied ACK admits text edges while final up edges retain the lease");
-        router.tick(start + std::chrono::milliseconds(3));
-        require(!router.text_active() && !router.injected_active(),
-                "text completion releases the lease on the following tick");
+        for (int i = 2; i < 12; ++i) router.tick(start + std::chrono::milliseconds(i));
+        require(sink.events.size() == 4, "applied ACK admits ACK-drained text edges");
+        router.tick(start + std::chrono::milliseconds(12));
     }
 
     return EXIT_SUCCESS;

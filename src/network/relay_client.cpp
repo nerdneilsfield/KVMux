@@ -313,6 +313,7 @@ struct RelayClient::Impl {
                     if (cancel_inflight && value->canceled_through >= intent) cancel_inflight = false;
                     control.epoch = value->epoch; control.state = value->connection;
                     control.target_usb_ready = value->usb_ready; control.release_confirmed = value->release_confirmed;
+                    control.ordinary_input_pending = value->ordinary_input_pending;
                     status_at = now;
                 } else if (auto value = std::get_if<wire::StateAck>(&*message)) {
                     if (pending_sync && ready(now) && active && value->epoch == control.epoch && value->intent == intent &&
@@ -456,7 +457,7 @@ kvmux::SubmitResult RelayClient::submit(ControlEvent event) {
             }
         }
     }
-    p.control.applied.known = false; p.events.push_back(std::move(event)); return kvmux::SubmitResult::accepted;
+    p.control.applied.known = false; p.control.ordinary_input_pending = true; p.events.push_back(std::move(event)); return kvmux::SubmitResult::accepted;
 }
 ControlSnapshot RelayClient::control_snapshot() const {
     auto& p = *impl_; std::lock_guard lock(p.mutex); auto result = p.control;

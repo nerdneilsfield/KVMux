@@ -169,6 +169,10 @@ private:
     std::vector<SpecialStep> special_steps_;
     std::vector<TextGesture> text_gestures_;
     std::size_t next_text_gesture_{};
+    std::size_t next_text_edge_{};
+    bool text_edge_inflight_{};
+    bool text_pending_observed_{};
+    std::uint64_t text_completion_floor{};
     std::size_t scheduled_text_gestures_{};
     bool text_active_{};
     bool text_completion_pending_{};

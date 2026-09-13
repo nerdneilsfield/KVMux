@@ -331,7 +331,7 @@ struct RelayServer::Impl {
             now = Clock::now();
             if (now - status_at >= 50ms) {
                 const auto value = sink.snapshot();
-                status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through()};
+                status = wire::Status{value.epoch, value.state, value.target_usb_ready, value.release_confirmed, session.canceled_through(), value.ordinary_input_pending};
                 status_at = now;
             }
             auto submit = [&](const wire::Control& value) {

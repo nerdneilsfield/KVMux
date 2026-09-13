@@ -88,6 +88,8 @@ struct Ch9329ControlSink::Impl {
             buttons = 0;
             relative_x = relative_y = wheel = 0.0;
             ordinary_inflight = false;
+            ordinary_sequence = 0;
+            status.ordinary_input_pending = false;
             sync_inflight = false;
             invalidate_sync();
             queue.request_release();
@@ -127,6 +129,8 @@ struct Ch9329ControlSink::Impl {
             std::lock_guard lock(mutex);
             invalidate_sync();
             ordinary_inflight = false;
+            ordinary_sequence = 0;
+            status.ordinary_input_pending = false;
             keyboard.clear(); buttons = 0; relative_x = relative_y = wheel = 0.0;
             status.state = ControlConnectionState::clearing;
             status.release_confirmed = false;
@@ -166,6 +170,7 @@ struct Ch9329ControlSink::Impl {
                 queue.set_ready(true);
                 status.state = ControlConnectionState::ready;
                 status.release_confirmed = true;
+                status.ordinary_input_pending = false;
                 status.error.clear();
             }
         }
@@ -216,7 +221,12 @@ struct Ch9329ControlSink::Impl {
         transaction.reset();
         update_snapshot([&](auto& value) {
             value.last_ack_rtt = rtt;
+            if (ordinary_inflight) {
+                status.completed_ordinary_sequence = ordinary_sequence;
+                ordinary_sequence = 0;
+            }
             ordinary_inflight = false;
+            status.ordinary_input_pending = queue.size() != 0;
         });
 
         if (purpose == Purpose::info) {
@@ -481,6 +491,8 @@ struct Ch9329ControlSink::Impl {
             }
             if (auto event = queue.pop()) {
                 ordinary_inflight = true;
+                ordinary_sequence = event->sequence;
+                status.ordinary_input_pending = true;
                 if (auto frame = event_frame(std::move(*event))) {
                     begin(std::move(frame->first), frame->second, now);
                 }
@@ -529,6 +541,7 @@ struct Ch9329ControlSink::Impl {
     bool sync_started{};
     bool sync_inflight{};
     bool ordinary_inflight{};
+    std::uint64_t ordinary_sequence{};
     std::string port;
     int baud{9600};
     std::uint8_t address{};
@@ -619,6 +632,7 @@ SubmitResult Ch9329ControlSink::submit(ControlEvent event) {
     const auto result = impl_->queue.submit(std::move(event), Clock::now());
     if (result == SubmitResult::accepted || result == SubmitResult::overloaded)
         impl_->invalidate_sync();
+    if (result == SubmitResult::accepted) impl_->status.ordinary_input_pending = true;
     if (result != SubmitResult::accepted) { ++impl_->status.rejected_events; }
     impl_->status.epoch = impl_->queue.epoch();
     impl_->wake.notify_one();

@@ -61,6 +61,9 @@ struct ControlSnapshot {
     std::chrono::microseconds last_ack_rtt{};
     std::uint64_t timeout_count{};
     std::uint64_t rejected_events{};
+    // Ordinary input remains pending until the serial HID report is ACKed.
+    bool ordinary_input_pending{};
+    std::uint64_t completed_ordinary_sequence{};
     std::string error;
     AppliedInputState applied;
     // Network-only interruption can suspend execution without revoking UI intent.

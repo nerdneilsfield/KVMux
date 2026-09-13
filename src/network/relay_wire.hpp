@@ -25,7 +25,7 @@ struct Proof { std::uint64_t challenge{}, intent{}; bool active{}, video_fresh{}
 enum class CancelReason { focus, host, release, disconnect };
 struct Cancel { std::uint64_t intent{}; CancelReason reason{CancelReason::release}; };
 using RawBody = std::variant<Hello, Welcome, Busy, Challenge, Proof, Cancel>;
-struct Status { std::uint64_t epoch{}; ControlConnectionState connection{}; bool usb_ready{}, release_confirmed{}; std::uint64_t canceled_through{}; };
+struct Status { std::uint64_t epoch{}; ControlConnectionState connection{}; bool usb_ready{}, release_confirmed{}; std::uint64_t canceled_through{}; bool ordinary_input_pending{}; };
 struct Sync { std::uint64_t epoch{}, intent{}, revision{}, challenge{}, edge_floor{}; DesiredInputState state; };
 struct StateAck { std::uint64_t epoch{}, intent{}, revision{}, edge_floor{}; DesiredInputState state; };
 struct Edge { std::uint64_t epoch{}, intent{}, sequence{}, challenge{}; ControlPayload payload; };

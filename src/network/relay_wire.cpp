@@ -164,7 +164,7 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,Directi
     Writer w; unsigned type{};
     std::visit([&](const auto& b) {
         using T=std::decay_t<decltype(b)>;
-        if constexpr(std::is_same_v<T,Status>) { type=1; w.ok &= b.epoch!=0; w.integer(b.epoch,8); w.mapped(index(connections,b.connection)); w.integer((b.usb_ready?1:0)|(b.release_confirmed?2:0),1); w.zeros(2); w.integer(b.canceled_through,8); }
+        if constexpr(std::is_same_v<T,Status>) { type=1; w.ok &= b.epoch!=0; w.integer(b.epoch,8); w.mapped(index(connections,b.connection)); w.integer((b.usb_ready?1:0)|(b.release_confirmed?2:0)|(b.ordinary_input_pending?4:0),1); w.zeros(2); w.integer(b.canceled_through,8); }
         else if constexpr(std::is_same_v<T,Sync>||std::is_same_v<T,StateAck>) {
             type=std::is_same_v<T,Sync>?2:3; w.ok &= b.epoch&&b.intent&&b.revision; w.integer(b.epoch,8); w.integer(b.intent,8); w.integer(b.revision,8);
             if constexpr(std::is_same_v<T,Sync>) { w.ok &= b.challenge!=0; w.integer(b.challenge,8); }
@@ -187,7 +187,7 @@ std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,Direct
     if(!h.done()||n!=bytes.size()-4||type<1||type>7||!direction(type,d)) return {};
     Reader r{bytes.subspan(4)}; Control c;
     switch(type) {
-    case 1: { Status b; b.epoch=r.integer(8); auto conn=r.u8(),flags=r.u8(); r.zeros(2); b.canceled_through=r.integer(8); r.ok &= b.epoch!=0&&conn<=8&&flags<=3; if(conn<=8)b.connection=connections[conn]; b.usb_ready=(flags&1)!=0; b.release_confirmed=(flags&2)!=0; c=b; break; }
+    case 1: { Status b; b.epoch=r.integer(8); auto conn=r.u8(),flags=r.u8(); r.zeros(2); b.canceled_through=r.integer(8); r.ok &= b.epoch!=0&&conn<=8&&flags<=7; if(conn<=8)b.connection=connections[conn]; b.usb_ready=(flags&1)!=0; b.release_confirmed=(flags&2)!=0; b.ordinary_input_pending=(flags&4)!=0; c=b; break; }
     case 2: { Sync b; b.epoch=r.integer(8); b.intent=r.integer(8); b.revision=r.integer(8); b.challenge=r.integer(8); b.edge_floor=r.integer(8); b.state=state(r); r.ok &= b.epoch&&b.intent&&b.revision&&b.challenge; c=b; break; }
     case 3: { StateAck b; b.epoch=r.integer(8); b.intent=r.integer(8); b.revision=r.integer(8); b.edge_floor=r.integer(8); b.state=state(r); r.ok &= b.epoch&&b.intent&&b.revision; c=b; break; }
     case 4: { Edge b; b.epoch=r.integer(8); b.intent=r.integer(8); b.sequence=r.integer(8); b.challenge=r.integer(8); b.payload=edge_body(r); r.ok &= b.epoch&&b.intent&&b.sequence&&b.challenge; c=b; break; }

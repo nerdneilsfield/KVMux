@@ -272,7 +272,7 @@ void InputRouter::recover() noexcept {
     if (!capture_intended()) return;
     state_ = InputState::recovering; sync_.reset(); barrier_epoch_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = 0; pointer_ = {};
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_pending_observed_ = false; text_completion_floor = 0; pointer_ = {};
 }
 void InputRouter::synchronize(Clock::time_point now) {
     const auto snapshot = sink_.snapshot();
@@ -310,7 +310,7 @@ void InputRouter::tick(const Clock::time_point now) {
     }
     if (snapshot.recoverable_transport && capture_intended() &&
         (!video_fresh_ || !sink_ready_released() || (barrier_epoch_ && barrier_epoch_ != snapshot.epoch))) recover();
-    if (temporary_intent_ && (!video_fresh_ || !sink_ready_released())) { begin_release(); return; }
+    if (temporary_intent_ && (!video_fresh_ || snapshot.state != ControlConnectionState::ready || !snapshot.target_usb_ready || !snapshot.release_confirmed)) { begin_release(); return; }
     if (state_ == InputState::arming && activation_released_ && video_fresh_ && sink_ready_released()) {
         activation_button_ = 0;
         state_ = InputState::captured;
@@ -327,32 +327,35 @@ void InputRouter::tick(const Clock::time_point now) {
          (text_active_ && barrier_epoch_ != snapshot.epoch))) {
         synchronize(now);
     }
-    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size() &&
-        (!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch)) {
-        schedule_text(now);
-    }
-    while (!special_steps_.empty() && special_steps_.front().due <= now) {
-        auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
-        for (const auto edge : step.edges) {
-            if (!submit(edge)) { special_steps_.clear(); return; }
+    if (text_active_) {
+        // One text edge is admitted only after the previous ordinary report has
+        // completed at the control sink. This prevents synthetic text from
+        // filling the bounded serial queue.
+        if (text_edge_inflight_) {
+            if (snapshot.ordinary_input_pending) { text_pending_observed_ = true; return; }
+            // A sink can report the completed state directly without exposing
+            // an intermediate pending snapshot.
+            text_edge_inflight_ = false;
+            text_pending_observed_ = false;
         }
-        if (step.text_gesture) ++scheduled_text_gestures_;
-    }
-    if (text_active_ && special_steps_.empty() && next_text_gesture_ < text_gestures_.size() &&
-        (!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch)) {
-        // The prior 50 ms delay has elapsed. Queue and submit the next gesture now.
-        schedule_text(now);
-        while (!special_steps_.empty() && special_steps_.front().due <= now) {
-            auto step = std::move(special_steps_.front()); special_steps_.erase(special_steps_.begin());
-            for (const auto edge : step.edges) {
-                if (!submit(edge)) { special_steps_.clear(); return; }
+        if ((!snapshot.recoverable_transport || barrier_epoch_ == snapshot.epoch) &&
+            next_text_gesture_ < text_gestures_.size()) {
+            const auto& gesture = text_gestures_[next_text_gesture_];
+            const auto edge = gesture.edges[next_text_edge_];
+            const auto floor = snapshot.completed_ordinary_sequence;
+            if (!submit(edge)) return;
+            text_completion_floor = floor;
+            text_edge_inflight_ = true;
+            text_pending_observed_ = snapshot.ordinary_input_pending;
+            if (++next_text_edge_ == gesture.edges.size()) {
+                next_text_edge_ = 0;
+                ++next_text_gesture_; ++scheduled_text_gestures_;
             }
-            if (step.text_gesture) ++scheduled_text_gestures_;
+            return;
         }
-    }
-    if (text_active_ && special_steps_.empty() && next_text_gesture_ == text_gestures_.size()) {
-        // Keep the temporary lease through this tick so the final up edges can drain.
-        text_completion_pending_ = true;
+        if (next_text_gesture_ == text_gestures_.size()) {
+            text_completion_pending_ = true;
+        }
     }
     if (temporary_intent_ && !pending_special_ && special_steps_.empty() && !text_active_) {
         // Keep the final up edges inside the active lease until the next UI turn.
@@ -362,7 +365,7 @@ void InputRouter::tick(const Clock::time_point now) {
 
 void InputRouter::begin_release() noexcept {
     pointer_ = {};
-    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = 0; temporary_intent_ = false;
+    special_steps_.clear(); pending_special_.reset(); text_active_ = false; text_completion_pending_ = false; text_gestures_.clear(); next_text_gesture_ = next_text_edge_ = 0; text_edge_inflight_ = false; text_pending_observed_ = false; text_completion_floor = 0; temporary_intent_ = false;
     sync_.reset(); barrier_epoch_ = 0; held_.clear();
     buttons_ = 0;
     residual_x_ = residual_y_ = wheel_residual_ = 0;
@@ -400,6 +403,10 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     }
     text_gestures_ = text_result_.gestures;
     next_text_gesture_ = 0;
+    next_text_edge_ = 0;
+    text_edge_inflight_ = false;
+    text_pending_observed_ = false;
+    text_completion_floor = 0;
     text_completion_pending_ = false;
     scheduled_text_gestures_ = 0;
     text_active_ = true;
@@ -407,8 +414,6 @@ TextMappingResult InputRouter::start_text(const std::string_view text, const Clo
     if (sink_.snapshot().recoverable_transport) {
         if (!video_fresh_) { cancel_text(); return text_result_; }
         ++intent_; revision_ = 0; synchronize(now);
-    } else {
-        schedule_text(now);
     }
     return text_result_;
 }
