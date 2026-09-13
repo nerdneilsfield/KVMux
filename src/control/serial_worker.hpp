@@ -39,6 +39,9 @@ public:
 
     [[nodiscard]] SubmitResult submit(ControlEvent event) override;
     [[nodiscard]] SubmitResult synchronize(InputSync sync) override;
+    [[nodiscard]] SubmitResult start_ascii_paste(AsciiPasteJob job) override;
+    void cancel_ascii_paste() noexcept override;
+    [[nodiscard]] AsciiPasteSnapshot ascii_paste_snapshot() const override;
     void release_all() noexcept override;
     [[nodiscard]] ControlSnapshot snapshot() const override;
 

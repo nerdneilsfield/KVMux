@@ -112,6 +112,19 @@ int main() {
     require(eventually([&] { return sink.snapshot().completed_ordinary_sequence == 1; }),
             "ordinary completion reports the ACKed ControlEvent sequence");
 
+    const std::size_t paste_start = [&] { std::lock_guard lock(fake.mutex); return fake.received.size(); }();
+    AsciiPasteJob paste{{{{4, true}}, {{4, false}}, {{0xe1, true}, {30, true}, {30, false}, {0xe1, false}}}};
+    require(sink.start_ascii_paste(std::move(paste)) == SubmitResult::accepted, "paste starts outside control queue");
+    require(eventually([&] { return sink.ascii_paste_snapshot().state == AsciiPasteState::completed; }),
+            "paste completes only after all HID ACKs");
+    const auto paste_status = sink.ascii_paste_snapshot();
+    require(paste_status.completed_gestures == 3 && paste_status.total_gestures == 3,
+            "paste progress advances after final gesture edge ACK");
+    {
+        std::lock_guard lock(fake.mutex);
+        require(fake.received.size() == paste_start + 6, "one report is sent per paste edge at ACK boundary");
+    }
+
     // Release while a keyboard transaction awaits its ACK. The next epoch
     // must not rebuild a report from the previous held modifiers or keys.
     sink.release_all();

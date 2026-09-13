@@ -49,11 +49,19 @@ struct Ch9329ControlSink::Impl {
         std::uint64_t epoch{};
         const char* kind{};
         bool ordinary{};
+        bool ascii_paste{};
     };
 
     explicit Impl(SerialIo value) : io(std::move(value)) {
         // run() uses members declared after worker; start only after initialization.
         worker = std::thread([this] { run(); });
+    }
+
+    // Caller holds mutex. A report already written must still drain its ACK.
+    void cancel_paste_locked(AsciiPasteState state) {
+        if (paste.state == AsciiPasteState::active) { paste.state = state; }
+        paste_job.reset();
+        paste_gesture = paste_edge = 0;
     }
 
     // Caller holds mutex. A canceled in-flight report still drains its ACK,
@@ -98,6 +106,7 @@ struct Ch9329ControlSink::Impl {
         clear_step = ClearStep::none;
         {
             std::lock_guard lock(mutex);
+            cancel_paste_locked(AsciiPasteState::failed);
             keyboard.clear();
             buttons = 0;
             relative_x = relative_y = wheel = 0.0;
@@ -118,12 +127,12 @@ struct Ch9329ControlSink::Impl {
 
     void begin(ch9329::Frame frame, Purpose purpose, Clock::time_point now,
                std::uint64_t source_sequence = 0, std::uint64_t epoch = 0,
-               bool ordinary = false) {
+               bool ordinary = false, bool ascii_paste = false) {
         const char* kind = purpose == Purpose::info ? "info" :
                            purpose == Purpose::config ? "config" :
                            (purpose == Purpose::sync_keyboard || purpose == Purpose::sync_mouse) ? "sync" :
                            clear_step != ClearStep::none ? "clear" : "keyboard";
-        Transaction next{std::move(frame), purpose, {}, 0, {}, false, source_sequence, epoch, kind, ordinary};
+        Transaction next{std::move(frame), purpose, {}, 0, {}, false, source_sequence, epoch, kind, ordinary, ascii_paste};
         next.bytes = ch9329::encode(next.frame);
         next.started = now;
         if (purpose == Purpose::info || purpose == Purpose::config) {
@@ -152,6 +161,7 @@ struct Ch9329ControlSink::Impl {
         {
             std::lock_guard lock(mutex);
             invalidate_sync();
+            cancel_paste_locked(AsciiPasteState::canceled);
             ordinary_inflight = false;
             ordinary_sequence = 0;
             status.ordinary_input_pending = false;
@@ -241,6 +251,7 @@ struct Ch9329ControlSink::Impl {
         }
 
         const bool was_stalled = transaction->stalled;
+        const bool was_ascii_paste = transaction->ascii_paste;
         if (transaction->ordinary) {
             spdlog::debug("CH9329 keyboard ACK: source_sequence={} epoch={}",
                           transaction->source_sequence, transaction->epoch);
@@ -256,6 +267,22 @@ struct Ch9329ControlSink::Impl {
             ordinary_inflight = false;
             status.ordinary_input_pending = queue.size() != 0;
         });
+
+        if (was_ascii_paste) {
+            std::lock_guard lock(mutex);
+            if (paste.state == AsciiPasteState::active && !was_stalled && !release_requested) {
+                ++paste_edge;
+                if (paste_job && paste_edge == paste_job->gestures[paste_gesture].size()) {
+                    paste_edge = 0;
+                    ++paste_gesture;
+                    ++paste.completed_gestures;
+                    if (paste_gesture == paste.total_gestures) {
+                        paste.state = AsciiPasteState::completed;
+                        paste_job.reset();
+                    }
+                }
+            }
+        }
 
         if (purpose == Purpose::info) {
             const bool usb_ready = reply.data[1] == 1U;
@@ -281,6 +308,7 @@ struct Ch9329ControlSink::Impl {
             if (!usb_ready) {
                 std::lock_guard lock(mutex);
                 invalidate_sync();
+                cancel_paste_locked(AsciiPasteState::canceled);
                 queue.request_release();
                 status.epoch = queue.epoch();
                 return true;
@@ -521,6 +549,15 @@ struct Ch9329ControlSink::Impl {
                 }
                 return;
             }
+            if (paste.state == AsciiPasteState::active && paste_job) {
+                const auto& edges = paste_job->gestures[paste_gesture];
+                const auto& edge = edges[paste_edge];
+                if (edge.pressed) { (void)keyboard.press(edge.usage); }
+                else { keyboard.release(edge.usage); }
+                begin(ch9329::keyboard_report(address, keyboard.modifiers(), keyboard.keys()),
+                      Purpose::keyboard, now, 0, status.epoch, false, true);
+                return;
+            }
             if (auto event = queue.pop()) {
                 ordinary_inflight = true;
                 ordinary_sequence = event->sequence;
@@ -574,6 +611,10 @@ struct Ch9329ControlSink::Impl {
     bool sync_inflight{};
     bool ordinary_inflight{};
     std::uint64_t ordinary_sequence{};
+    AsciiPasteSnapshot paste;
+    std::optional<AsciiPasteJob> paste_job;
+    std::size_t paste_gesture{};
+    std::size_t paste_edge{};
     std::string port;
     int baud{9600};
     std::uint8_t address{};
@@ -616,6 +657,7 @@ void Ch9329ControlSink::disconnect() noexcept {
     std::lock_guard lock(impl_->mutex);
     impl_->control_active = false;
     impl_->invalidate_sync();
+    impl_->cancel_paste_locked(AsciiPasteState::canceled);
     impl_->queue.request_release();
     impl_->status.epoch = impl_->queue.epoch();
     if (impl_->open) {
@@ -657,7 +699,7 @@ void Ch9329ControlSink::update_ui_heartbeat() noexcept {
 
 SubmitResult Ch9329ControlSink::submit(ControlEvent event) {
     std::lock_guard lock(impl_->mutex);
-    if (impl_->input_sync || impl_->sync_inflight) {
+    if (impl_->paste.state == AsciiPasteState::active || impl_->input_sync || impl_->sync_inflight) {
         ++impl_->status.rejected_events;
         return SubmitResult::overloaded;
     }
@@ -693,7 +735,7 @@ SubmitResult Ch9329ControlSink::synchronize(InputSync sync) {
         ++impl_->status.rejected_events;
         return SubmitResult::not_ready;
     }
-    if (impl_->input_sync || impl_->sync_inflight || impl_->ordinary_inflight || impl_->queue.size() != 0 ||
+    if (impl_->paste.state == AsciiPasteState::active || impl_->input_sync || impl_->sync_inflight || impl_->ordinary_inflight || impl_->queue.size() != 0 ||
         impl_->relative_x != 0 || impl_->relative_y != 0 || impl_->wheel != 0) {
         ++impl_->status.rejected_events;
         return SubmitResult::overloaded;
@@ -705,10 +747,45 @@ SubmitResult Ch9329ControlSink::synchronize(InputSync sync) {
     return SubmitResult::accepted;
 }
 
+SubmitResult Ch9329ControlSink::start_ascii_paste(AsciiPasteJob job) {
+    std::lock_guard lock(impl_->mutex);
+    if (job.gestures.empty() || std::ranges::any_of(job.gestures, [](const auto& edges) { return edges.empty(); }) ||
+        impl_->status.state != ControlConnectionState::ready || !impl_->status.target_usb_ready ||
+        !impl_->status.release_confirmed || !impl_->control_active || Clock::now() - impl_->heartbeat > kHeartbeatTimeout ||
+        impl_->input_sync || impl_->sync_inflight || impl_->ordinary_inflight || impl_->queue.size() != 0 ||
+        impl_->transaction || impl_->paste.state == AsciiPasteState::active) {
+        ++impl_->status.rejected_events;
+        return SubmitResult::not_ready;
+    }
+    impl_->paste = {AsciiPasteState::active, job.gestures.size(), 0};
+    impl_->paste_job = std::move(job);
+    impl_->paste_gesture = impl_->paste_edge = 0;
+    impl_->wake.notify_one();
+    return SubmitResult::accepted;
+}
+
+void Ch9329ControlSink::cancel_ascii_paste() noexcept {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->paste.state == AsciiPasteState::active) {
+        impl_->cancel_paste_locked(AsciiPasteState::canceled);
+        impl_->queue.request_release();
+        impl_->status.epoch = impl_->queue.epoch();
+        impl_->status.release_confirmed = false;
+        impl_->release_requested = true;
+        impl_->wake.notify_one();
+    }
+}
+
+AsciiPasteSnapshot Ch9329ControlSink::ascii_paste_snapshot() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->paste;
+}
+
 void Ch9329ControlSink::release_all() noexcept {
     std::lock_guard lock(impl_->mutex);
     impl_->control_active = false;
     impl_->invalidate_sync();
+    impl_->cancel_paste_locked(AsciiPasteState::canceled);
     impl_->queue.request_release();
     impl_->status.epoch = impl_->queue.epoch();
     impl_->status.release_confirmed = false;

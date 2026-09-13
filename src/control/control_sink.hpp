@@ -1,5 +1,6 @@
 #pragma once
 
+#include "control/ascii_paste_job.hpp"
 #include "control/control_event.hpp"
 
 #include <array>
@@ -81,6 +82,10 @@ public:
     virtual void video_presented(std::uint64_t generation, std::uint64_t sequence) noexcept { (void)generation; (void)sequence; }
     [[nodiscard]] virtual SubmitResult submit(ControlEvent event) = 0;
     [[nodiscard]] virtual SubmitResult synchronize(InputSync) { return SubmitResult::not_ready; }
+    // Starts one fully mapped HID-only job. Unsupported sinks return not_ready.
+    [[nodiscard]] virtual SubmitResult start_ascii_paste(AsciiPasteJob) { return SubmitResult::not_ready; }
+    virtual void cancel_ascii_paste() noexcept {}
+    [[nodiscard]] virtual AsciiPasteSnapshot ascii_paste_snapshot() const { return {}; }
     virtual void release_all() noexcept = 0;
     [[nodiscard]] virtual ControlSnapshot snapshot() const = 0;
 };
