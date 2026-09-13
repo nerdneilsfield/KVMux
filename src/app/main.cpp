@@ -126,6 +126,17 @@ const char* input_state(InputState state) {
     switch (state) { case InputState::preview: return "Preview"; case InputState::arming: return "Arming"; case InputState::captured: return "Captured"; case InputState::recovering: return "Recovering"; case InputState::releasing: return "Releasing"; case InputState::fault: return "Fault"; }
     return "Unknown";
 }
+const char* text_paste_error(TextPasteError error) {
+    switch (error) {
+    case TextPasteError::none: return "Ready";
+    case TextPasteError::empty: return "Enter text to type.";
+    case TextPasteError::bare_carriage_return: return "Unsupported line ending.";
+    case TextPasteError::non_ascii: return "Non-ASCII text is not supported.";
+    case TextPasteError::unsupported: return "Unsupported characters found.";
+    case TextPasteError::too_long: return "Text is limited to 1024 characters.";
+    }
+    return "Could not prepare text.";
+}
 std::string mode_text(const CaptureMode& mode) {
     return std::to_string(mode.width) + "x" + std::to_string(mode.height) + " @ " +
         std::to_string(mode.frame_rate.numerator) + "/" + std::to_string(mode.frame_rate.denominator) +
@@ -291,6 +302,10 @@ int main(int argc, char** argv) {
     double chrome_until = 0.0, captured_at = 0.0;
     bool close_connections_when_ready = false;
     bool popup_open = false;
+    bool open_text_paste = false;
+    std::array<char, 4097> text_paste_buffer{};
+    std::size_t text_paste_removed = 0;
+    TextPasteError paste_error = TextPasteError::none;
     std::vector<ImVec4> local_regions;
     Uint32 local_buttons = 0, remote_buttons = 0;
     FloatingMenuIcon menu_icon;
@@ -348,7 +363,9 @@ int main(int argc, char** argv) {
                 }
             }
             if (!remote_input) ImGui_ImplSDL3_ProcessEvent(&event);
-            if (local_click && !remote_input) continue;
+            // A local popup owns all input, not just its pointer clicks. This keeps
+            // editor keystrokes from reaching the remote input path.
+            if ((local_click || popup_open) && !remote_input) continue;
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
@@ -437,6 +454,65 @@ int main(int argc, char** argv) {
         }
         const bool temporary_status_visible = std::chrono::steady_clock::now() < temporary_status_until;
         if (!temporary_status_visible) temporary_status.clear();
+        const auto text_paste_actions = [&] {
+            const auto paste = session->text_paste_snapshot();
+            if (snapshot.text_paste_active) {
+                ImGui::Text("Typing ASCII: %zu characters", paste.normalized_characters);
+                if (ImGui::Button("Cancel typing")) {
+                    session->cancel_text_paste();
+                    text_paste_buffer.fill('\0');
+                    text_paste_removed = 0;
+                }
+                return;
+            }
+            ImGui::TextUnformatted("US ASCII only. Target keyboard layout must be US.");
+            ImGui::InputTextMultiline("##ascii-text", text_paste_buffer.data(), text_paste_buffer.size(),
+                {-1.F, ImGui::GetTextLineHeight() * 6.F});
+            if (text_paste_removed) ImGui::Text("Removed unsupported characters: %zu", text_paste_removed);
+            if (paste_error != TextPasteError::none) {
+                ImGui::TextWrapped("%s", text_paste_error(paste_error));
+                if (paste_error == TextPasteError::bare_carriage_return ||
+                    paste_error == TextPasteError::non_ascii || paste_error == TextPasteError::unsupported) {
+                    if (ImGui::Button("Remove unsupported")) {
+                        const auto filtered = filter_us_ascii_text(text_paste_buffer.data());
+                        text_paste_removed = filtered.removed;
+                        std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(), "%s", filtered.text.c_str());
+                        paste_error = TextPasteError::none;
+                    }
+                    ImGui::SameLine();
+                }
+            }
+            ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
+            if (ImGui::Button("Type ASCII")) {
+                const auto result = session->start_text_paste(text_paste_buffer.data());
+                paste_error = result.error;
+                if (result) {
+                    text_paste_buffer.fill('\0');
+                    text_paste_removed = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                text_paste_buffer.fill('\0');
+                text_paste_removed = 0;
+                paste_error = TextPasteError::none;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Type host clipboard")) {
+                char* clipboard = SDL_GetClipboardText();
+                if (!clipboard) {
+                    paste_error = TextPasteError::unsupported;
+                } else {
+                    std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(), "%s", clipboard);
+                    SDL_free(clipboard);
+                    text_paste_removed = 0;
+                    paste_error = TextPasteError::none;
+                }
+            }
+        };
         const auto media_actions = [&] {
             const auto& status = media_status;
             const bool valid_visible_cpu_frame = current_frame && current_frame->frame &&
@@ -502,12 +578,14 @@ int main(int argc, char** argv) {
                     ImGui::OpenPopup("Connections"); open_connections = false;
                 }
                 if (ImGui::BeginMenu("Media")) { media_actions(); ImGui::EndMenu(); }
+                if (ImGui::MenuItem("Type ASCII")) open_text_paste = true;
                 ImGui::SetNextWindowPos({viewport->Pos.x + menu_icon.pos.x,
                     viewport->Pos.y + menu_icon.pos.y + FloatingMenuIcon::size}, ImGuiCond_Appearing);
                 if (ImGui::BeginPopup("Floating menu")) {
                     record_local_region();
                     if (ImGui::MenuItem("Connections / settings")) open_connections = true;
                     ImGui::Separator(); media_actions(); ImGui::Separator();
+                    if (ImGui::MenuItem("Type ASCII")) open_text_paste = true;
                     ImGui::MenuItem("Status overlay", nullptr, &show_status);
                     if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
                         fullscreen = !fullscreen; SDL_SetWindowFullscreen(window, fullscreen);
@@ -520,6 +598,14 @@ int main(int argc, char** argv) {
                 }
                 if (ImGui::MenuItem("Diagnostics")) diagnostics_open = !diagnostics_open;
                 ImGui::MenuItem("Status overlay", nullptr, &show_status);
+                if (open_text_paste) { ImGui::OpenPopup("Type ASCII"); open_text_paste = false; }
+                ImGui::SetNextWindowPos({viewport->Pos.x + 8.F, viewport->Pos.y + ImGui::GetFrameHeight()});
+                ImGui::SetNextWindowSize({std::min(600.F, viewport->Size.x - 16.F), 0.F});
+                if (ImGui::BeginPopup("Type ASCII")) {
+                    record_local_region();
+                    text_paste_actions();
+                    ImGui::EndPopup();
+                }
                 ImGui::SetNextWindowPos({viewport->Pos.x + 8.F, viewport->Pos.y + ImGui::GetFrameHeight()});
                 ImGui::SetNextWindowSize({std::min(900.F, viewport->Size.x - 16.F), 0.F});
                 if (ImGui::BeginPopup("Connections")) {
