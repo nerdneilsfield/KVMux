@@ -2,6 +2,7 @@
 #include "network/relay_session.hpp"
 #include "network/kcp_channel.hpp"
 #include "network/paste_execute_retry.hpp"
+#include "network/paste_lifecycle.hpp"
 #include "network/media_codec_wire.hpp"
 #include "support/crc32.hpp"
 #include <algorithm>
@@ -310,6 +311,29 @@ struct RelayClient::Impl {
                 if (!fresh(now)) suspend();
                 // A GUI stall is an intent revocation, not automatic recapture.
                 if (active && gui_seen && now - progress >= 250ms) { active = false; intent_canceled = true; release_pending = true; }
+                // A paste owns this exact active control tuple. If it no longer
+                // has that tuple's liveness/safety proof, it must not keep the
+                // server-side serial job alive. Keep the job object until its
+                // ordered PasteCancel is accepted; a changed epoch cannot accept
+                // a cancel for the old owner, so only release that old intent.
+                // A locally canceled snapshot is terminal for the UI, but its
+                // cancel still has to remain pending until it enters KCP.
+                if (paste) {
+                    const auto paste_action = paste_lifecycle_action(
+                        !paste->snapshot.terminal() || paste->cancel_pending,
+                        paste->epoch, paste->intent, control.epoch, intent, active, ready(now));
+                    if (paste_action == PasteLifecycleAction::abandon_owner) {
+                        abandon_paste(PasteUploadState::canceled, wire::PasteStatusReason::canceled);
+                        if (intent) { release_pending = true; cancel_inflight = true; }
+                    } else if (paste_action == PasteLifecycleAction::cancel_current) {
+                        paste->cancel_pending = true;
+                        paste->snapshot.state = PasteUploadState::canceled;
+                        paste->snapshot.reason = wire::PasteStatusReason::canceled;
+                        paste->bytes.clear();
+                        active = false; intent_canceled = true;
+                        if (intent) { release_pending = true; cancel_inflight = true; }
+                    }
+                }
                 cancel = std::exchange(release_pending, false);
                 disconnect = std::exchange(disconnect_pending, false);
                 if (disconnect && !intent) intent = 1;

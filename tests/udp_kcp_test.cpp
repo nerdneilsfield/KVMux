@@ -1,5 +1,6 @@
 #include "network/kcp_channel.hpp"
 #include "network/paste_execute_retry.hpp"
+#include "network/paste_lifecycle.hpp"
 #include "network/udp_socket.hpp"
 
 #include <algorithm>
@@ -38,6 +39,28 @@ Bytes segment(std::uint8_t command, std::uint32_t sequence = 0, std::size_t size
     put32(bytes, 20, static_cast<std::uint32_t>(size));
     return bytes;
 }
+void paste_lifecycle() {
+    using kvmux::relay::PasteLifecycleAction;
+    using kvmux::relay::paste_lifecycle_action;
+
+    // Controlled loss of the current tuple's freshness cancels the exact
+    // transaction. The caller submits this action before Sync/Keepalive.
+    check(paste_lifecycle_action(true, 7, 11, 7, 11, true, false) ==
+        PasteLifecycleAction::cancel_current);
+    check(paste_lifecycle_action(true, 7, 11, 7, 11, false, true) ==
+        PasteLifecycleAction::cancel_current);
+    check(paste_lifecycle_action(true, 7, 11, 7, 11, true, true) ==
+        PasteLifecycleAction::none);
+
+    // A new control owner cannot submit PasteCancel for an old owner.
+    check(paste_lifecycle_action(true, 7, 11, 8, 11, false, false) ==
+        PasteLifecycleAction::abandon_owner);
+    check(paste_lifecycle_action(true, 7, 11, 7, 12, false, false) ==
+        PasteLifecycleAction::abandon_owner);
+    check(paste_lifecycle_action(false, 7, 11, 7, 11, false, false) ==
+        PasteLifecycleAction::none);
+}
+
 void bounds() {
     KcpChannel sender(42);
     check(sender.submit({}) == SubmitResult::invalid);
@@ -260,6 +283,7 @@ void native_roundtrip() {
     check(std::chrono::steady_clock::now() - closing < 100ms);
 }
 int main() {
+    paste_lifecycle();
     bounds();
     impairment();
     native_roundtrip();
