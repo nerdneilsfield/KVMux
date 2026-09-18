@@ -189,8 +189,8 @@ void impairment() {
     check(sender.submit(Bytes(64, static_cast<std::uint8_t>(i))) ==
           SubmitResult::accepted);
   struct Flight {
-    std::uint32_t due;
-    bool to_receiver;
+    std::uint32_t due{};
+    bool to_receiver{};
     Bytes bytes;
   };
   std::vector<Flight> flights;

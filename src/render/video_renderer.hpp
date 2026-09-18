@@ -37,7 +37,7 @@ class VideoRenderer {
   bool upload(const VideoFrame& frame, ColorOverride color_override);
   void destroy() noexcept;
   [[nodiscard]] std::uintptr_t texture_id() const noexcept {
-    return output_texture_;
+    return static_cast<std::uintptr_t>(output_texture_);
   }
   [[nodiscard]] int width() const noexcept { return width_; }
   [[nodiscard]] int height() const noexcept { return height_; }

@@ -12,8 +12,10 @@ struct AVFrame;
 
 namespace kvmux {
 
-inline constexpr std::size_t kMaxCompressedSampleBytes = 16U * 1024U * 1024U;
-inline constexpr std::size_t kMaxRawSampleBytes = 64U * 1024U * 1024U;
+inline constexpr std::size_t kMaxCompressedSampleBytes =
+    std::size_t{16} * 1024U * 1024U;
+inline constexpr std::size_t kMaxRawSampleBytes =
+    std::size_t{64} * 1024U * 1024U;
 inline constexpr std::size_t kInputPaddingBytes = 64U;
 inline constexpr std::uint32_t kMaxCaptureWidth = 1920U;
 inline constexpr std::uint32_t kMaxCaptureHeight = 1200U;

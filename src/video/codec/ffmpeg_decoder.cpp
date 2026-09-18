@@ -346,14 +346,14 @@ class FfmpegDecoder final : public VideoDecoder {
 
  private:
   struct Metadata {
-    std::int64_t pts;
-    std::uint64_t sequence, generation;
-    std::chrono::steady_clock::time_point arrival;
-    AVColorRange range;
-    AVColorSpace space;
-    AVColorPrimaries primaries;
-    AVColorTransferCharacteristic transfer;
-    AVRational sar;
+    std::int64_t pts{};
+    std::uint64_t sequence{}, generation{};
+    std::chrono::steady_clock::time_point arrival{};
+    AVColorRange range{AVCOL_RANGE_UNSPECIFIED};
+    AVColorSpace space{AVCOL_SPC_UNSPECIFIED};
+    AVColorPrimaries primaries{AVCOL_PRI_UNSPECIFIED};
+    AVColorTransferCharacteristic transfer{AVCOL_TRC_UNSPECIFIED};
+    AVRational sar{};
   };
   CodecBackend backend_;
   CodecConfig config_{};

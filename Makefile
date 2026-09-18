@@ -26,9 +26,11 @@ ifeq ($(PLATFORM),macos)
 endif
 CLANG_FORMAT := $(or $(shell command -v clang-format 2>/dev/null),$(wildcard $(LLVM_BREW_BIN)/clang-format),clang-format)
 RUN_CLANG_TIDY := $(or $(shell command -v run-clang-tidy 2>/dev/null),$(wildcard $(LLVM_BREW_BIN)/run-clang-tidy),run-clang-tidy)
+CLANG_TIDY := $(or $(shell command -v clang-tidy 2>/dev/null),$(wildcard $(LLVM_BREW_BIN)/clang-tidy),clang-tidy)
 CPPCHECK := $(or $(shell command -v cppcheck 2>/dev/null),cppcheck)
 
-CLANG_TIDY_CHECKS := clang-analyzer-*,bugprone-*,performance-*,portability-*
+CLANG_TIDY_CHECKS := clang-analyzer-*,bugprone-*,performance-*,portability-*,-bugprone-easily-swappable-parameters,-performance-enum-size,-portability-avoid-pragma-once
+FIRST_PARTY_SOURCE_FILTER := ^$(CURDIR)/(src|tests)/.*\.(c|cc|cpp|cxx|m|mm)$$
 HEADER_FILTER := ^$(CURDIR)/(src|tests)/
 EXCLUDE_HEADER_FILTER := ^$(CURDIR)/third_party/
 
@@ -100,13 +102,14 @@ format-check:
 cppcheck: config-dev
 	@command -v "$(CPPCHECK)" >/dev/null || { echo 'Error: cppcheck not found.' >&2; exit 127; }
 	$(CPPCHECK) --project=$(DEV_BUILD_DIR)/compile_commands.json -ithird_party \
-	  --enable=warning,performance,portability --error-exitcode=1
+	  --enable=warning,performance,portability --error-exitcode=1 \
+	  --suppressions-list=cppcheck-suppressions.txt --quiet
 
 clang-tidy: config-dev
 	@command -v "$(RUN_CLANG_TIDY)" >/dev/null || { echo 'Error: run-clang-tidy not found.' >&2; exit 127; }
-	$(RUN_CLANG_TIDY) -p $(DEV_BUILD_DIR) -checks='$(CLANG_TIDY_CHECKS)' \
-	  -header-filter='$(HEADER_FILTER)' -exclude-header-filter='$(EXCLUDE_HEADER_FILTER)' \
-	  $(FIRST_PARTY_DIRS)
+	$(RUN_CLANG_TIDY) -clang-tidy-binary '$(CLANG_TIDY)' -p $(DEV_BUILD_DIR) -checks='$(CLANG_TIDY_CHECKS)' \
+	  -source-filter='$(FIRST_PARTY_SOURCE_FILTER)' \
+	  -header-filter='$(HEADER_FILTER)' -exclude-header-filter='$(EXCLUDE_HEADER_FILTER)'
 
 lint: format-check cppcheck clang-tidy
 

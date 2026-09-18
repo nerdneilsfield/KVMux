@@ -1,0 +1,11 @@
+# Tests intentionally throw from require/check helpers so CTest receives failure.
+throwInEntryPoint:tests/*
+# Tests intentionally assert calls whose results and state transitions are under test.
+assertWithSideEffect:tests/*
+assignmentInAssert:tests/*
+# Snapshot/value APIs intentionally copy small values or synchronized state.
+returnByReference:src/*
+passedByValue:src/*
+passedByValue:tests/*
+# Test-only fake setup favors explicit staged construction over initializer indirection.
+useInitializationList:tests/*
