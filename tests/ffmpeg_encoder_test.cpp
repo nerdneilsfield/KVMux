@@ -130,13 +130,26 @@ void run_case(kvmux::VideoCodec codec, kvmux::EncodingPriority priority) {
     require(recover_receive()==CodecStatus::end_of_stream && recovered_count==1,"forced IDR drains once");
     encoder->shutdown(); decoder->shutdown();
     require(retained && retained->data[0] && !units[0].bytes.empty(),"owned outputs survive shutdown");
-    require(encoder->diagnostic().detail.find(priority==EncodingPriority::quality ? "priority=quality" : "priority=size")!=std::string::npos,
+    const auto diagnostic = encoder->diagnostic().detail;
+    require(diagnostic.find(priority==EncodingPriority::quality ? "priority=quality" : "priority=size")!=std::string::npos,
         "priority is observable in diagnostic");
+    require(diagnostic.find(priority==EncodingPriority::quality ? "preset=medium" : "preset=slow")!=std::string::npos,
+        "effective preset is observable in diagnostic");
+    require(diagnostic.find(priority==EncodingPriority::quality ? "effective_bitrate=40000000" : "effective_bitrate=20000000")!=std::string::npos,
+        "effective bitrate is observable in diagnostic");
     std::cout<<name<<" CPU encode/decode priority="<<(priority==EncodingPriority::quality ? "quality" : "size")
         <<": 12 synthetic 64x64 frames, EAGAIN, forced IDR, reset, EOS passed; no throughput claim\n";
 }
 int main() {
     using namespace kvmux;
+    static_assert(CodecConfig{}.bitrate == 40'000'000);
+    static_assert(encoding_profile(EncodingPriority::quality, 40'000'000).bitrate == 40'000'000);
+    static_assert(encoding_profile(EncodingPriority::quality, 1).ffmpeg_preset[0] == 'm');
+    static_assert(encoding_profile(EncodingPriority::quality, 1).jetson_preset_level == 3);
+    static_assert(encoding_profile(EncodingPriority::size, 40'000'000).bitrate == 20'000'000);
+    static_assert(encoding_profile(EncodingPriority::size, 100'000).bitrate == 250'000);
+    static_assert(encoding_profile(EncodingPriority::size, 1).ffmpeg_preset[0] == 's');
+    static_assert(encoding_profile(EncodingPriority::size, 1).jetson_preset_level == 4);
     std::string error;
     require(!create_ffmpeg_encoder(CodecBackend::automatic,error),"helper rejects Auto");
     for (auto codec : {VideoCodec::h264, VideoCodec::hevc})

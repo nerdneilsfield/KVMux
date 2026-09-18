@@ -137,7 +137,7 @@ MJPEG remains the default. To encode raw capture as H.265, add
 encoding if hardware initialization fails. The relay diagnostic reports the actual
 backend and fallback reason. `--encoder jetson` requires the Jetson hardware
 backend; `--encoder software` requires the FFmpeg CPU backend. Explicit choices
-do not fall back. `--bitrate` sets the quality target in bits per second; the default is `8000000`. Size profiles use `max(250000, bitrate / 2)` as their bounded effective target. Diagnostics report codec, priority, selected bitrate, effective bitrate, and actual backend.
+do not fall back. `--bitrate` sets the quality target in bits per second; the default is `40000000` (40 Mbit/s, 5 MB/s). Size profiles use `max(250000, bitrate / 2)` as their bounded effective target. Diagnostics report codec, priority, selected bitrate, effective bitrate, and actual backend.
 Fallback does not promise a seamless codec switch during a running stream.
 Runtime errors still use the relay's recovery or reconnection path.
 
@@ -158,7 +158,7 @@ After updating both ends to protocol v3, build the relay with its backend enable
 ```sh
 cmake --preset linux-release-headless -DKVMUX_JETSON_ENCODER=ON
 cmake --build --preset linux-release-headless -j 2
-./build/linux-release-headless/kvmux-relay --debug --serve --codec hevc --encoder auto --bitrate 8000000
+./build/linux-release-headless/kvmux-relay --debug --serve --codec hevc --encoder auto --bitrate 40000000
 ```
 
 Automatic device selection still requires unambiguous capture and serial devices.
@@ -183,8 +183,8 @@ UDP envelopes, media payload and XOR parity. It excludes IP/UDP headers and
 control traffic. It is a pacing ceiling, not measured link capacity.
 
 For example, add `--transport-rate 3000000` to `--serve` to cap media at
-3,000,000 bytes/s. HEVC `--bitrate 8000000` separately requests an encoder rate
-of 8,000,000 bits/s. Neither setting guarantees useful video for every capture
+3,000,000 bytes/s. HEVC `--bitrate 40000000` separately requests a quality encoder rate
+of 40 Mbit/s (5 MB/s); a size profile uses 20 Mbit/s (2.5 MB/s). Neither setting guarantees useful video for every capture
 mode or amount of motion.
 
 Receiver feedback adjusts the interval between source admissions, not codec

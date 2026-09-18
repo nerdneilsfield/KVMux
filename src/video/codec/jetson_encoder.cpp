@@ -40,16 +40,16 @@ public:
         if (config.codec != VideoCodec::h264 && config.codec != VideoCodec::hevc)
             return {CodecStatus::unsupported, "Jetson encoder accepts H.264 or HEVC only"};
         config_ = config;
-        effective_bitrate_ = config.priority == EncodingPriority::quality ? config.bitrate :
-            std::max<std::uint32_t>(250'000, config.bitrate / 2);
+        const auto profile = encoding_profile(config.priority, config.bitrate);
+        effective_bitrate_ = profile.bitrate;
         encoded_sequence_ = 0;
         // CPU NV12 upload is explicit. No software encoding element exists here.
         const auto encoder_name = config.codec == VideoCodec::h264 ? "nvv4l2h264enc" : "nvv4l2h265enc";
         const auto output_caps = config.codec == VideoCodec::h264 ? "video/x-h264" : "video/x-h265";
         const auto text = std::string("appsrc name=input is-live=true format=time block=false max-buffers=4 max-bytes=0 max-time=0 ! ") +
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! " + encoder_name +
-            " name=encoder num-B-Frames=0 insert-sps-pps=true insert-aud=true bitrate=" +
-            std::to_string(effective_bitrate_) + " idrinterval=" + std::to_string(config.keyframe_interval) +
+            " name=encoder num-B-Frames=0 insert-sps-pps=true insert-aud=true control-rate=1 preset-level=" +
+            std::to_string(profile.jetson_preset_level) + " bitrate=" + std::to_string(effective_bitrate_) + " idrinterval=" + std::to_string(config.keyframe_interval) +
             " iframeinterval=" + std::to_string(config.keyframe_interval) + " ! " + output_caps +
             ",stream-format=byte-stream,alignment=au ! " +
             "appsink name=output sync=false max-buffers=4 drop=false wait-on-eos=false";

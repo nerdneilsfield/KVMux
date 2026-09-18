@@ -36,7 +36,7 @@ public:
     CodecBackend backend() const noexcept override { return CodecBackend::ffmpeg_software; }
     CodecDiagnostic diagnostic() const override {
         const auto name = config_.codec == VideoCodec::h264 ? "libx264" : "libx265";
-        const auto preset = config_.priority == EncodingPriority::quality ? "ultrafast" : "medium";
+        const auto preset = encoding_profile(config_.priority, config_.bitrate).ffmpeg_preset;
         return {backend(), false, observed_, std::string(name) + " CPU encoding; priority=" +
             (config_.priority == EncodingPriority::quality ? "quality" : "size") +
             " preset=" + preset + " effective_bitrate=" + std::to_string(effective_bitrate_) +
@@ -57,8 +57,8 @@ public:
         if (config.codec != VideoCodec::h264 && config.codec != VideoCodec::hevc)
             return {CodecStatus::unsupported, "FFmpeg encoder accepts H.264 or HEVC only"};
         config_=config; encoded_sequence_=0;
-        effective_bitrate_ = config.priority == EncodingPriority::quality ? config.bitrate :
-            std::max<std::uint32_t>(250'000, config.bitrate / 2);
+        const auto profile = encoding_profile(config.priority, config.bitrate);
+        effective_bitrate_ = profile.bitrate;
         const char* encoder_name = config.codec == VideoCodec::h264 ? "libx264" : "libx265";
         const auto* codec=avcodec_find_encoder_by_name(encoder_name);
         if (!codec) return {CodecStatus::unsupported, std::string("FFmpeg ") + encoder_name + " encoder unavailable"};
@@ -72,7 +72,7 @@ public:
         context_->gop_size=static_cast<int>(config.keyframe_interval);
         context_->max_b_frames=0; context_->thread_count=1;
         // No lookahead, frame reordering, open GOP or unbounded frame-thread queue.
-        const char* preset = config.priority == EncodingPriority::quality ? "ultrafast" : "medium";
+        const char* preset = profile.ffmpeg_preset;
         int result=av_opt_set(context_->priv_data, "preset", preset, 0);
         if (result>=0) result=av_opt_set(context_->priv_data, "tune", "zerolatency", 0);
         if (result>=0) result=av_opt_set(context_->priv_data, "forced-idr", "1", 0);

@@ -2,6 +2,8 @@
 
 #include "video/video_frame.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +14,19 @@ enum class VideoCodec { mjpeg = 0, hevc = 1, h264 = 2 };
 enum class EncodingPriority { quality, size };
 enum class CodecBackend { automatic, jetson_gstreamer, videotoolbox, ffmpeg_software };
 enum class CodecStatus { ok, again, invalid_input, unsupported, failed, end_of_stream };
+
+struct EncodingProfile {
+    std::uint32_t bitrate;
+    const char* ffmpeg_preset;
+    unsigned jetson_preset_level;
+};
+
+[[nodiscard]] constexpr EncodingProfile encoding_profile(
+    EncodingPriority priority, std::uint32_t requested_bitrate) noexcept {
+    return priority == EncodingPriority::quality
+        ? EncodingProfile{requested_bitrate, "medium", 3}
+        : EncodingProfile{std::max<std::uint32_t>(250'000, requested_bitrate / 2), "slow", 4};
+}
 
 struct CodecResult {
     CodecStatus status{CodecStatus::ok};
@@ -31,7 +46,7 @@ struct CodecConfig {
     EncodingPriority priority{EncodingPriority::quality};
     std::uint32_t width{}, height{};
     std::uint32_t fps_numerator{60}, fps_denominator{1};
-    std::uint32_t bitrate{8'000'000}, keyframe_interval{60};
+    std::uint32_t bitrate{40'000'000}, keyframe_interval{60};
     std::uint64_t generation{};
 };
 

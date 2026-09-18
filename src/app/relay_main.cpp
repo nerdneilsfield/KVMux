@@ -31,7 +31,7 @@ void print_help(std::ostream& out) {
            "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
            "       [--codec mjpeg | --encoding h264-quality|h264-size|h265-quality|h265-size]\n"
-           "       [--encoder auto|jetson|software] [--bitrate 8000000]\n"
+           "       [--encoder auto|jetson|software] [--bitrate 40000000]\n"
            "       [--transport-rate 12000000] (UDP envelope+payload+FEC bytes/s; excludes IP/UDP headers)\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
@@ -39,7 +39,8 @@ void print_help(std::ostream& out) {
            "then descending pixel area, width, height and fps; ties use first index.\n"
            "The four --encoding choices require raw video. Auto tries Jetson, then software.\n"
            "Use --codec mjpeg for MJPEG pass-through; do not combine it with --encoding.\n"
-           "Explicit choices never fall back. Bitrate is in bits/s.\n"
+           "Explicit choices never fall back. --bitrate is the quality target in bits/s; size uses half (minimum 250000).\n"
+           "Diagnostics show Mbit/s and MB/s (decimal).\n"
            "Transport rate: 1..1000000000 bytes/s. Encoder bitrate: bits/s (not transport cap).\n"
            "Unauthenticated LAN UDP v3 / KCP control: trusted networks only.\n";
 }
@@ -104,9 +105,13 @@ int serve(int argc,char** argv) {
               << " delivered-format=" << static_cast<int>(selected.delivered_format)
               << " codec=" << (options.codec==kvmux::VideoCodec::hevc ? "h265" : options.codec==kvmux::VideoCodec::h264 ? "h264" : "mjpeg")
               << " priority=" << (options.codec==kvmux::VideoCodec::mjpeg ? "pass-through" : options.priority==kvmux::EncodingPriority::quality ? "quality" : "size")
-              << " selected-bitrate-bits/s=" << options.bitrate
-              << " effective-bitrate-bits/s=" << (options.codec==kvmux::VideoCodec::mjpeg ? 0 : options.priority==kvmux::EncodingPriority::quality ? options.bitrate : std::max<std::uint32_t>(250'000,options.bitrate/2))
-              << " UDP-media-cap-bytes/s=" << options.transport_bytes_per_second
+              << " selected-bitrate=" << options.bitrate / 1'000'000.0 << " Mbit/s ("
+              << options.bitrate / 8'000'000.0 << " MB/s)";
+    const auto effective_bitrate = options.codec == kvmux::VideoCodec::mjpeg ? 0U :
+        kvmux::encoding_profile(options.priority, options.bitrate).bitrate;
+    std::cout << " effective-bitrate=" << effective_bitrate / 1'000'000.0 << " Mbit/s ("
+              << effective_bitrate / 8'000'000.0 << " MB/s)"
+              << " UDP-media-cap=" << options.transport_bytes_per_second / 1'000'000.0 << " MB/s"
               << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
     if (!serial_request)
         std::cout << "USB adapter VID/PID match only; CH9329 handshake not yet verified.\n";
