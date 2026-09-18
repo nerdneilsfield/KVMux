@@ -121,7 +121,7 @@ add_executable(kvmux-relay src/app/relay_main.cpp)
 target_link_libraries(kvmux-relay PRIVATE kvmux::core kvmux::capture)
 
 if(KVMUX_BUILD_GUI)
-    add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp src/app/recording.cpp)
+    add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp src/app/recording.cpp src/app/scroll_stitcher.cpp)
     # SDL_GetBasePath resolves to Contents/Resources in a macOS bundle.
     set(kvmux_branding "${CMAKE_CURRENT_SOURCE_DIR}/assets/branding")
     if(APPLE)
@@ -175,7 +175,12 @@ if(BUILD_TESTING)
     set_tests_properties(ffmpeg_encoder PROPERTIES SKIP_RETURN_CODE 77)
 
     if(KVMUX_BUILD_GUI)
-    add_executable(kvmux_recording_test tests/recording_test.cpp src/app/recording.cpp)
+    add_executable(kvmux_scroll_stitcher_test tests/scroll_stitcher_test.cpp src/app/scroll_stitcher.cpp)
+    target_compile_features(kvmux_scroll_stitcher_test PRIVATE cxx_std_20)
+    target_include_directories(kvmux_scroll_stitcher_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME scroll_stitcher COMMAND kvmux_scroll_stitcher_test)
+
+    add_executable(kvmux_recording_test tests/recording_test.cpp src/app/recording.cpp src/app/scroll_stitcher.cpp)
     target_compile_features(kvmux_recording_test PRIVATE cxx_std_20)
     target_include_directories(kvmux_recording_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(kvmux_recording_test PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale SDL3::SDL3)

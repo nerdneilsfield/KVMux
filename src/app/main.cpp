@@ -341,10 +341,12 @@ int main(int argc, char** argv) {
     std::string media_message;
     std::string temporary_status;
     std::chrono::steady_clock::time_point temporary_status_until{};
-    std::filesystem::path displayed_snapshot_path;
-    std::string displayed_snapshot_error;
+    std::filesystem::path displayed_snapshot_path, displayed_scroll_path;
+    std::string displayed_snapshot_error, displayed_scroll_error;
     bool snapshot_queued = false;
     bool region_selecting = false, region_dragging = false, region_ready = false;
+    bool scroll_selection = false, scroll_active = false;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> scroll_sample_after;
     ImVec2 region_start{}, region_end{};
     Rect displayed_video_rect{};
     bool paste_was_active = false, paste_cancelled = false;
@@ -364,6 +366,9 @@ int main(int argc, char** argv) {
             const bool icon_enabled = !popup_open && !remote_buttons &&
                 !(remote_input && config.mouse_mode == MouseMode::relative);
             const bool preview = event_state == InputState::preview;
+            if (scroll_active && (event.type == SDL_EVENT_WINDOW_FOCUS_LOST || event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN || (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode == SDL_SCANCODE_ESCAPE))) {
+                recording.cancel_scroll(); scroll_active = false; scroll_sample_after.reset();
+            }
             if (region_selecting) {
                 if (!preview || event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                     event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN ||
@@ -431,6 +436,11 @@ int main(int argc, char** argv) {
             if ((local_click || popup_open) && !remote_input && injectable_event) continue;
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
+            if (scroll_active && remote_input && event.type == SDL_EVENT_MOUSE_WHEEL) {
+                const double sign = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0 : 1.0;
+                if (event.wheel.y * sign < 0.0 && current_frame)
+                    scroll_sample_after = std::pair{current_frame->generation, current_frame->sequence};
+            }
             if (event.type == SDL_EVENT_MOUSE_MOTION && config.mouse_mode == MouseMode::relative) session->handle_input({InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
             else if (injectable_event) session->handle_input(to_input(event));
         }
@@ -440,8 +450,16 @@ int main(int argc, char** argv) {
         session->tick();
         if (auto newest = session->take_latest_frame()) { current_frame = std::move(newest); diagnostics.record_decode(current_frame->decoded); }
         if (current_frame && current_frame->generation != session->snapshot().capture.generation) current_frame.reset();
+        if (scroll_active && scroll_sample_after && current_frame &&
+            current_frame->generation == scroll_sample_after->first &&
+            current_frame->sequence > scroll_sample_after->second) {
+            if (recording.sample_scroll(*current_frame)) scroll_sample_after.reset();
+        }
         if (current_frame && renderer.upload(*current_frame, config.color_override)) { session->video_presented(current_frame->generation, current_frame->sequence); diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() - current_frame->arrival); diagnostics.record_present(current_frame->generation, current_frame->sequence); }
         const auto snapshot = session->snapshot();
+        if (scroll_active && (!snapshot.video_fresh || snapshot.input_state == InputState::fault)) {
+            recording.cancel_scroll(); scroll_active = false; scroll_sample_after.reset();
+        }
         if (current_frame && snapshot.video_fresh && current_frame->generation == snapshot.capture.generation &&
             recorded_frame != std::pair{current_frame->generation, current_frame->sequence}) {
             recorded_frame = std::pair{current_frame->generation, current_frame->sequence};
@@ -505,6 +523,22 @@ int main(int argc, char** argv) {
             if (!displayed_snapshot_path.empty()) {
                 snapshot_queued = false;
                 temporary_status = "Screenshot saved: " + displayed_snapshot_path.string();
+                temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            }
+        }
+        if (media_status.scroll_error != displayed_scroll_error) {
+            displayed_scroll_error = media_status.scroll_error;
+            if (!displayed_scroll_error.empty()) {
+                media_message = "Scrolling screenshot error: " + displayed_scroll_error;
+                scroll_active = false; scroll_sample_after.reset();
+                recording.cancel_scroll();
+            }
+        }
+        if (media_status.last_scroll_path != displayed_scroll_path) {
+            displayed_scroll_path = media_status.last_scroll_path;
+            if (!displayed_scroll_path.empty()) {
+                scroll_active = false; scroll_sample_after.reset();
+                temporary_status = "Scrolling screenshot saved: " + displayed_scroll_path.string();
                 temporary_status_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
         }
@@ -624,7 +658,11 @@ int main(int argc, char** argv) {
                 }
             }
             if (ImGui::MenuItem("Select region screenshot")) {
-                region_selecting = true; region_dragging = region_ready = false;
+                scroll_selection = false; region_selecting = true; region_dragging = region_ready = false;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::MenuItem("Select scrolling screenshot")) {
+                scroll_selection = true; region_selecting = true; region_dragging = region_ready = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
@@ -640,6 +678,10 @@ int main(int argc, char** argv) {
             ImGui::BeginDisabled(status.state != RecordingState::recording && status.state != RecordingState::paused);
             if (ImGui::MenuItem("Stop recording")) (void)recording.stop();
             ImGui::EndDisabled();
+            if (scroll_active) {
+                if (ImGui::MenuItem("Finish scrolling screenshot")) { (void)recording.finish_scroll(); scroll_active=false; scroll_sample_after.reset(); }
+                if (ImGui::MenuItem("Cancel scrolling screenshot")) { recording.cancel_scroll(); scroll_active=false; scroll_sample_after.reset(); }
+            }
             ImGui::Separator();
             ImGui::Text("Recording: %s", recording_state(status.state));
             if (!status.output_path.empty()) {
@@ -647,6 +689,13 @@ int main(int argc, char** argv) {
                 ImGui::TextWrapped("%s", status.output_path.string().c_str());
             }
             if (!status.error.empty()) ImGui::TextWrapped("Error: %s", status.error.c_str());
+            const char* scroll_label = status.scroll_state == ScrollCaptureState::starting ? "Starting" :
+                status.scroll_state == ScrollCaptureState::capturing ? "Capturing" :
+                status.scroll_state == ScrollCaptureState::finishing ? "Finishing" :
+                status.scroll_state == ScrollCaptureState::failed ? "Failed" : "Idle";
+            ImGui::Text("Scrolling screenshot: %s", scroll_label);
+            if (!status.last_scroll_path.empty()) ImGui::TextWrapped("%s", status.last_scroll_path.string().c_str());
+            if (!status.scroll_error.empty()) ImGui::TextWrapped("Scrolling error: %s", status.scroll_error.c_str());
             if (!status.snapshot_error.empty()) ImGui::TextWrapped("Screenshot error: %s", status.snapshot_error.c_str());
             else if (!media_message.empty()) ImGui::TextUnformatted(media_message.c_str());
         };
@@ -917,16 +966,17 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowPos({std::min(region_start.x,region_end.x),std::max(region_start.y,region_end.y)+6.F}, ImGuiCond_Always);
             ImGui::Begin("Region screenshot",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoSavedSettings);
             record_local_region();
-            if (ImGui::Button("Save region")) {
+            if (ImGui::Button(scroll_selection ? "Start scrolling" : "Save region")) {
                 const double left=std::min(region_start.x,region_end.x), top=std::min(region_start.y,region_end.y);
                 const double right=std::max(region_start.x,region_end.x), bottom=std::max(region_start.y,region_end.y);
                 const unsigned x=static_cast<unsigned>(std::floor((left-displayed_video_rect.x)*renderer.width()/displayed_video_rect.width));
                 const unsigned y=static_cast<unsigned>(std::floor((top-displayed_video_rect.y)*renderer.height()/displayed_video_rect.height));
                 const unsigned r=static_cast<unsigned>(std::ceil((right-displayed_video_rect.x)*renderer.width()/displayed_video_rect.width));
                 const unsigned b=static_cast<unsigned>(std::ceil((bottom-displayed_video_rect.y)*renderer.height()/displayed_video_rect.height));
-                if (current_frame && recording.snapshot(*current_frame,FrameCrop{x,y,r-x,b-y})) snapshot_queued=true;
-                else media_message="Could not queue region screenshot.";
-                region_selecting=region_ready=false;
+                if (current_frame && (scroll_selection ? recording.start_scroll(*current_frame,FrameCrop{x,y,r-x,b-y}) : recording.snapshot(*current_frame,FrameCrop{x,y,r-x,b-y}))) {
+                    if (scroll_selection) { scroll_active=true; media_message="Scrolling capture started. Capture input and scroll down."; } else snapshot_queued=true;
+                } else media_message=scroll_selection ? "Could not start scrolling capture." : "Could not queue region screenshot.";
+                region_selecting=region_ready=scroll_selection=false;
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) region_selecting=region_ready=false;

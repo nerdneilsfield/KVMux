@@ -87,7 +87,11 @@ or the status overlay—to your system **Downloads** folder as
 `kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix. In Preview, choose **Select
 region screenshot**, drag inside the fitted video, then save. The drag and its
 buttons stay local and the saved JPEG contains only the matching source-frame
-pixels.
+pixels. For a long page, choose **Select scrolling screenshot**, select the region,
+then capture input and scroll downward with the wheel. KVMux samples only the next
+fresh frame after each downward wheel event. Use **Finish scrolling screenshot**
+to save one JPEG, or cancel with Escape or the Media menu. Version 1 supports only
+manual downward vertical scrolling.
 
 Recording saves the same video as an H.264 MP4 in **Downloads**, with the same
 time-based name and collision suffix. Use **Start**, **Pause**, **Resume**, and

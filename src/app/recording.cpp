@@ -124,6 +124,32 @@ bool Recording::snapshot_now(const VideoFrame& input, std::optional<FrameCrop> r
     { std::lock_guard lock(mutex_); status_.last_snapshot_path=path; status_.snapshot_error.clear(); } return true;
 }
 
+static std::vector<std::uint8_t> crop_rgb(const VideoFrame& input, FrameCrop crop) {
+    if (!valid_frame(input) || !crop.width || !crop.height || crop.x + crop.width > static_cast<unsigned>(input.frame->width) || crop.y + crop.height > static_cast<unsigned>(input.frame->height)) return {};
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(crop.width) * crop.height * 3);
+    auto* convert = sws_getContext(input.frame->width, input.frame->height, static_cast<AVPixelFormat>(input.frame->format), input.frame->width, input.frame->height, AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!convert) return {};
+    std::vector<std::uint8_t> full(static_cast<std::size_t>(input.frame->width) * input.frame->height * 3);
+    std::uint8_t* data[]{full.data()}; int stride[]{input.frame->width * 3};
+    if (sws_scale(convert, input.frame->data, input.frame->linesize, 0, input.frame->height, data, stride) < 0) { sws_freeContext(convert); return {}; }
+    sws_freeContext(convert);
+    for (unsigned y=0; y<crop.height; ++y) std::copy_n(full.data()+((crop.y+y)*static_cast<unsigned>(input.frame->width)+crop.x)*3, static_cast<std::size_t>(crop.width)*3, rgb.data()+static_cast<std::size_t>(y)*crop.width*3);
+    return rgb;
+}
+static bool write_rgb_jpeg(std::span<const std::uint8_t> rgb, unsigned width, unsigned height, const std::filesystem::path& path) {
+    const auto* encoder=avcodec_find_encoder(AV_CODEC_ID_MJPEG); AVCodecContext* context=encoder?avcodec_alloc_context3(encoder):nullptr; AVFrame* image=av_frame_alloc(); AVPacket* packet=av_packet_alloc();
+    if (!context || !image || !packet) { avcodec_free_context(&context); av_frame_free(&image); av_packet_free(&packet); return false; }
+    context->width=static_cast<int>(width); context->height=static_cast<int>(height); context->pix_fmt=AV_PIX_FMT_YUVJ420P; context->time_base={1,1};
+    int result=avcodec_open2(context,encoder,nullptr); if (result>=0) { image->format=context->pix_fmt; image->width=context->width; image->height=context->height; result=av_frame_get_buffer(image,32); }
+    SwsContext* convert=result>=0?sws_getContext(context->width,context->height,AV_PIX_FMT_RGB24,context->width,context->height,context->pix_fmt,SWS_BILINEAR,nullptr,nullptr,nullptr):nullptr;
+    if (result>=0 && !convert) result=AVERROR(ENOMEM); const std::uint8_t* source[]{rgb.data()}; int stride[]{static_cast<int>(width*3)};
+    if (result>=0 && sws_scale(convert,source,stride,0,static_cast<int>(height),image->data,image->linesize)<0) result=AVERROR(EINVAL);
+    if (result>=0) result=avcodec_send_frame(context,image); if (result>=0) result=avcodec_receive_packet(context,packet);
+    const auto temporary=path.string()+".part"; if (result>=0) { std::ofstream f(temporary,std::ios::binary); f.write(reinterpret_cast<const char*>(packet->data),packet->size); if (!f) result=AVERROR(EIO); }
+    if (result>=0) { std::error_code ec; std::filesystem::rename(temporary,path,ec); if(ec) result=AVERROR(EIO); } else { std::error_code ec; std::filesystem::remove(temporary,ec); }
+    sws_freeContext(convert); av_packet_free(&packet); av_frame_free(&image); avcodec_free_context(&context); return result>=0;
+}
+
 bool Recording::start_now(const VideoFrame& first) {
     { std::lock_guard lock(mutex_); status_.error.clear(); status_.output_path.clear(); }
     if (!valid_frame(first)) { fail("recording requires a valid CPU VideoFrame first="+std::to_string(first.frame ? first.frame->width : -1)); return false; }
@@ -181,6 +207,32 @@ bool Recording::snapshot(const VideoFrame& input, std::optional<FrameCrop> crop)
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.snapshot_error="snapshot requires a valid CPU VideoFrame"; return false; }
     ensure_worker(); { std::lock_guard lock(mutex_); status_.snapshot_error.clear(); snapshot_=std::pair{input,crop}; } wake_.notify_one(); return true;
 }
+bool Recording::start_scroll(const VideoFrame& input, FrameCrop crop) {
+    if (!valid_frame(input)) return false;
+    ensure_worker();
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state != ScrollCaptureState::idle) return false;
+    status_.scroll_state = ScrollCaptureState::starting; status_.scroll_error.clear();
+    status_.last_scroll_path.clear(); status_.scroll_width = status_.scroll_height = 0;
+    scroll_start_ = ScrollRequest{input, crop};
+    wake_.notify_one(); return true;
+}
+bool Recording::sample_scroll(const VideoFrame& input) {
+    if (!valid_frame(input)) return false;
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state != ScrollCaptureState::capturing) return false;
+    scroll_latest_ = input; wake_.notify_one(); return true;
+}
+bool Recording::finish_scroll() {
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state != ScrollCaptureState::capturing) return false;
+    status_.scroll_state = ScrollCaptureState::finishing; scroll_finish_ = true; wake_.notify_one(); return true;
+}
+void Recording::cancel_scroll() {
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state == ScrollCaptureState::idle) return;
+    scroll_cancel_ = true; scroll_start_.reset(); scroll_latest_.reset(); wake_.notify_one();
+}
 bool Recording::start(const VideoFrame& input) {
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.error="recording requires a valid CPU VideoFrame"; return false; }
     ensure_worker(); { std::lock_guard lock(mutex_); if (status_.state!=RecordingState::idle) return false; status_.error.clear(); status_.state=RecordingState::starting; start_=input; }
@@ -195,12 +247,28 @@ bool Recording::stop() {
 void Recording::ensure_worker() { if (!worker_.joinable()) worker_=std::jthread([this](std::stop_token token){ worker(token); }); }
 void Recording::worker(std::stop_token token) {
     while (!token.stop_requested()) {
-        std::optional<VideoFrame> begin, next; std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> shot; bool stop=false;
-        { std::unique_lock lock(mutex_); wake_.wait(lock,token,[this]{ return start_ || snapshot_ || latest_ || stop_requested_; });
+        std::optional<VideoFrame> begin, next, scroll_next; std::optional<ScrollRequest> scroll_begin; std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> shot; bool stop=false, scroll_finish=false, scroll_cancel=false;
+        { std::unique_lock lock(mutex_); wake_.wait(lock,token,[this]{ return start_ || snapshot_ || latest_ || stop_requested_ || scroll_start_ || scroll_latest_ || scroll_finish_ || scroll_cancel_; });
           if (token.stop_requested()) break;
-          begin=std::move(start_); start_.reset(); shot=std::move(snapshot_); snapshot_.reset(); stop=std::exchange(stop_requested_,false); next=std::move(latest_); latest_.reset(); }
+          begin=std::move(start_); start_.reset(); shot=std::move(snapshot_); snapshot_.reset(); stop=std::exchange(stop_requested_,false); next=std::move(latest_); latest_.reset(); scroll_begin=std::move(scroll_start_); scroll_start_.reset(); scroll_next=std::move(scroll_latest_); scroll_latest_.reset(); scroll_finish=std::exchange(scroll_finish_,false); scroll_cancel=std::exchange(scroll_cancel_,false); }
         if (begin) { const bool begun=start_now(*begin); if (begun) { std::lock_guard lock(mutex_); status_.state=RecordingState::recording; paused_duration_={}; } }
         if (shot) (void)snapshot_now(shot->first,shot->second);
+        if (scroll_cancel) { scroll_stitcher_.reset(); std::lock_guard lock(mutex_); status_.scroll_state=ScrollCaptureState::idle; }
+        if (scroll_begin) {
+            auto pixels=crop_rgb(scroll_begin->frame,scroll_begin->crop);
+            scroll_stitcher_.emplace(); scroll_crop_=scroll_begin->crop; scroll_sequence_=1;
+            const auto update=scroll_stitcher_->add(pixels,scroll_begin->crop.width,scroll_begin->crop.height,scroll_sequence_);
+            std::lock_guard lock(mutex_); if(update.result==StitchResult::started) { status_.scroll_state=ScrollCaptureState::capturing; status_.scroll_width=scroll_begin->crop.width; status_.scroll_height=scroll_begin->crop.height; } else { status_.scroll_state=ScrollCaptureState::failed; status_.scroll_error="Invalid scrolling capture region."; }
+        }
+        if (scroll_next && scroll_stitcher_) {
+            auto pixels=crop_rgb(*scroll_next,scroll_crop_); auto update=scroll_stitcher_->add(pixels,scroll_crop_.width,scroll_crop_.height,++scroll_sequence_);
+            std::lock_guard lock(mutex_); status_.scroll_height=scroll_stitcher_->height(); if(update.result==StitchResult::size_limit) { status_.scroll_state=ScrollCaptureState::failed; status_.scroll_error="Scrolling screenshot reached its size limit."; }
+        }
+        if (scroll_finish && scroll_stitcher_) {
+            const auto dir=downloads_directory(); std::error_code ec; std::filesystem::create_directories(dir,ec); const auto path=timestamped(dir,".jpeg");
+            const bool ok=!ec && write_rgb_jpeg(scroll_stitcher_->pixels(),scroll_stitcher_->width(),scroll_stitcher_->height(),path);
+            scroll_stitcher_.reset(); std::lock_guard lock(mutex_); status_.scroll_state=ok?ScrollCaptureState::idle:ScrollCaptureState::failed; if(ok) status_.last_scroll_path=path; else status_.scroll_error="Could not write scrolling JPEG.";
+        }
         if (stop && impl_) {
             int result=avcodec_send_frame(impl_->codec,nullptr); AVPacket* packet=av_packet_alloc();
             while (result>=0) { result=avcodec_receive_packet(impl_->codec,packet); if (result==AVERROR_EOF || result==AVERROR(EAGAIN)) { result=0; break; } if (result>=0) { av_packet_rescale_ts(packet,impl_->codec->time_base,impl_->stream->time_base); packet->stream_index=impl_->stream->index; result=av_interleaved_write_frame(impl_->format,packet); av_packet_unref(packet); } }

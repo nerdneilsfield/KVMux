@@ -51,18 +51,18 @@ Evidence: macOS Debug `kvmux` and `kvmux_recording_test` built; recording and in
 
 ### T2: Wheel-guided scrolling stitch
 
-Status: pending
+Status: done
 Depends on: T1
 Acceptance: A3, A4, A5
 Targets: new internal stitcher files under `src/app/`, `src/app/recording.*`, `src/app/main.cpp`, focused tests, `README.md`, `CMakeLists.txt`.
 Contracts: bounded latest requested frame; packed RGB crop; accepted append reports displacement; output width fixed and byte/pixel cap enforced.
 
-- [ ] Implement deterministic vertical overlap matching and bounded append/finalize behavior on the media worker.
-- [ ] Wire scrolling UI lifecycle to selected region, remote wheel events, fresh decoded frames, stop/cancel, and lifecycle loss without consuming remote wheel input.
-- [ ] Verify focused synthetic stitch tests, recording tests, build, and the existing input-router tests. Manually run the UI when hardware/video is available; otherwise record hardware behavior as unverified.
-- [ ] Inspect and commit the scrolling screenshot slice.
+- [x] Implement deterministic vertical overlap matching and bounded append/finalize behavior on the media worker.
+- [x] Wire scrolling UI lifecycle to selected region, remote wheel events, fresh decoded frames, stop/cancel, and lifecycle loss without consuming remote wheel input.
+- [x] Verify focused synthetic stitch tests, recording tests, build, and the existing input-router tests. Manually run the UI when hardware/video is available; otherwise record hardware behavior as unverified.
+- [x] Inspect and commit the scrolling screenshot slice.
 
-Evidence: pending.
+Evidence: macOS Debug stitcher, recording, input-router tests and `kvmux` build passed. Synthetic tests cover ordered append, unchanged/reverse/stale/bad-match rejection, fixed width, and pixel bounds. Physical target scrolling remains unverified.
 
 ## Final acceptance
 
