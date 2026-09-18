@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -343,6 +344,9 @@ int main(int argc, char** argv) {
     std::filesystem::path displayed_snapshot_path;
     std::string displayed_snapshot_error;
     bool snapshot_queued = false;
+    bool region_selecting = false, region_dragging = false, region_ready = false;
+    ImVec2 region_start{}, region_end{};
+    Rect displayed_video_rect{};
     bool paste_was_active = false, paste_cancelled = false;
     std::string last_status;
 
@@ -359,6 +363,33 @@ int main(int argc, char** argv) {
             SDL_GetWindowSize(window, &event_width, &event_height);
             const bool icon_enabled = !popup_open && !remote_buttons &&
                 !(remote_input && config.mouse_mode == MouseMode::relative);
+            const bool preview = event_state == InputState::preview;
+            if (region_selecting) {
+                if (!preview || event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+                    event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN ||
+                    (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode == SDL_SCANCODE_ESCAPE)) {
+                    region_selecting = region_dragging = region_ready = false;
+                    if (event.type == SDL_EVENT_KEY_DOWN) continue;
+                }
+                if (preview && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT &&
+                    displayed_video_rect.contains(event.button.x, event.button.y)) {
+                    region_start = region_end = {event.button.x, event.button.y};
+                    region_dragging = true; region_ready = false; continue;
+                }
+                if (region_dragging && event.type == SDL_EVENT_MOUSE_MOTION) {
+                    region_end = {static_cast<float>(std::clamp(static_cast<double>(event.motion.x), displayed_video_rect.x, displayed_video_rect.x + displayed_video_rect.width)),
+                        static_cast<float>(std::clamp(static_cast<double>(event.motion.y), displayed_video_rect.y, displayed_video_rect.y + displayed_video_rect.height))};
+                    continue;
+                }
+                if (region_dragging && event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT) {
+                    region_dragging = false;
+                    region_ready = std::abs(region_end.x-region_start.x) >= 3.F && std::abs(region_end.y-region_start.y) >= 3.F;
+                    if (!region_ready) { region_selecting = false; media_message = "Region is too small."; }
+                    continue;
+                }
+                if (preview && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
+                    event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_WHEEL)) continue;
+            }
             if (menu_icon.consume(event, icon_enabled, static_cast<float>(event_width), static_cast<float>(event_height))) {
                 if (menu_icon.clicked) {
                     session->release_control();
@@ -591,6 +622,10 @@ int main(int argc, char** argv) {
                 } else {
                     media_message = "Could not queue screenshot.";
                 }
+            }
+            if (ImGui::MenuItem("Select region screenshot")) {
+                region_selecting = true; region_dragging = region_ready = false;
+                ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
             ImGui::BeginDisabled(!valid_visible_cpu_frame || status.state != RecordingState::idle);
@@ -844,12 +879,21 @@ int main(int argc, char** argv) {
         ImGui::GetWindowDrawList()->AddRectFilled(start, {start.x + video_size.x, start.y + video_size.y}, IM_COL32(0, 0, 0, 255));
         if (renderer.texture_id() && renderer.width() > 0) {
             const auto fit = fit_video_rect({start.x, start.y, video_size.x, video_size.y}, renderer.width(), renderer.height());
+            displayed_video_rect = fit;
             session->set_video_rect(target_input_rect(fit, config.target_aspect));
             ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(renderer.texture_id()),
                 {static_cast<float>(fit.x), static_cast<float>(fit.y)},
                 {static_cast<float>(fit.x + fit.width), static_cast<float>(fit.y + fit.height)}, {0, 0}, {1, 1});
         } else {
+            displayed_video_rect = {};
             session->set_video_rect({});
+        }
+        if (region_selecting && (region_dragging || region_ready)) {
+            const ImVec2 lo{std::min(region_start.x,region_end.x),std::min(region_start.y,region_end.y)};
+            const ImVec2 hi{std::max(region_start.x,region_end.x),std::max(region_start.y,region_end.y)};
+            auto* draw=ImGui::GetWindowDrawList();
+            draw->AddRectFilled(lo,hi,IM_COL32(196,95,60,45));
+            draw->AddRect(lo,hi,IM_COL32(237,148,100,255),0.F,0,2.F);
         }
         if (!snapshot.video_fresh) {
             const ImVec2 warning_pos{start.x + 16.F, start.y + 16.F};
@@ -869,6 +913,25 @@ int main(int argc, char** argv) {
         }
         ImGui::End();
         ImGui::PopStyleVar();
+        if (region_selecting && region_ready && !remote_input) {
+            ImGui::SetNextWindowPos({std::min(region_start.x,region_end.x),std::max(region_start.y,region_end.y)+6.F}, ImGuiCond_Always);
+            ImGui::Begin("Region screenshot",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoSavedSettings);
+            record_local_region();
+            if (ImGui::Button("Save region")) {
+                const double left=std::min(region_start.x,region_end.x), top=std::min(region_start.y,region_end.y);
+                const double right=std::max(region_start.x,region_end.x), bottom=std::max(region_start.y,region_end.y);
+                const unsigned x=static_cast<unsigned>(std::floor((left-displayed_video_rect.x)*renderer.width()/displayed_video_rect.width));
+                const unsigned y=static_cast<unsigned>(std::floor((top-displayed_video_rect.y)*renderer.height()/displayed_video_rect.height));
+                const unsigned r=static_cast<unsigned>(std::ceil((right-displayed_video_rect.x)*renderer.width()/displayed_video_rect.width));
+                const unsigned b=static_cast<unsigned>(std::ceil((bottom-displayed_video_rect.y)*renderer.height()/displayed_video_rect.height));
+                if (current_frame && recording.snapshot(*current_frame,FrameCrop{x,y,r-x,b-y})) snapshot_queued=true;
+                else media_message="Could not queue region screenshot.";
+                region_selecting=region_ready=false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) region_selecting=region_ready=false;
+            ImGui::End();
+        }
         const auto d = diagnostics.snapshot();
         char rates[64];
         if (video_bytes_per_second && control_bytes_per_second)

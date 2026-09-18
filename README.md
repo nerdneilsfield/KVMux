@@ -84,7 +84,10 @@ logged. Unicode, Chinese, and Wubi input are not supported yet.
 Open **Media** from the top menu, or from the floating KVMux logo menu. A
 screenshot saves the native decoded video only—never menus, the mouse pointer,
 or the status overlay—to your system **Downloads** folder as
-`kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix.
+`kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix. In Preview, choose **Select
+region screenshot**, drag inside the fitted video, then save. The drag and its
+buttons stay local and the saved JPEG contains only the matching source-frame
+pixels.
 
 Recording saves the same video as an H.264 MP4 in **Downloads**, with the same
 time-based name and collision suffix. Use **Start**, **Pause**, **Resume**, and

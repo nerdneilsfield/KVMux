@@ -12,6 +12,10 @@
 namespace kvmux {
 
 enum class RecordingState { idle, starting, recording, paused, stopping, failed };
+struct FrameCrop {
+    unsigned x{}, y{}, width{}, height{};
+};
+
 struct RecordingStatus {
     RecordingState state{RecordingState::idle};
     std::filesystem::path output_path;
@@ -30,7 +34,7 @@ public:
     Recording& operator=(const Recording&) = delete;
 
     [[nodiscard]] std::filesystem::path downloads_directory() const;
-    [[nodiscard]] bool snapshot(const VideoFrame& frame);
+    [[nodiscard]] bool snapshot(const VideoFrame& frame, std::optional<FrameCrop> crop = std::nullopt);
     [[nodiscard]] bool start(const VideoFrame& first_frame);
     [[nodiscard]] bool append(const VideoFrame& frame);
     [[nodiscard]] bool pause();
@@ -43,7 +47,7 @@ public:
 private:
     struct Impl;
     [[nodiscard]] bool start_now(const VideoFrame& frame);
-    [[nodiscard]] bool snapshot_now(const VideoFrame& frame);
+    [[nodiscard]] bool snapshot_now(const VideoFrame& frame, std::optional<FrameCrop> crop);
     [[nodiscard]] bool write_frame(const VideoFrame& frame);
     void worker(std::stop_token stop_token);
     void ensure_worker();
@@ -57,7 +61,7 @@ private:
     std::chrono::steady_clock::duration paused_duration_{};
     std::condition_variable_any wake_;
     std::optional<VideoFrame> latest_;
-    std::optional<VideoFrame> snapshot_;
+    std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> snapshot_;
     std::optional<VideoFrame> start_;
     bool stop_requested_{};
     std::jthread worker_;

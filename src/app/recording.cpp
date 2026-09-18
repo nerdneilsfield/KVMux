@@ -75,8 +75,15 @@ std::filesystem::path Recording::downloads_directory() const { return output_dir
 void Recording::fail(std::string message) noexcept { std::lock_guard lock(mutex_); status_.error=std::move(message); status_.state=RecordingState::failed; }
 RecordingStatus Recording::status() const { std::lock_guard lock(mutex_); return status_; }
 
-bool Recording::snapshot_now(const VideoFrame& input) {
+bool Recording::snapshot_now(const VideoFrame& input, std::optional<FrameCrop> requested_crop) {
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.snapshot_error="snapshot requires a valid CPU VideoFrame"; return false; }
+    const unsigned source_width=static_cast<unsigned>(input.frame->width);
+    const unsigned source_height=static_cast<unsigned>(input.frame->height);
+    const FrameCrop crop=requested_crop.value_or(FrameCrop{0,0,source_width,source_height});
+    if (!crop.width || !crop.height || crop.x>=source_width || crop.y>=source_height ||
+        crop.width>source_width-crop.x || crop.height>source_height-crop.y) {
+        std::lock_guard lock(mutex_); status_.snapshot_error="snapshot crop is outside the source frame"; return false;
+    }
     const auto directory=downloads_directory();
     std::error_code ec;
     std::filesystem::create_directories(directory,ec);
@@ -87,14 +94,25 @@ bool Recording::snapshot_now(const VideoFrame& input) {
     AVCodecContext* context=avcodec_alloc_context3(encoder);
     AVFrame* image=av_frame_alloc(); AVPacket* packet=av_packet_alloc();
     if (!context || !image || !packet) { avcodec_free_context(&context); av_frame_free(&image); av_packet_free(&packet); { std::lock_guard lock(mutex_); status_.snapshot_error="allocate JPEG encoder"; } return false; }
-    context->width=input.frame->width; context->height=input.frame->height;
+    context->width=static_cast<int>(crop.width); context->height=static_cast<int>(crop.height);
     context->pix_fmt=AV_PIX_FMT_YUVJ420P; context->time_base={1,1};
     int result=avcodec_open2(context,encoder,nullptr);
     if (result>=0) { image->format=context->pix_fmt; image->width=context->width; image->height=context->height; result=av_frame_get_buffer(image,32); }
     SwsContext* convert=nullptr;
-    if (result>=0) convert=sws_getContext(input.frame->width,input.frame->height,static_cast<AVPixelFormat>(input.frame->format),image->width,image->height,context->pix_fmt,SWS_BILINEAR,nullptr,nullptr,nullptr);
+    if (result>=0) convert=sws_getContext(static_cast<int>(crop.width),static_cast<int>(crop.height),static_cast<AVPixelFormat>(input.frame->format),image->width,image->height,context->pix_fmt,SWS_BILINEAR,nullptr,nullptr,nullptr);
     if (result>=0 && !convert) result=AVERROR(ENOMEM);
-    if (result>=0) result=sws_scale(convert,input.frame->data,input.frame->linesize,0,input.frame->height,image->data,image->linesize)<0 ? AVERROR(EINVAL) : 0;
+    std::array<const std::uint8_t*,4> source_data{};
+    if (result>=0) {
+        const auto format=static_cast<AVPixelFormat>(input.frame->format);
+        const auto* descriptor=av_pix_fmt_desc_get(format);
+        for (int plane=0; plane<4 && input.frame->data[plane]; ++plane) {
+            const int shift_x=plane==0 ? 0 : descriptor->log2_chroma_w;
+            const int shift_y=plane==0 ? 0 : descriptor->log2_chroma_h;
+            const int step=descriptor->comp[plane==0 ? 0 : std::min(plane,descriptor->nb_components-1)].step;
+            source_data[plane]=input.frame->data[plane]+(crop.y>>shift_y)*static_cast<unsigned>(input.frame->linesize[plane])+(crop.x>>shift_x)*static_cast<unsigned>(step);
+        }
+        result=sws_scale(convert,source_data.data(),input.frame->linesize,0,static_cast<int>(crop.height),image->data,image->linesize)<0 ? AVERROR(EINVAL) : 0;
+    }
     if (result>=0) result=avcodec_send_frame(context,image);
     if (result>=0) result=avcodec_receive_packet(context,packet);
     const auto temporary=path.string()+".part";
@@ -159,9 +177,9 @@ bool Recording::append(const VideoFrame& input) {
     { std::lock_guard lock(mutex_); if (status_.state!=RecordingState::recording) return false; latest_=input; }
     wake_.notify_one(); return true;
 }
-bool Recording::snapshot(const VideoFrame& input) {
+bool Recording::snapshot(const VideoFrame& input, std::optional<FrameCrop> crop) {
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.snapshot_error="snapshot requires a valid CPU VideoFrame"; return false; }
-    ensure_worker(); { std::lock_guard lock(mutex_); status_.snapshot_error.clear(); snapshot_=input; } wake_.notify_one(); return true;
+    ensure_worker(); { std::lock_guard lock(mutex_); status_.snapshot_error.clear(); snapshot_=std::pair{input,crop}; } wake_.notify_one(); return true;
 }
 bool Recording::start(const VideoFrame& input) {
     if (!valid_frame(input)) { std::lock_guard lock(mutex_); status_.error="recording requires a valid CPU VideoFrame"; return false; }
@@ -177,12 +195,12 @@ bool Recording::stop() {
 void Recording::ensure_worker() { if (!worker_.joinable()) worker_=std::jthread([this](std::stop_token token){ worker(token); }); }
 void Recording::worker(std::stop_token token) {
     while (!token.stop_requested()) {
-        std::optional<VideoFrame> begin, shot, next; bool stop=false;
+        std::optional<VideoFrame> begin, next; std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> shot; bool stop=false;
         { std::unique_lock lock(mutex_); wake_.wait(lock,token,[this]{ return start_ || snapshot_ || latest_ || stop_requested_; });
           if (token.stop_requested()) break;
           begin=std::move(start_); start_.reset(); shot=std::move(snapshot_); snapshot_.reset(); stop=std::exchange(stop_requested_,false); next=std::move(latest_); latest_.reset(); }
         if (begin) { const bool begun=start_now(*begin); if (begun) { std::lock_guard lock(mutex_); status_.state=RecordingState::recording; paused_duration_={}; } }
-        if (shot) (void)snapshot_now(*shot);
+        if (shot) (void)snapshot_now(shot->first,shot->second);
         if (stop && impl_) {
             int result=avcodec_send_frame(impl_->codec,nullptr); AVPacket* packet=av_packet_alloc();
             while (result>=0) { result=avcodec_receive_packet(impl_->codec,packet); if (result==AVERROR_EOF || result==AVERROR(EAGAIN)) { result=0; break; } if (result>=0) { av_packet_rescale_ts(packet,impl_->codec->time_base,impl_->stream->time_base); packet->stream_index=impl_->stream->index; result=av_interleaved_write_frame(impl_->format,packet); av_packet_unref(packet); } }
