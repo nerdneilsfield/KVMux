@@ -141,7 +141,7 @@ struct RelayClient::Impl {
         capture.actual_mode = {"relay", sample.width, sample.height, {0,1},
             codec == VideoCodec::mjpeg ? PixelFormat::mjpeg : PixelFormat::nv12,
             codec == VideoCodec::mjpeg ? PixelFormat::mjpeg : PixelFormat::nv12,
-            codec == VideoCodec::mjpeg ? "MJPEG" : "HEVC"};
+            codec == VideoCodec::mjpeg ? "MJPEG" : codec == VideoCodec::h264 ? "H.264" : "H.265"};
         for (auto& identity : presentations) {
             if (identity.capture == sample.sequence && identity.generation == sample.generation && identity.marker == marker)
                 identity.published = true;
@@ -151,7 +151,7 @@ struct RelayClient::Impl {
     void decoder_loop() {
         std::string error;
         auto decoder = create_video_decoder(options.decoder_backend, error);
-        if (!decoder) { fail("HEVC decoder: " + error); return; }
+        if (!decoder) { fail("H.26x decoder: " + error); return; }
         bool configured{};
         std::uint64_t current_marker{};
         std::uint32_t width{}, height{};
@@ -176,7 +176,7 @@ struct RelayClient::Impl {
             if (Clock::now() - au.arrival >= 250ms) { recover(); continue; }
             if (!configured || width != au.width || height != au.height) {
                 if (!au.idr) { recover(); continue; }
-                CodecConfig config; config.width = au.width; config.height = au.height; config.generation = au.generation;
+                CodecConfig config; config.codec = au.codec; config.width = au.width; config.height = au.height; config.generation = au.generation;
                 const auto result = decoder->configure(config);
                 if (!result.ok()) { recover(); continue; }
                 configured = true; width = au.width; height = au.height;
@@ -204,7 +204,7 @@ struct RelayClient::Impl {
                     sample.sample_aspect_ratio_denominator = frame.sample_aspect_ratio_denominator;
                     sample.color_range = frame.color_range; sample.color_matrix = frame.color_matrix;
                     sample.decoded = std::move(frame.frame);
-                    publish(std::move(sample), VideoCodec::hevc);
+                    publish(std::move(sample), au.codec);
                     const auto diagnostic = decoder->diagnostic();
                     video.hardware_active = diagnostic.hardware_active; video.hardware_verified = diagnostic.hardware_verified;
                     video.decoder_diagnostic = diagnostic.detail; video.error.clear();
@@ -249,7 +249,7 @@ struct RelayClient::Impl {
                     kcp = std::make_unique<KcpChannel>(session.tuple().conversation);
                     receiver = std::make_unique<MediaReceiver>(session.welcome().codec, session.welcome().generation);
                     { std::lock_guard lock(mutex); generation = session.welcome().generation; video.codec = session.welcome().codec; video.media = {}; video.last_recovery_reason = MediaReason::none; }
-                    if (session.welcome().codec == VideoCodec::hevc) decoder_worker = std::thread([this] { decoder_loop(); });
+                    if (session.welcome().codec != VideoCodec::mjpeg) decoder_worker = std::thread([this] { decoder_loop(); });
                 } else if (action.kind == SessionAction::Kind::expired) {
                     if (closing) stopped = true;
                     else if (!stopped) fail("UDP session expired");

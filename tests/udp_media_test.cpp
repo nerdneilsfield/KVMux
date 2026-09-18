@@ -57,17 +57,17 @@ Events send(MediaReceiver& receiver, const MediaFrame& f, MediaTime now = epoch,
     return result;
 }
 void roundtrips() {
-    for (auto codec : {VideoCodec::mjpeg, VideoCodec::hevc}) {
+    for (auto codec : {VideoCodec::mjpeg, VideoCodec::hevc, VideoCodec::h264}) {
         const std::size_t overhead = codec == VideoCodec::mjpeg ? 24 : 58;
         for (auto size : {std::size_t(100), 1128 - overhead, std::size_t(1129), std::size_t(70000), kMaxCompressedSampleBytes}) {
-            const auto frame = make_frame(codec, 1, size, codec == VideoCodec::hevc);
+            const auto frame = make_frame(codec, 1, size, codec != VideoCodec::mjpeg);
             assert(frame.bytes.size() == size + overhead);
             MediaReceiver receiver(codec, 7);
             auto result = send(receiver, frame, epoch, {}, true, true);
             assert(result.frames.size() == 1 && result.frames[0].bytes == frame.bytes);
             assert(result.frames[0].first_arrival == epoch && receiver.stats().charged_bytes == 0);
         }
-        const auto f = make_frame(codec, 1, 20000, codec == VideoCodec::hevc);
+        const auto f = make_frame(codec, 1, 20000, codec != VideoCodec::mjpeg);
         for (const auto missing : {std::vector<std::size_t>{0}, {4}, {media_packet_count(f)-2}, {8,17}}) {
             MediaReceiver receiver(codec, 7);
             auto result = send(receiver, f, epoch, missing, true, true);
@@ -246,13 +246,13 @@ void pacing() {
     while (auto p = burst.next_datagram(epoch + 10s)) burst_bytes += p->size() + 32;
     assert(burst_bytes == 2400);
     // Every blackout exceeds or reaches the active lifetime: no old backlog.
-    for (auto blackout : {100ms,300ms,800ms,2000ms}) for (auto codec : {VideoCodec::mjpeg, VideoCodec::hevc}) {
+    for (auto blackout : {100ms,300ms,800ms,2000ms}) for (auto codec : {VideoCodec::mjpeg, VideoCodec::hevc, VideoCodec::h264}) {
         MediaPacer paused(codec, 7, 1000000, epoch);
-        assert(paused.submit(make_frame(codec, 1, 4000, codec == VideoCodec::hevc), epoch).accepted);
+        assert(paused.submit(make_frame(codec, 1, 4000, codec != VideoCodec::mjpeg), epoch).accepted);
         assert(paused.next_datagram(epoch));
         auto expiry = paused.poll(epoch + blackout);
         assert(!expiry.accepted && !paused.next_datagram(epoch + blackout));
-        auto next = make_frame(codec, 10, 4000, codec == VideoCodec::hevc); next.first_arrival = epoch + blackout;
+        auto next = make_frame(codec, 10, 4000, codec != VideoCodec::mjpeg); next.first_arrival = epoch + blackout;
         assert(paused.submit(next, epoch + blackout).accepted);
         MediaReceiver recovered(codec, 7); Events result;
         for (int ms = 0; ms < 100; ++ms) {

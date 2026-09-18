@@ -12,6 +12,7 @@ struct ServerOptions {
     std::uint16_t control_port{17000}, video_port{17001};
     VideoCodec codec{VideoCodec::mjpeg};
     CodecBackend encoder_backend{CodecBackend::automatic};
+    EncodingPriority priority{EncodingPriority::quality};
     std::uint32_t bitrate{8'000'000};
     // UDP envelope, media payload and XOR parity; excludes UDP/IP headers.
     std::uint64_t transport_bytes_per_second{12'000'000};

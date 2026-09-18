@@ -129,8 +129,7 @@ these ports to the Internet.
 4. Select **Connect relay**. Wait for fresh video and ready control, then click
    the video to capture input. Only one controller is supported.
 
-MJPEG is the default network video format. Optional H.265 encoding requires raw
-capture; MJPEG-to-H.265 transcoding is not supported. See [H.265 setup](docs/lan-relay.md#choose-h265-encoding)
+MJPEG pass-through is the default network video format. Raw capture supports four explicit profiles: `--encoding h264-quality|h264-size|h265-quality|h265-size`. See [LAN relay setup](docs/lan-relay.md#choose-h264h265-encoding)
 for encoder requirements and the GUI's **Decode** setting.
 
 ## Release input and open the menu

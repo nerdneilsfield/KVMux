@@ -61,16 +61,16 @@ Evidence: macOS Debug headless build passed; codec_factory, ffmpeg_encoder, ffmp
 
 ### T3: Relay integration and operator interface
 
-Status: pending
+Status: done
 Depends on: T2
 Acceptance: C4, C5
 Targets: relay selection/server/client/UDP, relay CLI, UI diagnostics, docs and focused tests.
 
-- [ ] Route both inter-frame codecs through encoder, generic AU wire, recovery and decoder.
-- [ ] Expose exactly four RAW encoding choices with effective bounded bitrate/preset diagnostics.
-- [ ] Run the focused codec/network suite and a macOS build; record hardware validation as unverified unless real evidence exists; inspect and commit.
+- [x] Route both inter-frame codecs through encoder, generic AU wire, recovery and decoder.
+- [x] Expose exactly four RAW encoding choices with effective bounded bitrate/preset diagnostics.
+- [x] Run the focused codec/network suite and a macOS build; record hardware validation as unverified unless real evidence exists; inspect and commit.
 
-Evidence: pending.
+Evidence: macOS Debug GUI/headless build passed. Codec factory, FFmpeg encoder/decoder, media wire, relay wire/session/selection/server/recovery, and UDP media passed. `relay_client` reached different pre-existing timing-sensitive failures on two runs while its codec path passed earlier cases; see task report. Physical Jetson and VideoToolbox remain unverified.
 
 ## Final acceptance
 

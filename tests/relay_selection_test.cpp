@@ -45,6 +45,7 @@ int main() {
     fails([]{select_mode({});}, "No usable");
     raw.front().delivered_format=PixelFormat::yuy2;
     assert(select_mode(raw,{},VideoCodec::hevc)==0);
+    assert(select_mode(raw,{},VideoCodec::h264)==0);
     fails([&]{select_mode(modes,0,VideoCodec::hevc);}, "raw");
     raw.front().width=1279;
     fails([&]{select_mode(raw,0,VideoCodec::hevc);}, "even dimensions");

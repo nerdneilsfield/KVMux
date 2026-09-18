@@ -1083,7 +1083,7 @@ int main(int argc, char** argv) {
             if (remote_client) {
                 const auto video = remote_client->video_snapshot();
                 ImGui::TextUnformatted("Relay transport: UDP v3 / KCP control");
-                ImGui::Text("Relay codec: %s", video.codec == VideoCodec::hevc ? "H.265" : "MJPEG");
+                ImGui::Text("Relay codec: %s", video.codec == VideoCodec::hevc ? "H.265" : video.codec == VideoCodec::h264 ? "H.264" : "MJPEG");
                 ImGui::Text("Decoder backend: %s", video.decoder_backend
                     ? decoder_backend_label(*video.decoder_backend) : "-- (not active)");
                 ImGui::Text("Hardware decoding: %s", !video.hardware_verified ? "unverified" :

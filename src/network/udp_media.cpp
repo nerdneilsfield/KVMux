@@ -65,7 +65,7 @@ struct Header {
     std::size_t size{}, count{}, index{}, length{};
 };
 std::optional<Header> parse(std::span<const std::uint8_t> b) {
-    if (b.size() < 40 || b.size() > 1168 || b[0] != 1 || b[1] > 1 || b[2] > 1 ||
+    if (b.size() < 40 || b.size() > 1168 || b[0] != 1 || b[1] > 2 || b[2] > 1 ||
         b[3] > 1 || (b[1] == 0 && b[3]) || get(b, 30, 2) || get(b, 32, 8)) return {};
     Header h{static_cast<VideoCodec>(b[1]), b[3] != 0, b[2] != 0,
         get(b, 4, 8), get(b, 12, 8), static_cast<std::size_t>(get(b, 20, 4)),

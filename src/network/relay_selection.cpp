@@ -63,13 +63,13 @@ std::string select_device(std::span<const DeviceInfo> devices,
 std::size_t select_mode(std::span<const CaptureMode> modes, std::optional<std::size_t> requested, VideoCodec codec) {
     if (requested) {
         if (*requested >= modes.size()) throw std::runtime_error("Capture mode index out of range");
-        if (!usable(modes[*requested], codec)) throw std::runtime_error(codec == VideoCodec::hevc ? "HEVC requires supported native and delivered raw video with even dimensions; MJPEG transcoding is not supported" : "LAN relay requires usable native and delivered MJPEG; raw modes are unsupported");
+        if (!usable(modes[*requested], codec)) throw std::runtime_error(codec != VideoCodec::mjpeg ? "H.264/H.265 requires supported native and delivered raw video with even dimensions; MJPEG transcoding is not supported" : "LAN relay requires usable native and delivered MJPEG; raw modes are unsupported");
         return *requested;
     }
     std::optional<std::size_t> best;
     for (std::size_t i = 0; i < modes.size(); ++i)
         if (usable(modes[i], codec) && (!best || better(modes[i], modes[*best]))) best = i;
-    if (!best) throw std::runtime_error(codec == VideoCodec::hevc ? "No supported native and delivered raw modes for HEVC found" : "No usable native and delivered MJPEG modes found; raw modes are unsupported");
+    if (!best) throw std::runtime_error(codec != VideoCodec::mjpeg ? "No supported native and delivered raw modes for H.264/H.265 found" : "No usable native and delivered MJPEG modes found; raw modes are unsupported");
     return *best;
 }
 std::string select_serial(std::span<const SerialPortInfo> ports,

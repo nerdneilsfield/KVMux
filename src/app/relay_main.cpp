@@ -30,13 +30,15 @@ void print_help(std::ostream& out) {
            "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
            "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] [--baud 9600]\n"
            "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
-           "       [--codec mjpeg|hevc] [--encoder auto|jetson|software] [--bitrate 8000000]\n"
+           "       [--codec mjpeg | --encoding h264-quality|h264-size|h265-quality|h265-size]\n"
+           "       [--encoder auto|jetson|software] [--bitrate 8000000]\n"
            "       [--transport-rate 12000000] (UDP envelope+payload+FEC bytes/s; excludes IP/UDP headers)\n"
            "Omitted device: require one capture device. Omitted serial: require one USB\n"
            "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
            "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including 59.94/29.97),\n"
            "then descending pixel area, width, height and fps; ties use first index.\n"
-           "HEVC requires native and delivered raw video. Auto tries hardware, then CPU.\n"
+           "The four --encoding choices require raw video. Auto tries Jetson, then software.\n"
+           "Use --codec mjpeg for MJPEG pass-through; do not combine it with --encoding.\n"
            "Explicit choices never fall back. Bitrate is in bits/s.\n"
            "Transport rate: 1..1000000000 bytes/s. Encoder bitrate: bits/s (not transport cap).\n"
            "Unauthenticated LAN UDP v3 / KCP control: trusted networks only.\n";
@@ -47,7 +49,7 @@ void interrupt(int) { interrupted=1; }
 int serve(int argc,char** argv) {
     kvmux::relay::ServerOptions options;
     std::optional<std::string> device_request,serial_request;
-    std::optional<std::size_t> mode_request; int baud=9600;
+    std::optional<std::size_t> mode_request; bool codec_seen=false, encoding_seen=false; int baud=9600;
     for(int i=2;i<argc;i+=2) {
         if(i+1>=argc)throw std::runtime_error("Missing option value");
         const std::string_view key=argv[i],value=argv[i+1];
@@ -55,9 +57,17 @@ int serve(int argc,char** argv) {
         else if(key=="--serial")serial_request=value;
         else if(key=="--bind")options.bind_address=value;
         else if(key=="--codec") {
-            if(value=="mjpeg")options.codec=kvmux::VideoCodec::mjpeg;
-            else if(value=="hevc")options.codec=kvmux::VideoCodec::hevc;
-            else throw std::runtime_error("--codec must be mjpeg or hevc");
+            if(value!="mjpeg") throw std::runtime_error("--codec only accepts mjpeg; use --encoding for raw video");
+            if(encoding_seen) throw std::runtime_error("--codec and --encoding cannot be combined");
+            codec_seen=true; options.codec=kvmux::VideoCodec::mjpeg;
+        } else if(key=="--encoding") {
+            if(codec_seen) throw std::runtime_error("--codec and --encoding cannot be combined");
+            encoding_seen=true;
+            if(value=="h264-quality") { options.codec=kvmux::VideoCodec::h264; options.priority=kvmux::EncodingPriority::quality; }
+            else if(value=="h264-size") { options.codec=kvmux::VideoCodec::h264; options.priority=kvmux::EncodingPriority::size; }
+            else if(value=="h265-quality") { options.codec=kvmux::VideoCodec::hevc; options.priority=kvmux::EncodingPriority::quality; }
+            else if(value=="h265-size") { options.codec=kvmux::VideoCodec::hevc; options.priority=kvmux::EncodingPriority::size; }
+            else throw std::runtime_error("--encoding must be h264-quality, h264-size, h265-quality, or h265-size");
         } else if(key=="--encoder") {
             if(value=="auto")options.encoder_backend=kvmux::CodecBackend::automatic;
             else if(value=="jetson")options.encoder_backend=kvmux::CodecBackend::jetson_gstreamer;
@@ -92,8 +102,10 @@ int serve(int argc,char** argv) {
               << " fps=" << selected.frame_rate.numerator << '/' << selected.frame_rate.denominator
               << " native-format=" << selected.device_format_name
               << " delivered-format=" << static_cast<int>(selected.delivered_format)
-              << " codec=" << (options.codec==kvmux::VideoCodec::hevc ? "hevc" : "mjpeg")
-              << " encoder-bitrate-bits/s=" << options.bitrate
+              << " codec=" << (options.codec==kvmux::VideoCodec::hevc ? "h265" : options.codec==kvmux::VideoCodec::h264 ? "h264" : "mjpeg")
+              << " priority=" << (options.codec==kvmux::VideoCodec::mjpeg ? "pass-through" : options.priority==kvmux::EncodingPriority::quality ? "quality" : "size")
+              << " selected-bitrate-bits/s=" << options.bitrate
+              << " effective-bitrate-bits/s=" << (options.codec==kvmux::VideoCodec::mjpeg ? 0 : options.priority==kvmux::EncodingPriority::quality ? options.bitrate : std::max<std::uint32_t>(250'000,options.bitrate/2))
               << " UDP-media-cap-bytes/s=" << options.transport_bytes_per_second
               << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
     if (!serial_request)
@@ -126,7 +138,7 @@ int serve(int argc,char** argv) {
                 media.feedback.capacity_losses, media.feedback.gap_losses, media.pacer.sent_bytes,
                 kvmux::relay::media_reason_name(media.last_reason));
             if (media.last_reason == kvmux::relay::MediaReason::frame_exceeds_rate_budget)
-                spdlog::warn("Video blocked: frame_exceeds_rate_budget. Lower --bitrate (HEVC) or raise --transport-rate, then start a new session.");
+                spdlog::warn("Video blocked: frame_exceeds_rate_budget. Lower --bitrate (H.264/H.265) or raise --transport-rate, then start a new session.");
             media_log_at = now;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

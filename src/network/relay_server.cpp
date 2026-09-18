@@ -78,15 +78,16 @@ struct RelayServer::Impl {
                 }
                 if (generation != wanted) {
                     reset_codec(); generation = wanted; waiting_idr = true; next_source = {};
-                    if (generation && options.codec == VideoCodec::hevc) {
+                    if (generation && options.codec != VideoCodec::mjpeg) {
                         std::string error;
                         codec = encoder_factory(options.encoder_backend, error);
-                        if (!codec) throw std::runtime_error("HEVC encoder: " + error);
+                        if (!codec) throw std::runtime_error("H.26x encoder: " + error);
                         const auto mode = capture.snapshot().actual_mode;
                         CodecConfig settings;
                         settings.width = mode.width; settings.height = mode.height;
                         settings.fps_numerator = static_cast<std::uint32_t>(mode.frame_rate.numerator);
                         settings.fps_denominator = static_cast<std::uint32_t>(mode.frame_rate.denominator);
+                        settings.codec = options.codec; settings.priority = options.priority;
                         settings.bitrate = options.bitrate; settings.generation = generation;
                         auto result = codec->configure(settings);
                         if (!result.ok()) throw std::runtime_error(result.message);
@@ -113,9 +114,9 @@ struct RelayServer::Impl {
                             throw std::runtime_error("Invalid encoder sequence/generation");
                         if (waiting_idr && !unit.idr) continue;
                         auto bytes = encode_annex_b(unit);
-                        if (bytes.empty()) throw std::runtime_error("Invalid HEVC access unit");
+                        if (bytes.empty()) throw std::runtime_error("Invalid H.26x access unit");
                         waiting_idr = false;
-                        publish({VideoCodec::hevc, generation, unit.encoded_sequence, unit.idr, std::move(bytes), unit.arrival});
+                        publish({options.codec, generation, unit.encoded_sequence, unit.idr, std::move(bytes), unit.arrival});
                         continue; // Never overwrite an ordered output slot.
                     }
                     if (result.status != CodecStatus::again) throw std::runtime_error(result.message);
@@ -132,16 +133,16 @@ struct RelayServer::Impl {
                     publish({VideoCodec::mjpeg, generation, sample->sequence, false, std::move(bytes), sample->arrival});
                     continue;
                 }
-                if (!sample->raw || sample->mjpeg) throw std::runtime_error("HEVC capture is not raw");
+                if (!sample->raw || sample->mjpeg) throw std::runtime_error("H.26x capture is not raw");
                 auto frame = processor.process(*sample);
                 if (!frame) throw std::runtime_error(processor.last_error());
                 auto input = frame->frame;
                 if (input->format != AV_PIX_FMT_NV12 && input->format != AV_PIX_FMT_YUV420P) {
                     AvFramePtr converted(av_frame_alloc(), [](AVFrame* f) { av_frame_free(&f); });
-                    if (!converted) throw std::runtime_error("HEVC frame allocation failed");
+                    if (!converted) throw std::runtime_error("H.26x frame allocation failed");
                     converted->format = AV_PIX_FMT_NV12; converted->width = input->width; converted->height = input->height;
                     if (av_frame_get_buffer(converted.get(), 32) < 0 || av_frame_copy_props(converted.get(), input.get()) < 0)
-                        throw std::runtime_error("HEVC frame storage allocation failed");
+                        throw std::runtime_error("H.26x frame storage allocation failed");
                     scaler.reset(sws_getCachedContext(scaler.release(), input->width, input->height,
                         static_cast<AVPixelFormat>(input->format), input->width, input->height, AV_PIX_FMT_NV12,
                         SWS_FAST_BILINEAR, nullptr, nullptr, nullptr));
@@ -154,7 +155,7 @@ struct RelayServer::Impl {
                         sws_getCoefficients(matrix), full, 0, 1<<16, 1<<16) < 0 ||
                         sws_scale(scaler.get(), input->data, input->linesize, 0, input->height,
                             converted->data, converted->linesize) != input->height)
-                        throw std::runtime_error("HEVC conversion failed");
+                        throw std::runtime_error("H.26x conversion failed");
                     input = std::move(converted);
                 }
                 EncoderInput value;
@@ -484,8 +485,8 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
     const auto mode = p.capture.snapshot().actual_mode;
     try { select_mode(std::span<const CaptureMode>(&mode, 1), 0, options.codec); }
     catch (const std::exception& e) { error = e.what(); return false; }
-    if (options.codec == VideoCodec::hevc && (!options.bitrate || options.bitrate > 100'000'000)) {
-        error = "HEVC bitrate must be 1..100000000 bits/s"; return false;
+    if (options.codec != VideoCodec::mjpeg && (!options.bitrate || options.bitrate > 100'000'000)) {
+        error = "H.26x bitrate must be 1..100000000 bits/s"; return false;
     }
     p.options = options;
     { std::lock_guard lock(p.media_mutex);

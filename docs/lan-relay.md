@@ -72,7 +72,7 @@ Other usable MJPEG modes sort by descending pixel area, width, height, then
 frame rate. Within a preferred group the higher frame rate wins. Exact ties
 use the first enumerated index. Modes outside the capture dimension limits or
 with invalid frame rates are not usable. MJPEG mode never selects raw capture.
-With `--codec hevc`, selection instead requires native and delivered raw video
+With `--encoding h265-quality`, selection instead requires native and delivered raw video
 with even dimensions and uses the same resolution and frame-rate priorities.
 
 Automatic serial selection uses libserialport USB VID/PID metadata, not port
@@ -102,7 +102,7 @@ Replace `DEVICE_ID` with the exact ID from the first command. On Windows, use
 spaces or special characters.
 
 For `--codec mjpeg`, choose a mode whose native and delivered formats are
-**MJPEG**. For `--codec hevc`, choose supported raw capture with even dimensions;
+**MJPEG**. For `--encoding h265-quality`, choose supported raw capture with even dimensions;
 MJPEG-to-H.265 transcoding is not supported. Mode numbers start at zero and refer
 to the current enumeration. An incompatible explicit mode produces an error;
 the relay does not silently change the requested mode.
@@ -130,14 +130,14 @@ Linux needs permission to open both the video device and serial port. Windows
 needs a working serial driver on the relay host; the Mac does not need that
 driver. The baud rate must match the CH9329 configuration.
 
-## Choose H.265 encoding
+## Choose H.264/H.265 encoding
 
 MJPEG remains the default. To encode raw capture as H.265, add
-`--codec hevc --encoder auto`. Auto tries hardware first, then falls back to CPU
+`--encoding h265-quality --encoder auto`. Auto tries hardware first, then falls back to CPU
 encoding if hardware initialization fails. The relay diagnostic reports the actual
 backend and fallback reason. `--encoder jetson` requires the Jetson hardware
 backend; `--encoder software` requires the FFmpeg CPU backend. Explicit choices
-do not fall back. `--bitrate` sets bits per second; the default is `8000000`.
+do not fall back. `--bitrate` sets the quality target in bits per second; the default is `8000000`. Size profiles use `max(250000, bitrate / 2)` as their bounded effective target. Diagnostics report codec, priority, selected bitrate, effective bitrate, and actual backend.
 Fallback does not promise a seamless codec switch during a running stream.
 Runtime errors still use the relay's recovery or reconnection path.
 
