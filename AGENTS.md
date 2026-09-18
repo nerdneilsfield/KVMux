@@ -70,6 +70,20 @@ decision in the relevant documentation.
   specified by the design.
 - Provide Debug, Release, and supported sanitizer presets. A preset must use the
   Ninja generator and must not mutate or download dependencies at configure time.
+
+- Use the root `Makefile` as the normal configure, build, test, format, and lint
+  entry point. Let it select the host CMake preset; use `HEADLESS=1` only when a
+  headless build is intended.
+- Format first-party C, C++, and Objective-C++ with the repository
+  `.clang-format`, which is based on Google style. After C++ changes, run
+  `make lint` and the affected build/tests. Lint covers format checking,
+  Cppcheck, and clang-tidy; fix first-party defects rather than hiding them with
+  broad suppressions or changes under `third_party/`.
+- Treat every remote source workspace as read-only. Without fresh authorization
+  naming the exact remote mutation, do not upload files or patches and do not
+  run commands that alter remote source, configuration, build outputs, the
+  working tree, index, refs, or Git history. Remote inspection does not authorize
+  synchronization; the user owns synchronization by default.
 - Keep hardware-dependent checks separate from software simulation. Record the
   exact OS, machine, capture mode and format, serial rate, USB topology, and
   CH9329 configuration. Mark missing hardware evidence as unverified; never

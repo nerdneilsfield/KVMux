@@ -88,7 +88,7 @@ no source changes or passing implementation claims yet.
 
 ## Final acceptance
 
-Working directory: /Users/dengqi/Source/langs/cpp/KVMux. Existing build/check entry:
+Working directory: the repository root. Existing build/check entry:
 `cmake --preset macos-debug`, `cmake --build --preset macos-debug`,
 `ctest --preset macos-debug --output-on-failure`; Release via
 `cmake --build --preset macos-release`. New targeted test names and impairment
@@ -306,7 +306,7 @@ Checks passed on native macOS Debug:
 
 No relay/source integration, hardware performance, cross-host, adaptive bitrate,
 or session-liveness acceptance is claimed. Native linker retains the existing
-missing /Users/dengqi/.local/lib search-path warning; new media source compiles
+missing a stale user-local library path search-path warning; new media source compiles
 without warnings. No push performed.
 
 ## T3 subdivision and next executable unit
@@ -703,7 +703,7 @@ Backend ON/OFF choices must match real installed dependencies and be recorded. C
 
 ## Cross-host synthetic reuse
 
-/tmp/kvmux-hevc-e2e/probe.cpp and /tmp/kvmux-hevc-e2e-report.md exist. Old probe uses synthetic NV12 1920x1080, FakeSerial, actual RelayServer/RelayClient/VideoPipeline, two 120-frame sessions, server bounded 60s/client 15s per session. Old source/CMakeLists.txt appended kvmux_hevc_e2e_probe linked to kvmux::core. Report records jetson-hy / 192.168.14.32 and ports18700/18701, but availability and free ports are UNKNOWN now. Do not assume old builds/source trees contain UDP. Never execute old binaries as v3 evidence.
+/tmp/kvmux-hevc-e2e/probe.cpp and /tmp/kvmux-hevc-e2e-report.md exist. Old probe uses synthetic NV12 1920x1080, FakeSerial, actual RelayServer/RelayClient/VideoPipeline, two 120-frame sessions, server bounded 60s/client 15s per session. Old source/CMakeLists.txt appended kvmux_hevc_e2e_probe linked to kvmux::core. Report records a prior private validation environment, but availability and free ports are UNKNOWN now. Do not assume old builds/source trees contain UDP. Never execute old binaries as v3 evidence.
 
 Rebuild against a fresh archive of final current tree; keep temporary probe source/CMake additions in an isolated /tmp source copy. Update video_presented(last) to video_presented(frame.generation, frame.sequence), as current API requires. Current server/client API handles UDP internally, so no second transport probe is needed. Inspect pipeline generation startup/restart against current relay_client_test before reuse. Add MJPEG mode using current FakeCapture and red16.jpg fixture, rather than claiming HEVC qualifies both. If using current integration fake, do not accidentally start an embedded loopback server in cross-host client mode. Reserve/check UDP ports, not TCP only; record fresh-generation reconnect and increasing local traffic totals (totals persist across restart). Keep synthetic capture/serial and bounded deadlines. No hardware capture, actual CH9329, user relay stop, tc/netem or network-wide interruption. Old /tmp/kvmux-reconnect-probe.cpp is a GL upload test, NOT a network reconnect fixture despite its filename.
 

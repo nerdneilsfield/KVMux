@@ -45,8 +45,21 @@ cmake --build --preset macos-release
 open build/macos-release/kvmux.app
 ```
 
-The build guide lists Linux, Windows, Release and headless presets. macOS
-Developer ID signing and notarization are not complete. Windows/Linux hardware
+The build guide lists Linux, Windows, Release and headless presets. For
+common development tasks, the root Makefile detects the host preset:
+
+```sh
+make dev                 # configure and build Debug
+make test                # build Debug and run tests
+make lint                # formatting and static-analysis checks
+make release HEADLESS=1  # headless Release build
+make help                # all commands and options
+```
+
+Set `JOBS=N` to limit parallel builds. The lint tools are found on `PATH`; on
+macOS, Homebrew LLVM is also detected automatically.
+
+macOS Developer ID signing and notarization are not complete. Windows/Linux hardware
 coverage, sustained performance and long-session stability remain incomplete;
 see the [verification record](docs/acceptance.md) before choosing hardware.
 

@@ -28,7 +28,7 @@
 
 ## Jetson USB serial discovery
 
-SSH inspection of `jetson-hy` (Ubuntu, aarch64, `5.15.148-tegra`) identified
+SSH inspection of a Jetson validation host (Ubuntu, aarch64, `5.15.148-tegra`) identified
 `1a86:7523`, a CH340-family host adapter. The kernel had
 `CONFIG_USB_SERIAL_CH341` disabled. The initially loaded CH343 driver did not
 match this device. The installed driver came from

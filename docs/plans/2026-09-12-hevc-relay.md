@@ -35,7 +35,7 @@ VideoToolbox, not native encoder, capture latency, or application streaming.
 
 | ID | Behavior | Task | Check and expected result |
 |---|---|---|---|
-| A1 | Bounded owned native encoder, metadata, dynamic IDR | T1 | Build standalone native test on jetson-hy; 60 synthetic AUs, monotonic matching PTS/sequence, requested IDR plus parameter sets, no camera/HID |
+| A1 | Bounded owned native encoder, metadata, dynamic IDR | T1 | Build standalone native test on the Jetson validation host; 60 synthetic AUs, monotonic matching PTS/sequence, requested IDR plus parameter sets, no camera/HID |
 | A2 | Hardware decode and explicit CPU frames | T2 | Decode T1 stream on Mac; 60 frames, no B frames, retained CPU frames and matching metadata |
 | A3 | Unsupported backend fails clearly | T1/T2/T3 | Explicit unavailable backend produces named error, never software fallback |
 | A4 | HEVC ordered relay and recovery | T3 | Transport AU framing preserves metadata; gap recovery resets decoder references and waits for an IDR; reconnect starts a new session generation |
@@ -64,7 +64,7 @@ Files: new `src/video/codec/video_codec.hpp`,
 Evidence: Native standalone C++20 GCC 11.4 build passed with `-Wall -Wextra
 -Werror`, installed GStreamer app/video 1.20.1 and libavutil 56.70.100 on Jetson
 Orin NX (aarch64 Linux 5.15.148-tegra, L4T R36.4.7). Commands, cwd local repo:
-`scp /tmp/kvmux-native-encoder.tar jetson-hy:/tmp/kvmux-native-encoder.tar`, then
+Transfer the standalone probe to an explicitly authorized Jetson validation environment, then
 SSH to extract into `/tmp/kvmux-native-encoder`, run
 `cmake -S /tmp/kvmux-native-encoder -B /tmp/kvmux-native-encoder/build -G Ninja`,
 `cmake --build /tmp/kvmux-native-encoder/build`, and
