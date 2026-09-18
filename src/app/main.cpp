@@ -186,13 +186,13 @@ std::optional<std::uint16_t> usb_usage_from_sdl(const SDL_Scancode scancode) {
     if (index >= table.size() || table[index] == 0) return std::nullopt;
     return table[index];
 }
-// Own pointer gestures before ImGui and remote routing. Keyboard and lifecycle events
-// must still reach the session, even while the icon is being dragged.
+// Own fixed-icon pointer gestures before ImGui and remote routing. Keyboard and lifecycle
+// events must still reach the session while the icon owns a click.
 struct FloatingMenuIcon {
-    ImVec2 pos{16.F, 64.F}, press{}, origin{};
+    ImVec2 pos{16.F, 64.F};
     static constexpr float size = 32.F;
     Uint32 buttons{}, abandoned_buttons{};
-    bool dragged{}, cancelled{}, clicked{};
+    bool cancelled{}, clicked{};
 
     void clamp(float width, float height) {
         pos.x = std::clamp(pos.x, 0.F, std::max(0.F, width - size));
@@ -216,24 +216,18 @@ struct FloatingMenuIcon {
         if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && (buttons ||
             (enabled && contains(event.button.x, event.button.y)))) {
             if (!buttons) {
-                press = {event.button.x, event.button.y}; origin = pos;
-                dragged = false; cancelled = event.button.button != SDL_BUTTON_LEFT;
+                cancelled = event.button.button != SDL_BUTTON_LEFT;
             } else cancelled = true;
             buttons |= SDL_BUTTON_MASK(event.button.button);
             return true;
         }
         if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && (buttons & SDL_BUTTON_MASK(event.button.button))) {
             buttons &= ~SDL_BUTTON_MASK(event.button.button);
-            clicked = !buttons && !dragged && !cancelled && contains(event.button.x, event.button.y);
+            clicked = !buttons && !cancelled && contains(event.button.x, event.button.y);
             return true;
         }
         if (event.type == SDL_EVENT_MOUSE_MOTION) {
-            if (buttons) {
-                const float dx = event.motion.x - press.x, dy = event.motion.y - press.y;
-                if (dx * dx + dy * dy >= 25.F) dragged = true;
-                if (dragged && !cancelled) { pos = {origin.x + dx, origin.y + dy}; clamp(width, height); }
-                return true;
-            }
+            if (buttons) return true;
             return enabled && contains(event.motion.x, event.motion.y);
         }
         if (event.type == SDL_EVENT_MOUSE_WHEEL)
@@ -352,6 +346,7 @@ int main(int argc, char** argv) {
     ImVec2 region_start{}, region_end{};
     Rect displayed_video_rect{};
     bool paste_was_active = false, paste_cancelled = false;
+    bool local_ui_input_seen = false;
     std::string last_status;
 
     while (running) {
@@ -390,8 +385,7 @@ int main(int argc, char** argv) {
                 }
                 if (region_dragging && event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT) {
                     region_dragging = false;
-                    region_ready = std::abs(region_end.x-region_start.x) >= 3.F && std::abs(region_end.y-region_start.y) >= 3.F;
-                    if (!region_ready) { region_selecting = false; media_message = "Region is too small."; }
+                    region_ready = true;
                     continue;
                 }
                 if (preview && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
@@ -415,18 +409,31 @@ int main(int argc, char** argv) {
             bool local_click = false;
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 const Uint32 bit = SDL_BUTTON_MASK(event.button.button);
-                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event_state == InputState::preview) {
-                    local_click = popup_open || open_floating_menu || std::any_of(local_regions.begin(), local_regions.end(), [&](const ImVec4& r) {
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    const auto event_media = recording.status();
+                    const bool media_controls = scroll_active || event_media.state == RecordingState::recording ||
+                        event_media.state == RecordingState::paused;
+                    constexpr int media_controls_width = 200;
+                    constexpr int media_controls_height = 48;
+                    const bool in_media_controls = media_controls && config.mouse_mode == MouseMode::absolute &&
+                        event.button.x >= std::max(0, event_width - media_controls_width - 8) &&
+                        event.button.x < event_width - 8 && event.button.y >= 8 &&
+                        event.button.y < 8 + media_controls_height;
+                    local_click = in_media_controls || ((event_state == InputState::preview) &&
+                        (popup_open || open_floating_menu || std::any_of(local_regions.begin(), local_regions.end(), [&](const ImVec4& r) {
                         return event.button.x >= r.x && event.button.x < r.z &&
                             event.button.y >= r.y && event.button.y < r.w;
-                    });
+                    })));
                     if (local_click) local_buttons |= bit;
                 } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && (local_buttons & bit)) {
                     local_buttons &= ~bit;
                     local_click = true;
                 }
             }
-            if (!remote_input) ImGui_ImplSDL3_ProcessEvent(&event);
+            if (!remote_input || local_click) {
+                ImGui_ImplSDL3_ProcessEvent(&event);
+                if (local_click) local_ui_input_seen = true;
+            }
             if (event.type == SDL_EVENT_QUIT) { running = false; continue; }
             if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
             if (event.type == SDL_EVENT_WINDOW_MINIMIZED || event.type == SDL_EVENT_WINDOW_HIDDEN) session->minimized();
@@ -435,7 +442,8 @@ int main(int argc, char** argv) {
                 event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL;
             // A local popup owns injectable input, but SDL and ImGui still receive
             // close and window-management events.
-            if ((local_click || popup_open) && !remote_input && injectable_event) continue;
+            if (local_click && injectable_event) continue;
+            if (popup_open && !remote_input && injectable_event) continue;
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input) remote_buttons |= SDL_BUTTON_MASK(event.button.button);
             if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
             if (scroll_active && remote_input && event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -505,11 +513,12 @@ int main(int argc, char** argv) {
         const bool remote_input = captured || snapshot.input_state == InputState::arming;
         const double now = ImGui::GetTime();
         if (captured && !was_captured) captured_at = now;
-        if (remote_input) {
+        if (remote_input && !local_ui_input_seen) {
             ImGui::GetIO().ClearInputKeys();
             ImGui::GetIO().ClearEventsQueue();
             chrome_until = 0.0;
         }
+        local_ui_input_seen = false;
         was_captured = captured;
         const bool relative_capture = captured && config.mouse_mode == MouseMode::relative;
         const auto media_status = recording.status();
@@ -670,7 +679,7 @@ int main(int argc, char** argv) {
             ImGui::EndDisabled();
             ImGui::BeginDisabled(!valid_visible_cpu_frame || status.state != RecordingState::idle);
             if (ImGui::MenuItem("Start recording"))
-                media_message = recording.start(*current_frame) ? "Recording start queued." : "Could not start recording.";
+                media_message = recording.start(*current_frame) ? "Recording started. Click the video to capture input and operate the remote." : "Could not start recording.";
             if (ImGui::MenuItem("Select region recording")) {
                 region_selection = RegionSelection::recording; region_selecting = true; region_dragging = region_ready = false;
                 ImGui::CloseCurrentPopup();
@@ -968,6 +977,40 @@ int main(int argc, char** argv) {
         }
         ImGui::End();
         ImGui::PopStyleVar();
+        const bool recording_controls = media_status.state == RecordingState::recording ||
+            media_status.state == RecordingState::paused;
+        if (scroll_active || recording_controls) {
+            ImGui::SetNextWindowPos({viewport->Pos.x + viewport->Size.x - 8.F, viewport->Pos.y + 8.F},
+                ImGuiCond_Always, {1.F, 0.F});
+            if (!relative_capture) ImGui::SetNextWindowSize({200.F, 48.F}, ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(.94F);
+            ImGui::Begin("Media controls", nullptr, (relative_capture ? ImGuiWindowFlags_AlwaysAutoResize : 0) |
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+            record_local_region();
+            if (relative_capture) {
+                ImGui::TextUnformatted(config.host_scancode == 231 ?
+                    "Press Right GUI/Command to release before clicking" :
+                    "Press Right Control to release before clicking");
+                ImGui::Separator();
+            }
+            if (scroll_active) {
+                if (ImGui::Button("Finish")) {
+                    (void)recording.finish_scroll(); scroll_active = false; scroll_sample_after.reset();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    recording.cancel_scroll(); scroll_active = false; scroll_sample_after.reset();
+                }
+            }
+            if (recording_controls) {
+                if (ImGui::Button("Stop")) (void)recording.stop();
+                ImGui::SameLine();
+                if (media_status.state == RecordingState::recording) {
+                    if (ImGui::Button("Pause")) (void)recording.pause();
+                } else if (ImGui::Button("Resume")) (void)recording.resume();
+            }
+            ImGui::End();
+        }
         if (region_selecting && region_ready && !remote_input) {
             ImGui::SetNextWindowPos({std::min(region_start.x,region_end.x),std::max(region_start.y,region_end.y)+6.F}, ImGuiCond_Always);
             ImGui::Begin("Region screenshot",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoSavedSettings);
@@ -989,11 +1032,16 @@ int main(int argc, char** argv) {
                     else queued=recording.snapshot(*current_frame,crop);
                 }
                 if (queued) {
-                    if (region_selection == RegionSelection::scrolling) { scroll_active=true; media_message="Scrolling capture started. Capture input and scroll down."; }
-                    else if (region_selection == RegionSelection::recording) media_message="Region recording start queued.";
+                    if (region_selection == RegionSelection::scrolling) { scroll_active=true; media_message="Scrolling capture started. Click the video to capture input and operate the remote, then scroll down."; }
+                    else if (region_selection == RegionSelection::recording) media_message="Recording started. Click the video to capture input and operate the remote.";
                     else snapshot_queued=true;
-                } else media_message=region_selection == RegionSelection::scrolling ? "Could not start scrolling capture." : region_selection == RegionSelection::recording ? "Could not start region recording. Select a larger region." : "Could not queue region screenshot.";
-                region_selecting=region_ready=false; region_selection=RegionSelection::none;
+                    region_selecting = region_ready = false; region_selection = RegionSelection::none;
+                } else {
+                    media_message = region_selection == RegionSelection::scrolling ? "Could not start scrolling capture. Select a larger region and retry." :
+                        region_selection == RegionSelection::recording ? "Could not start region recording. Select a larger region and retry." :
+                        "Could not queue region screenshot. Select a larger region and retry.";
+                    region_ready = false;
+                }
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) { region_selecting=region_ready=false; region_selection=RegionSelection::none; }
