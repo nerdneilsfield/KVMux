@@ -95,7 +95,9 @@ manual downward vertical scrolling.
 
 Recording saves the same video as an H.264 MP4 in **Downloads**, with the same
 time-based name and collision suffix. Use **Start**, **Pause**, **Resume**, and
-**Stop**. **Stop** waits for the file to finish. Screenshots and recordings stay
+**Stop**. To record only part of the source video, choose **Select region recording**
+and drag the region. KVMux adjusts region-recording edges inward to even source
+pixels, as required by H.264 YUV420 encoding. **Stop** waits for the file to finish. Screenshots and recordings stay
 local; they are not sent to the target computer.
 
 H.264 MP4 recording requires FFmpeg H.264 support. KVMux shows a clear error if

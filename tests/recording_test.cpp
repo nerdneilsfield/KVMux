@@ -101,7 +101,20 @@ int main() {
     require(done.state == kvmux::RecordingState::idle, done.error.c_str());
     require(done.output_path == started.output_path, "completed recording path");
     parse_output(done.output_path);
+
+    kvmux::Recording cropped(directory);
+    auto cropped_first = frame();
+    require(cropped.start(cropped_first, kvmux::FrameCrop{8, 12, 24, 20}), "queue cropped start");
+    const auto cropped_started = wait(cropped, kvmux::RecordingState::recording);
+    require(cropped_started.state == kvmux::RecordingState::recording, cropped_started.error.c_str());
+    require(cropped_started.width == 24 && cropped_started.height == 20, "cropped recording status dimensions");
+    require(cropped.append(frame()), "append cropped recording");
+    require(cropped.stop(), "stop cropped recording");
+    const auto cropped_done = wait(cropped, kvmux::RecordingState::idle);
+    require(cropped_done.state == kvmux::RecordingState::idle, cropped_done.error.c_str());
+    parse_output(cropped_done.output_path, 24, 20);
+    cropped.shutdown();
     recording.shutdown();
     std::filesystem::remove_all(directory);
-    std::cout << "JPEG snapshot preserves active MP4 target; outputs parsed\n";
+    std::cout << "JPEG snapshots and full/cropped MP4 outputs parsed\n";
 }

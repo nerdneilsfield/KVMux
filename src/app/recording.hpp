@@ -45,7 +45,7 @@ public:
     [[nodiscard]] bool sample_scroll(const VideoFrame& frame);
     [[nodiscard]] bool finish_scroll();
     void cancel_scroll();
-    [[nodiscard]] bool start(const VideoFrame& first_frame);
+    [[nodiscard]] bool start(const VideoFrame& first_frame, std::optional<FrameCrop> crop = std::nullopt);
     [[nodiscard]] bool append(const VideoFrame& frame);
     [[nodiscard]] bool pause();
     [[nodiscard]] bool resume();
@@ -56,7 +56,7 @@ public:
 
 private:
     struct Impl;
-    [[nodiscard]] bool start_now(const VideoFrame& frame);
+    [[nodiscard]] bool start_now(const VideoFrame& frame, std::optional<FrameCrop> crop);
     [[nodiscard]] bool snapshot_now(const VideoFrame& frame, std::optional<FrameCrop> crop);
     [[nodiscard]] bool write_frame(const VideoFrame& frame);
     void worker(std::stop_token stop_token);
@@ -80,7 +80,7 @@ private:
     std::optional<VideoFrame> scroll_latest_;
     bool scroll_finish_{};
     bool scroll_cancel_{};
-    std::optional<VideoFrame> start_;
+    std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> start_;
     bool stop_requested_{};
     std::jthread worker_;
 };
