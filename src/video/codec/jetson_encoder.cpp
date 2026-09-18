@@ -44,14 +44,14 @@ public:
             std::max<std::uint32_t>(250'000, config.bitrate / 2);
         encoded_sequence_ = 0;
         // CPU NV12 upload is explicit. No software encoding element exists here.
+        const auto encoder_name = config.codec == VideoCodec::h264 ? "nvv4l2h264enc" : "nvv4l2h265enc";
+        const auto output_caps = config.codec == VideoCodec::h264 ? "video/x-h264" : "video/x-h265";
         const auto text = std::string("appsrc name=input is-live=true format=time block=false max-buffers=4 max-bytes=0 max-time=0 ! ") +
-            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
-            (config.codec==VideoCodec::h264 ? "nvv4l2h264enc" : "nvv4l2h265enc") +
+            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! " + encoder_name +
             " name=encoder num-B-Frames=0 insert-sps-pps=true insert-aud=true bitrate=" +
             std::to_string(effective_bitrate_) + " idrinterval=" + std::to_string(config.keyframe_interval) +
-            " iframeinterval=" + std::to_string(config.keyframe_interval) +
-            (config.codec==VideoCodec::h264 ? " ! video/x-h264,stream-format=byte-stream,alignment=au ! " :
-                                               " ! video/x-h265,stream-format=byte-stream,alignment=au ! ")
+            " iframeinterval=" + std::to_string(config.keyframe_interval) + " ! " + output_caps +
+            ",stream-format=byte-stream,alignment=au ! " +
             "appsink name=output sync=false max-buffers=4 drop=false wait-on-eos=false";
         GError* error = nullptr;
         pipeline_ = gst_parse_launch(text.c_str(), &error);
@@ -88,13 +88,16 @@ public:
             (frame->format != AV_PIX_FMT_NV12 && frame->format != AV_PIX_FMT_YUV420P))
             return {CodecStatus::invalid_input, "Expected matching CPU NV12/YUV420P frame and increasing nonnegative PTS"};
         const int width = frame->width, height = frame->height;
+        const auto unsigned_width = static_cast<unsigned>(width);
+        const auto unsigned_height = static_cast<unsigned>(height);
+        const auto row_bytes = static_cast<std::size_t>(width);
         const bool planar = frame->format == AV_PIX_FMT_YUV420P;
         if (frame->hw_frames_ctx || !frame->data[0] || !frame->data[1] ||
             frame->linesize[0] < width || frame->linesize[1] < (planar ? width / 2 : width) ||
             (planar && (!frame->data[2] || frame->linesize[2] < width / 2)))
             return {CodecStatus::invalid_input, "Invalid CPU frame planes or strides"};
         GstVideoInfo info;
-        gst_video_info_set_format(&info, GST_VIDEO_FORMAT_NV12, width, height);
+        gst_video_info_set_format(&info, GST_VIDEO_FORMAT_NV12, unsigned_width, unsigned_height);
         GstBuffer* buffer = gst_buffer_new_allocate(nullptr, info.size, nullptr);
         GstMapInfo map{};
         if (!buffer || !gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
@@ -104,10 +107,10 @@ public:
         std::memset(map.data, 0, map.size);
         for (int y = 0; y < height; ++y)
             std::memcpy(map.data + info.offset[0] + y * info.stride[0],
-                        frame->data[0] + y * frame->linesize[0], width);
+                        frame->data[0] + y * frame->linesize[0], row_bytes);
         for (int y = 0; y < height / 2; ++y) {
             auto* row = map.data + info.offset[1] + y * info.stride[1];
-            if (!planar) std::memcpy(row, frame->data[1] + y * frame->linesize[1], width);
+            if (!planar) std::memcpy(row, frame->data[1] + y * frame->linesize[1], row_bytes);
             else for (int x = 0; x < width / 2; ++x) {
                 row[2*x] = frame->data[1][y * frame->linesize[1] + x];
                 row[2*x+1] = frame->data[2][y * frame->linesize[2] + x];
