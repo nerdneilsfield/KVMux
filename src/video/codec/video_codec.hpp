@@ -46,7 +46,7 @@ struct EncoderInput {
 
 struct EncodedAccessUnit {
     VideoCodec codec{VideoCodec::hevc};
-    // Exactly one complete Annex B AU. IDRs include VPS/SPS/PPS.
+    // Exactly one complete Annex B AU. IDRs include SPS/PPS (and VPS for HEVC).
     std::vector<std::uint8_t> bytes;
     std::uint32_t width{}, height{};
     std::int64_t pts_ns{};

@@ -29,8 +29,8 @@ and source/build-offer information required by each dependency.
 
 ## HEVC codec backends
 
-FFmpeg remains required on every platform. Its software HEVC encoder and decoder
-wrappers are always compiled. CPU encoding requires the runtime FFmpeg build to
+FFmpeg remains required on every platform. Its software H.264/H.265 encoder and
+decoder wrappers are always compiled. CPU encoding requires the runtime FFmpeg build to
 provide `libx265`; no separate x265 development dependency is added by KVMux.
 Automatic selection tries hardware first, then CPU if backend creation or initial
 configuration fails, including a rejected first input before any input was accepted. Diagnostics report the selected backend and fallback reason.
@@ -58,14 +58,15 @@ Configure checks compile dependencies only. It does not inspect device nodes,
 probe hardware, or run GStreamer plugins. A normal Linux host with GStreamer core,
 app, and video headers can compile the Jetson backend without NVIDIA runtime plugins.
 An explicit Jetson encoder selection on that host fails with a runtime error.
-Automatic selection uses CPU encoding instead if FFmpeg provides `libx265`.
-A Jetson deployment needs the NVIDIA conversion and HEVC encoder plugins provided
+Automatic selection uses CPU encoding instead if FFmpeg provides the requested
+`libx264` or `libx265` encoder. A Jetson deployment needs the NVIDIA conversion
+and matching `nvv4l2h264enc` or `nvv4l2h265enc` plugin provided
 by its JetPack installation, plus the GStreamer runtime. Hardware backend support
 must be verified on the deployed hardware; a successful build is not hardware
 acceptance.
 
 Software fixture decoding runs in CTest as `ffmpeg_decoder`. The `ffmpeg_encoder`
-round-trip test uses CPU encoding and skips when FFmpeg lacks `libx265`.
+round-trip test covers both priorities for each available `libx264`/`libx265` encoder.
 `codec_factory` checks automatic selection and strict explicit requests. Hardware checks are
 manual and are not required by ordinary CI. On a Jetson build with tests enabled,
 run `build/linux-debug-headless/kvmux_jetson_encoder_test output.h265` to exercise

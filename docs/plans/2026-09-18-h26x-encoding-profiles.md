@@ -47,17 +47,17 @@ Evidence: macOS Debug headless build passed; media_codec_wire, relay_wire, relay
 
 ### T2: Software encoding and decoding
 
-Status: pending
+Status: done
 Depends on: T1
 Acceptance: C2, C3
 Targets: FFmpeg encoder/decoder/factory and tests.
 
-- [ ] Generalize libx264/libx265 configuration while preserving bounded low-latency invariants.
-- [ ] Generalize Jetson NVENC (`nvv4l2h264enc`/`nvv4l2h265enc`) for both codecs and priorities with strict hardware diagnostics.
-- [ ] Implement codec-specific IDR/parameter-set validation and decoder selection.
-- [ ] Parameterize round-trip/recovery tests for available libraries and both priorities; inspect and commit.
+- [x] Generalize libx264/libx265 configuration while preserving bounded low-latency invariants.
+- [x] Generalize Jetson NVENC (`nvv4l2h264enc`/`nvv4l2h265enc`) for both codecs and priorities with strict hardware diagnostics.
+- [x] Implement codec-specific IDR/parameter-set validation and decoder selection.
+- [x] Parameterize round-trip/recovery tests for available libraries and both priorities; inspect and commit.
 
-Evidence: pending.
+Evidence: macOS Debug headless build passed; codec_factory, ffmpeg_encoder, ffmpeg_decoder and media_codec_wire passed 4/4. Software H.264/H.265 quality/size round trips passed. Jetson runtime remains unverified.
 
 ### T3: Relay integration and operator interface
 

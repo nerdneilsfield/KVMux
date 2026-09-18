@@ -35,26 +35,25 @@ bool valid_au(const EncodedAccessUnit& au, bool recovery) {
         std::size_t prefix=0;
         if (pos+3 <= b.size() && b[pos]==0 && b[pos+1]==0 && b[pos+2]==1) prefix=3;
         else if (pos+4 <= b.size() && b[pos]==0 && b[pos+1]==0 && b[pos+2]==0 && b[pos+3]==1) prefix=4;
-        if (!prefix || pos+prefix+2 >= b.size()) return false;
+        if (!prefix || pos+prefix >= b.size()) return false;
         const auto start=pos+prefix;
-        if ((b[start]&0x80) || !(b[start+1]&7)) return false;
-        const auto type=(b[start]>>1)&63;
-        if (type==32) vps=true;
-        if (type==33) sps=true;
-        if (type==34) pps=true;
-        if (type<32) {
-            slice=true;
-            if (type==19 || type==20) {
-                if (recovery && !(vps && sps && pps)) return false;
-                idr=true;
-            }
-        }
-        pos=start+2;
+        if (au.codec==VideoCodec::hevc) {
+            if (start+1>=b.size() || (b[start]&0x80) || !(b[start+1]&7)) return false;
+            const auto type=(b[start]>>1)&63;
+            vps|=type==32; sps|=type==33; pps|=type==34;
+            if (type<32) { slice=true; idr|=type==19 || type==20; }
+        } else if (au.codec==VideoCodec::h264) {
+            if (b[start]&0x80) return false;
+            const auto type=b[start]&31;
+            sps|=type==7; pps|=type==8; slice|=type==1 || type==5; idr|=type==5;
+        } else return false;
+        pos=start+(au.codec==VideoCodec::hevc ? 2 : 1);
         while (pos+3 <= b.size() && !(b[pos]==0 && b[pos+1]==0 &&
                (b[pos+2]==1 || (pos+4<=b.size() && b[pos+2]==0 && b[pos+3]==1)))) ++pos;
         if (pos+3>b.size()) pos=b.size();
     }
-    return slice && idr==au.idr && (!recovery || (idr && vps && sps && pps));
+    const bool parameters=sps && pps && (au.codec==VideoCodec::h264 || vps);
+    return slice && idr==au.idr && (!recovery || (idr && parameters));
 }
 
 class FfmpegDecoder final : public VideoDecoder {
@@ -73,10 +72,13 @@ public:
     CodecResult configure(const CodecConfig& config) override {
         shutdown();
         if (!valid_dimensions(config.width, config.height))
-            return {CodecStatus::invalid_input, "invalid HEVC dimensions"};
+            return {CodecStatus::invalid_input, "invalid H.26x dimensions"};
+        if (config.codec!=VideoCodec::h264 && config.codec!=VideoCodec::hevc)
+            return {CodecStatus::unsupported, "decoder accepts H.264 or HEVC only"};
         config_=config;
-        const auto* codec=avcodec_find_decoder(AV_CODEC_ID_HEVC);
-        if (!codec) return {CodecStatus::unsupported, "FFmpeg HEVC decoder unavailable"};
+        const auto codec_id=config.codec==VideoCodec::h264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
+        const auto* codec=avcodec_find_decoder(codec_id);
+        if (!codec) return {CodecStatus::unsupported, "FFmpeg requested H.26x decoder unavailable"};
         context_=avcodec_alloc_context3(codec);
         if (!context_) return failure("allocate HEVC decoder");
         context_->thread_count=1;
@@ -121,10 +123,10 @@ public:
     }
     CodecResult submit(const EncodedAccessUnit& au) override {
         if (!context_ || failed_ || finishing_) return failure("decoder needs configure/reset before submit");
-        if (au.codec!=VideoCodec::hevc) return {CodecStatus::unsupported, "decoder accepts HEVC only"};
+        if (au.codec!=config_.codec) return {CodecStatus::unsupported, "access-unit codec does not match decoder configuration"};
         if (au.width!=config_.width || au.height!=config_.height || au.generation!=config_.generation ||
             au.bytes.empty() || au.bytes.size()>kMaxCompressedSampleBytes || !valid_au(au, needs_idr_))
-            return {CodecStatus::invalid_input, "invalid Annex B HEVC AU or missing recovery IDR with VPS/SPS/PPS"};
+            return {CodecStatus::invalid_input, "invalid Annex B H.26x AU or missing recovery IDR parameter sets"};
         if (pending_.size()>=kMaxPending) return {CodecStatus::again, "decoder queue full; retry this AU after poll"};
         AVPacket* packet=av_packet_alloc();
         if (!packet) return failure("allocate HEVC packet");
@@ -258,8 +260,7 @@ std::unique_ptr<VideoDecoder> create_ffmpeg_decoder(CodecBackend backend, std::s
 #if !KVMUX_HAS_VIDEOTOOLBOX
     if (backend==CodecBackend::videotoolbox) { error="VideoToolbox backend was not built"; return {}; }
 #endif
-    if (!avcodec_find_decoder(AV_CODEC_ID_HEVC)) { error="FFmpeg HEVC decoder unavailable"; return {}; }
-    if (backend==CodecBackend::videotoolbox && av_hwdevice_find_type_by_name("videotoolbox")==AV_HWDEVICE_TYPE_NONE) {
+        if (backend==CodecBackend::videotoolbox && av_hwdevice_find_type_by_name("videotoolbox")==AV_HWDEVICE_TYPE_NONE) {
         error="FFmpeg VideoToolbox backend unavailable";
         return {};
     }

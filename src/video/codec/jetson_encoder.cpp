@@ -19,9 +19,11 @@ public:
     ~JetsonEncoder() override { shutdown(); }
     CodecBackend backend() const noexcept override { return CodecBackend::jetson_gstreamer; }
     CodecDiagnostic diagnostic() const override {
-        return {backend(), hardware_active_, hardware_active_, hardware_active_
-            ? "NVIDIA nvv4l2h265enc emitted a hardware HEVC access unit"
-            : "NVIDIA encoder selected; hardware output not yet observed"};
+        const auto name=config_.codec==VideoCodec::h264 ? "nvv4l2h264enc" : "nvv4l2h265enc";
+        return {backend(), hardware_active_, hardware_active_, std::string("NVIDIA ")+name+
+            " priority="+(config_.priority==EncodingPriority::quality ? "quality" : "size")+
+            " effective_bitrate="+std::to_string(effective_bitrate_)+
+            (hardware_active_ ? " hardware output verified" : " output unverified")};
     }
     CodecResult configure(const CodecConfig& config) override {
         shutdown();
@@ -34,21 +36,27 @@ public:
             static_cast<std::uint64_t>(config.fps_numerator) >
                 240ULL * config.fps_denominator ||
             !config.bitrate || config.bitrate > 100'000'000 || !config.keyframe_interval)
-            return {CodecStatus::invalid_input, "Invalid HEVC dimensions/rate/bitrate"};
+            return {CodecStatus::invalid_input, "Invalid H.26x dimensions/rate/bitrate"};
+        if (config.codec != VideoCodec::h264 && config.codec != VideoCodec::hevc)
+            return {CodecStatus::unsupported, "Jetson encoder accepts H.264 or HEVC only"};
         config_ = config;
+        effective_bitrate_ = config.priority == EncodingPriority::quality ? config.bitrate :
+            std::max<std::uint32_t>(250'000, config.bitrate / 2);
         encoded_sequence_ = 0;
         // CPU NV12 upload is explicit. No software encoding element exists here.
         const auto text = std::string("appsrc name=input is-live=true format=time block=false max-buffers=4 max-bytes=0 max-time=0 ! ") +
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
-            "nvv4l2h265enc name=encoder num-B-Frames=0 insert-sps-pps=true insert-aud=true bitrate=" +
-            std::to_string(config.bitrate) + " idrinterval=" + std::to_string(config.keyframe_interval) +
+            (config.codec==VideoCodec::h264 ? "nvv4l2h264enc" : "nvv4l2h265enc") +
+            " name=encoder num-B-Frames=0 insert-sps-pps=true insert-aud=true bitrate=" +
+            std::to_string(effective_bitrate_) + " idrinterval=" + std::to_string(config.keyframe_interval) +
             " iframeinterval=" + std::to_string(config.keyframe_interval) +
-            " ! video/x-h265,stream-format=byte-stream,alignment=au ! "
+            (config.codec==VideoCodec::h264 ? " ! video/x-h264,stream-format=byte-stream,alignment=au ! " :
+                                               " ! video/x-h265,stream-format=byte-stream,alignment=au ! ")
             "appsink name=output sync=false max-buffers=4 drop=false wait-on-eos=false";
         GError* error = nullptr;
         pipeline_ = gst_parse_launch(text.c_str(), &error);
         if (error || !pipeline_) {
-            auto result = fail(error ? error->message : "Cannot create Jetson HEVC pipeline");
+            auto result = fail(error ? error->message : "Cannot create Jetson H.26x pipeline");
             if (error) g_error_free(error);
             shutdown();
             return result;
@@ -65,7 +73,7 @@ public:
         if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
             auto result = bus_error();
             shutdown();
-            return result.ok() ? fail("Jetson HEVC hardware failed to start") : result;
+            return result.ok() ? fail("Jetson H.26x hardware failed to start") : result;
         }
         return {};
     }
@@ -152,11 +160,14 @@ public:
         output = std::move(pending_.front()); pending_.pop_front();
         hardware_active_ = true;
         output.encoded_sequence = ++encoded_sequence_;
+        output.codec = config_.codec;
         output.bytes.assign(map.data, map.data + map.size);
         for (std::size_t i = 0; i + 4 < map.size; ++i) {
             if (map.data[i] == 0 && map.data[i+1] == 0 && map.data[i+2] == 1) {
-                const auto type = (map.data[i+3] >> 1) & 63;
-                if (type == 19 || type == 20) output.idr = true;
+                if (config_.codec==VideoCodec::hevc) {
+                    const auto type = (map.data[i+3] >> 1) & 63;
+                    if (type == 19 || type == 20) output.idr = true;
+                } else if ((map.data[i+3]&31)==5) output.idr=true;
             }
         }
         gst_buffer_unmap(buffer, &map); gst_sample_unref(sample);
@@ -210,7 +221,7 @@ private:
         if (!message) return {};
         GError* error = nullptr; gchar* debug = nullptr;
         gst_message_parse_error(message, &error, &debug);
-        auto result = fail(std::string("Jetson HEVC hardware: ") + (error ? error->message : "pipeline failed"));
+        auto result = fail(std::string("Jetson H.26x hardware: ") + (error ? error->message : "pipeline failed"));
         if (error) g_error_free(error);
         g_free(debug); gst_message_unref(message);
         return result;
@@ -223,6 +234,7 @@ private:
     bool hardware_active_{};
     bool keyframe_pending_{};
     std::uint64_t encoded_sequence_{};
+    std::uint32_t effective_bitrate_{};
 };
 }  // namespace
 
@@ -233,7 +245,7 @@ std::unique_ptr<VideoEncoder> create_jetson_encoder(std::string& error) {
         if (init_error) g_error_free(init_error);
         return nullptr;
     }
-    for (const char* name : {"appsrc", "nvvidconv", "nvv4l2h265enc", "appsink"}) {
+    for (const char* name : {"appsrc", "nvvidconv", "appsink"}) {
         GstElementFactory* factory = gst_element_factory_find(name);
         if (!factory) { error = std::string("Jetson hardware encoder unavailable: missing ") + name; return nullptr; }
         gst_object_unref(factory);

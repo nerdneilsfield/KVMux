@@ -35,9 +35,12 @@ public:
     ~FfmpegEncoder() override { shutdown(); }
     CodecBackend backend() const noexcept override { return CodecBackend::ffmpeg_software; }
     CodecDiagnostic diagnostic() const override {
-        return {backend(), false, observed_, observed_
-            ? "libx265 CPU encoding verified; hardware_active=no"
-            : "libx265 CPU encoder selected; output not yet observed"};
+        const auto name = config_.codec == VideoCodec::h264 ? "libx264" : "libx265";
+        const auto preset = config_.priority == EncodingPriority::quality ? "ultrafast" : "medium";
+        return {backend(), false, observed_, std::string(name) + " CPU encoding; priority=" +
+            (config_.priority == EncodingPriority::quality ? "quality" : "size") +
+            " preset=" + preset + " effective_bitrate=" + std::to_string(effective_bitrate_) +
+            (observed_ ? " output=verified hardware_active=no" : " output=unverified")};
     }
     CodecResult configure(const CodecConfig& config) override {
         shutdown();
@@ -50,27 +53,35 @@ public:
             config.fps_numerator>240ULL*config.fps_denominator ||
             !config.bitrate || config.bitrate>100'000'000 || !config.keyframe_interval ||
             config.keyframe_interval>static_cast<unsigned>(std::numeric_limits<int>::max()))
-            return {CodecStatus::invalid_input, "Invalid HEVC dimensions/rate/bitrate/keyframe interval"};
+            return {CodecStatus::invalid_input, "Invalid H.26x dimensions/rate/bitrate/keyframe interval"};
+        if (config.codec != VideoCodec::h264 && config.codec != VideoCodec::hevc)
+            return {CodecStatus::unsupported, "FFmpeg encoder accepts H.264 or HEVC only"};
         config_=config; encoded_sequence_=0;
-        const auto* codec=avcodec_find_encoder_by_name("libx265");
-        if (!codec) return {CodecStatus::unsupported, "FFmpeg libx265 CPU HEVC encoder unavailable"};
+        effective_bitrate_ = config.priority == EncodingPriority::quality ? config.bitrate :
+            std::max<std::uint32_t>(250'000, config.bitrate / 2);
+        const char* encoder_name = config.codec == VideoCodec::h264 ? "libx264" : "libx265";
+        const auto* codec=avcodec_find_encoder_by_name(encoder_name);
+        if (!codec) return {CodecStatus::unsupported, std::string("FFmpeg ") + encoder_name + " encoder unavailable"};
         context_=avcodec_alloc_context3(codec);
-        if (!context_) return fail("allocate libx265 encoder");
+        if (!context_) return fail(std::string("allocate ") + encoder_name + " encoder");
         context_->width=static_cast<int>(config.width); context_->height=static_cast<int>(config.height);
         context_->pix_fmt=AV_PIX_FMT_YUV420P;
         context_->time_base={static_cast<int>(config.fps_denominator), static_cast<int>(config.fps_numerator)};
         context_->framerate={static_cast<int>(config.fps_numerator), static_cast<int>(config.fps_denominator)};
-        context_->bit_rate=config.bitrate;
+        context_->bit_rate=effective_bitrate_;
         context_->gop_size=static_cast<int>(config.keyframe_interval);
         context_->max_b_frames=0; context_->thread_count=1;
         // No lookahead, frame reordering, open GOP or unbounded frame-thread queue.
-        int result=av_opt_set(context_->priv_data, "preset", "ultrafast", 0);
+        const char* preset = config.priority == EncodingPriority::quality ? "ultrafast" : "medium";
+        int result=av_opt_set(context_->priv_data, "preset", preset, 0);
         if (result>=0) result=av_opt_set(context_->priv_data, "tune", "zerolatency", 0);
         if (result>=0) result=av_opt_set(context_->priv_data, "forced-idr", "1", 0);
-        if (result>=0) result=av_opt_set(context_->priv_data, "x265-params",
+        if (result>=0 && config.codec==VideoCodec::hevc) result=av_opt_set(context_->priv_data, "x265-params",
             "bframes=0:rc-lookahead=0:frame-threads=1:pools=none:open-gop=0:repeat-headers=1:annexb=1:aud=1:scenecut=0:log-level=error", 0);
+        if (result>=0 && config.codec==VideoCodec::h264) result=av_opt_set(context_->priv_data, "x264-params",
+            "bframes=0:rc-lookahead=0:sync-lookahead=0:threads=1:open-gop=0:repeat-headers=1:annexb=1:aud=1:scenecut=0", 0);
         if (result>=0) result=avcodec_open2(context_, codec, nullptr);
-        if (result<0) { shutdown(); return fail("open libx265: "+av_error(result)); }
+        if (result<0) { shutdown(); return fail(std::string("open ")+encoder_name+": "+av_error(result)); }
         return {};
     }
     CodecResult submit(const EncoderInput& input) override {
@@ -103,7 +114,7 @@ public:
         frame->pict_type=force_idr_?AV_PICTURE_TYPE_I:AV_PICTURE_TYPE_NONE;
         result=avcodec_send_frame(context_,frame.get());
         if (result==AVERROR(EAGAIN)) return {CodecStatus::again,"poll encoder then retry same input"};
-        if (result<0) { failed_=true; return fail("send libx265 frame: "+av_error(result)); }
+        if (result<0) { failed_=true; return fail("send H.26x frame: "+av_error(result)); }
         EncodedAccessUnit meta;
         meta.width=config_.width; meta.height=config_.height;
         meta.pts_ns=input.pts_ns; meta.capture_sequence=input.capture_sequence;
@@ -130,7 +141,7 @@ public:
         const auto it=pending_.find(packet->pts);
         if (it==pending_.end() || it!=pending_.begin() || packet->size<=0 ||
             static_cast<std::size_t>(packet->size)>kMaxCompressedSampleBytes) {
-            av_packet_free(&packet); failed_=true; return fail("libx265 output violates AU/PTS bounds");
+            av_packet_free(&packet); failed_=true; return fail("H.26x output violates AU/PTS bounds");
         }
         auto au=std::move(it->second);
         au.bytes.assign(packet->data,packet->data+packet->size);
@@ -138,15 +149,18 @@ public:
         bool vps=false,sps=false,pps=false;
         for (std::size_t i=0;i+4<au.bytes.size();++i) {
             if (au.bytes[i] || au.bytes[i+1] || au.bytes[i+2]!=1) continue;
-            const auto type=(au.bytes[i+3]>>1)&63;
-            if (type==32) vps=true;
-            if (type==33) sps=true;
-            if (type==34) pps=true;
-            if (type==19 || type==20) au.idr=true;
+            if (config_.codec==VideoCodec::hevc) {
+                const auto type=(au.bytes[i+3]>>1)&63;
+                vps |= type==32; sps |= type==33; pps |= type==34; au.idr |= type==19 || type==20;
+            } else {
+                const auto type=au.bytes[i+3]&31;
+                sps |= type==7; pps |= type==8; au.idr |= type==5;
+            }
         }
-        if (au.idr && !(vps && sps && pps)) {
-            failed_=true; return fail("libx265 IDR missing repeated VPS/SPS/PPS");
+        if (au.idr && !(sps && pps && (config_.codec==VideoCodec::h264 || vps))) {
+            failed_=true; return fail("H.26x IDR missing repeated parameter sets");
         }
+        au.codec=config_.codec;
         pending_.erase(it);
         au.encoded_sequence=++encoded_sequence_;
         output=std::move(au); observed_=true;
@@ -180,6 +194,7 @@ private:
     std::map<std::int64_t,EncodedAccessUnit> pending_;
     std::int64_t next_token_{},last_pts_{-1};
     std::uint64_t encoded_sequence_{};
+    std::uint32_t effective_bitrate_{};
     bool force_idr_{true},finishing_{},failed_{},observed_{};
 };
 }  // namespace
@@ -187,10 +202,6 @@ std::unique_ptr<VideoEncoder> create_ffmpeg_encoder(CodecBackend backend, std::s
     error.clear();
     if (backend!=CodecBackend::ffmpeg_software) {
         error="FFmpeg encoder requires explicit ffmpeg_software backend"; return {};
-    }
-    if (!avcodec_find_encoder_by_name("libx265")) {
-        error="FFmpeg libx265 CPU HEVC encoder unavailable (requires an FFmpeg build with libx265)";
-        return {};
     }
     return std::make_unique<FfmpegEncoder>();
 }

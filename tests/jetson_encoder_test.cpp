@@ -17,7 +17,7 @@ int main(int argc, char** argv) try {
     std::string error;
     auto encoder = create_jetson_encoder(error);
     require(bool(encoder), error);
-    CodecConfig config{1920,1080,60000,1001,8'000'000,600,7};
+    CodecConfig config; config.codec=VideoCodec::hevc; config.width=1920; config.height=1080; config.fps_numerator=60000; config.fps_denominator=1001; config.bitrate=8'000'000; config.keyframe_interval=600; config.generation=7;
     auto invalid_rate = config;
     invalid_rate.fps_numerator = 241001;
     invalid_rate.fps_denominator = 1000;

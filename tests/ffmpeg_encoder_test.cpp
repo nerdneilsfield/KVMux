@@ -26,17 +26,18 @@ kvmux::EncoderInput input(int n, bool nv12=false) {
     value.arrival=std::chrono::steady_clock::now(); return value;
 }
 }
-int main() {
+void run_case(kvmux::VideoCodec codec, kvmux::EncodingPriority priority) {
     using namespace kvmux;
     std::string error;
-    require(!create_ffmpeg_encoder(CodecBackend::automatic,error),"helper rejects Auto");
     auto encoder=create_ffmpeg_encoder(CodecBackend::ffmpeg_software,error);
-    if (!avcodec_find_encoder_by_name("libx265")) {
-        require(!encoder && error.find("libx265")!=std::string::npos,"clear unsupported libx265 result");
-        std::cout<<"SKIP: "<<error<<'\n'; return 77;
+    const char* name=codec==VideoCodec::h264 ? "libx264" : "libx265";
+    if (!avcodec_find_encoder_by_name(name)) {
+        require(!encoder || encoder->configure(CodecConfig{codec,priority,64,64,60,1,8'000'000,30,7}).status==CodecStatus::unsupported,
+            "unavailable requested encoder fails clearly");
+        std::cout<<"SKIP: "<<name<<" unavailable\n"; return;
     }
     require(bool(encoder),error);
-    CodecConfig config; config.width=64; config.height=64; config.generation=7; config.keyframe_interval=30;
+    CodecConfig config; config.codec=codec; config.priority=priority; config.width=64; config.height=64; config.generation=7; config.keyframe_interval=30;
     auto invalid=config; invalid.width=63;
     require(encoder->configure(invalid).status==CodecStatus::invalid_input,"odd size rejected");
     check(encoder->configure(config));
@@ -129,5 +130,15 @@ int main() {
     require(recover_receive()==CodecStatus::end_of_stream && recovered_count==1,"forced IDR drains once");
     encoder->shutdown(); decoder->shutdown();
     require(retained && retained->data[0] && !units[0].bytes.empty(),"owned outputs survive shutdown");
-    std::cout<<"libx265 CPU encode/decode: 12 synthetic 64x64 frames, EAGAIN, forced IDR, reset, EOS passed; no throughput claim\n";
+    require(encoder->diagnostic().detail.find(priority==EncodingPriority::quality ? "priority=quality" : "priority=size")!=std::string::npos,
+        "priority is observable in diagnostic");
+    std::cout<<name<<" CPU encode/decode priority="<<(priority==EncodingPriority::quality ? "quality" : "size")
+        <<": 12 synthetic 64x64 frames, EAGAIN, forced IDR, reset, EOS passed; no throughput claim\n";
+}
+int main() {
+    using namespace kvmux;
+    std::string error;
+    require(!create_ffmpeg_encoder(CodecBackend::automatic,error),"helper rejects Auto");
+    for (auto codec : {VideoCodec::h264, VideoCodec::hevc})
+        for (auto priority : {EncodingPriority::quality, EncodingPriority::size}) run_case(codec,priority);
 }
