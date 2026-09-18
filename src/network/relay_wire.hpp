@@ -16,7 +16,7 @@ struct Tuple {
     bool operator==(const Tuple&) const = default;
 };
 struct Envelope { EnvelopeKind kind{}; Tuple tuple; std::span<const std::uint8_t> body; };
-struct Hello { std::uint8_t codecs{3}; };
+struct Hello { std::uint8_t codecs{7}; };
 struct Welcome { VideoCodec codec{VideoCodec::mjpeg}; std::uint64_t generation{}; bool operator==(const Welcome&) const = default; };
 enum class BusyReason { busy, no_common_codec };
 struct Busy { BusyReason reason{BusyReason::busy}; };

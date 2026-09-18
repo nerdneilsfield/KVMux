@@ -112,7 +112,7 @@ struct RelayServer::Impl {
                         if (!unit.encoded_sequence || unit.generation != generation)
                             throw std::runtime_error("Invalid encoder sequence/generation");
                         if (waiting_idr && !unit.idr) continue;
-                        auto bytes = encode_hevc(unit);
+                        auto bytes = encode_annex_b(unit);
                         if (bytes.empty()) throw std::runtime_error("Invalid HEVC access unit");
                         waiting_idr = false;
                         publish({VideoCodec::hevc, generation, unit.encoded_sequence, unit.idr, std::move(bytes), unit.arrival});

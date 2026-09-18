@@ -90,7 +90,7 @@ private:
 };
 class ClientSession {
 public:
-    explicit ClientSession(udp::Endpoint server, std::uint8_t supported_codecs = 3);
+    explicit ClientSession(udp::Endpoint server, std::uint8_t supported_codecs = 7);
     ~ClientSession();
     ClientSession(const ClientSession&) = delete;
     ClientSession& operator=(const ClientSession&) = delete;

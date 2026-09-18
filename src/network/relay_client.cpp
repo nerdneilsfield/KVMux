@@ -284,7 +284,7 @@ struct RelayClient::Impl {
                         presentations.push_back({sample->sequence, frame.sequence, capture.generation, marker, frame.first_arrival});
                         publish(std::move(*sample), VideoCodec::mjpeg);
                     } else {
-                        auto au = decode_hevc(frame.bytes);
+                        auto au = decode_annex_b(frame.bytes, frame.codec);
                         if (!au) { decode_recovery = MediaReason::decoder_failure; continue; }
                         au->arrival = frame.first_arrival;
                         if (ingress.size() >= 8 || ingress_bytes + au->bytes.size() > kMediaAllocationLimit ||

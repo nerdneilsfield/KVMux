@@ -25,7 +25,7 @@ void control(const w::Control& c,w::Direction d,std::uint8_t type,std::size_t pa
 void envelope_golden_offsets_and_1200_ceiling() {
     Bytes body(1168,0x5a); w::Tuple tuple{0x0102030405060708,0x1112131415161718,0x21222324};
     auto b=w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}); check(b&&b->size()==1200);
-    Bytes header{0x4b,0x56,0x4d,0x58,4,6,4,0x90,1,2,3,4,5,6,7,8,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x21,0x22,0x23,0x24,0,0,0,0};
+    Bytes header{0x4b,0x56,0x4d,0x58,5,6,4,0x90,1,2,3,4,5,6,7,8,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x21,0x22,0x23,0x24,0,0,0,0};
     check(std::equal(header.begin(),header.end(),b->begin()));
     check(w::encode_envelope({w::EnvelopeKind::media,tuple,body}).has_value());
     body.push_back(0); check(!w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}));
@@ -54,7 +54,7 @@ void control_golden_vectors_and_exact_lengths() {
     for(auto reason:{15,16,255}) { refresh[12]=static_cast<std::uint8_t>(reason); check(!w::decode_control(refresh,c)); }
     check(!w::decode_control(Bytes(1025),c));
     std::vector<std::pair<w::EnvelopeKind,w::RawBody>> raws{
-        {w::EnvelopeKind::hello,w::Hello{3}}, {w::EnvelopeKind::welcome,w::Welcome{VideoCodec::hevc,9}},
+        {w::EnvelopeKind::hello,w::Hello{7}}, {w::EnvelopeKind::welcome,w::Welcome{VideoCodec::hevc,9}},
         {w::EnvelopeKind::confirm,w::Welcome{VideoCodec::hevc,9}}, {w::EnvelopeKind::ready,w::Welcome{VideoCodec::hevc,9}},
         {w::EnvelopeKind::busy,w::Busy{w::BusyReason::no_common_codec}}, {w::EnvelopeKind::challenge,w::Challenge{8}},
         {w::EnvelopeKind::proof,w::Proof{8,2,true,true,9}}, {w::EnvelopeKind::cancel,w::Cancel{2,w::CancelReason::focus}},
@@ -66,8 +66,14 @@ void control_golden_vectors_and_exact_lengths() {
         w::Tuple tuple{1,2,3}; if(kind==w::EnvelopeKind::hello||kind==w::EnvelopeKind::busy) tuple={0,2,0};
         check(w::encode_envelope({kind,tuple,*b}).has_value());
     }
-    check(*w::encode_raw(w::Hello{3})==Bytes({3,0,0,0}));
-    check(!w::encode_raw(w::Hello{0})); check(!w::encode_raw(w::Hello{4}));
+    check(*w::encode_raw(w::Hello{7})==Bytes({7,0,0,0}));
+    check(!w::encode_raw(w::Hello{0})); check(!w::encode_raw(w::Hello{8}));
+    check(*w::encode_raw(w::Welcome{VideoCodec::mjpeg,9})==Bytes({0,0,0,0,0,0,0,0,0,0,0,9}));
+    check(*w::encode_raw(w::Welcome{VideoCodec::hevc,9})==Bytes({1,0,0,0,0,0,0,0,0,0,0,9}));
+    check(*w::encode_raw(w::Welcome{VideoCodec::h264,9})==Bytes({2,0,0,0,0,0,0,0,0,0,0,9}));
+    auto bad_codec=*w::encode_raw(w::Welcome{VideoCodec::h264,9}); bad_codec[0]=3;
+    check(!w::decode_raw(w::EnvelopeKind::welcome,bad_codec));
+
     auto proof=*w::encode_raw(w::Proof{1,2,true,true,3});
     for(auto offset:{16,17,23}) { auto bad=proof; bad[static_cast<std::size_t>(offset)]=255; check(!w::decode_raw(w::EnvelopeKind::proof,bad)); }
     check(!w::encode_raw(w::Proof{1,0,true,true,3})); check(!w::encode_raw(w::Proof{1,2,true,true,0}));
@@ -95,9 +101,9 @@ void paste_control_contract() {
     for(auto n:{std::size_t(0),std::size_t(1),std::size_t(7),std::size_t(15),std::size_t(16),std::size_t(17),chunk->size()-1}) check(!w::decode_control(std::span(*chunk).first(n),c));
     Bytes oversized(1025); check(!w::decode_control(oversized,c));
 }
-void v3_envelopes_are_rejected() {
+void v4_envelopes_are_rejected() {
     Bytes body(1,0); w::Tuple tuple{1,2,3};
-    auto b=*w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}); b[4]=3; check(!w::decode_envelope(b));
+    auto b=*w::encode_envelope({w::EnvelopeKind::kcp,tuple,body}); b[4]=4; check(!w::decode_envelope(b));
 }
 
 void desired_state_matches_serial_domain() {
@@ -121,6 +127,6 @@ void edge_binary64_roundtrip() {
 }
 int main() {
     envelope_golden_offsets_and_1200_ceiling(); control_golden_vectors_and_exact_lengths();
-    desired_state_matches_serial_domain(); edge_binary64_roundtrip(); paste_control_contract(); v3_envelopes_are_rejected();
+    desired_state_matches_serial_domain(); edge_binary64_roundtrip(); paste_control_contract(); v4_envelopes_are_rejected();
     std::cout<<"relay_wire: all binary/domain checks passed\n";
 }

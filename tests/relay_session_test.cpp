@@ -164,4 +164,15 @@ void execute_two_chunk_relay_transaction() {
     check(f.s.paste_execute({102}, at(107)).items[0].paste_status->outcome == w::PasteOutcome::canceled);
 }
 
-int main() { execute_upload_contract(); ownership_cancel_expiry_and_job_id(); execute_two_chunk_relay_transaction(); }
+void h264_negotiation_and_no_common_codec() {
+    const auto client = Fixture::endpoint(23101), server = Fixture::endpoint(23102);
+    ServerSession h264{VideoCodec::h264}; ClientSession supports_h264{server, 4};
+    auto hello = packet(supports_h264.start(12, at(0)), w::EnvelopeKind::hello);
+    auto welcome = packet(h264.on_datagram(client, hello, at(0), {23,34,45}), w::EnvelopeKind::welcome);
+    check(std::get<w::Welcome>(*w::decode_raw(w::EnvelopeKind::welcome, w::decode_envelope(welcome)->body)).codec == VideoCodec::h264);
+    ServerSession hevc{VideoCodec::hevc}; ClientSession h264_only{server, 4};
+    auto rejected = hevc.on_datagram(client, packet(h264_only.start(13, at(0)), w::EnvelopeKind::hello), at(0), {24,35,46});
+    auto busy = packet(rejected, w::EnvelopeKind::busy);
+    check(std::get<w::Busy>(*w::decode_raw(w::EnvelopeKind::busy, w::decode_envelope(busy)->body)).reason == w::BusyReason::no_common_codec);
+}
+int main() { execute_upload_contract(); ownership_cancel_expiry_and_job_id(); execute_two_chunk_relay_transaction(); h264_negotiation_and_no_common_codec(); }

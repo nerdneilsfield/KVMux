@@ -35,7 +35,8 @@ constexpr std::size_t metadata_charge = 512; // Includes map node and vector own
 std::size_t fragments(std::size_t n) { return (n + payload - 1) / payload; }
 std::size_t groups(std::size_t n) { return (n + 7) / 8; }
 bool valid_shape(const MediaFrame& f) {
-    return (f.codec == VideoCodec::mjpeg || f.codec == VideoCodec::hevc) &&
+    return (f.codec == VideoCodec::mjpeg || f.codec == VideoCodec::hevc ||
+            f.codec == VideoCodec::h264) &&
         f.sequence != 0 && !f.bytes.empty() &&
         f.bytes.size() <= kMaxCompressedSampleBytes + (f.codec == VideoCodec::mjpeg ? 24 : 58) &&
         (f.codec != VideoCodec::mjpeg || !f.idr);
@@ -45,7 +46,7 @@ bool valid_body(const MediaFrame& f) {
         const auto decoded = decode_mjpeg(f.bytes, f.generation);
         return decoded && decoded->sequence == f.sequence && !f.idr;
     }
-    const auto decoded = decode_hevc(f.bytes);
+    const auto decoded = decode_annex_b(f.bytes, f.codec);
     return decoded && decoded->generation == f.generation &&
         decoded->encoded_sequence == f.sequence && decoded->idr == f.idr;
 }
@@ -120,7 +121,7 @@ struct MediaReceiver::Impl {
     std::map<std::uint64_t, Entry> frames;
     std::optional<MediaTime> gap_since, last_refresh, last_feedback;
     explicit Impl(VideoCodec c, std::uint64_t g) : codec(c), generation(g) {
-        counters.waiting_idr = c == VideoCodec::hevc;
+        counters.waiting_idr = c != VideoCodec::mjpeg;
     }
     MediaStats stats() const {
         auto s = counters; s.resident_frames = frames.size(); return s;
@@ -156,7 +157,7 @@ struct MediaReceiver::Impl {
         if (keep != frames.end()) { refresh_seq = keep->first; refresh = std::move(keep->second); }
         for (const auto& [seq, unused] : frames) retired = std::max(retired, seq);
         frames.clear(); counters.charged_bytes = 0; gap_since.reset(); expected = 0;
-        ++counters.recovery_marker; counters.waiting_idr = codec == VideoCodec::hevc;
+        ++counters.recovery_marker; counters.waiting_idr = codec != VideoCodec::mjpeg;
         event(out, MediaEvent::Kind::reset, reason);
         if (refresh) {
             // This IDR supersedes all older references. Future packets may be
@@ -196,7 +197,7 @@ struct MediaReceiver::Impl {
         for (auto it = frames.begin(); it != frames.end();) {
             if (now - it->second.frame.first_arrival < 150ms) { ++it; continue; }
             loss(MediaReason::age, out);
-            if (codec == VideoCodec::hevc) { reset(MediaReason::age, out); break; }
+            if (codec != VideoCodec::mjpeg) { reset(MediaReason::age, out); break; }
             retired = std::max(retired, it->first); auto old = it++; erase(old);
         }
         if (gap_since && now - *gap_since >= 40ms) {
@@ -228,7 +229,7 @@ std::vector<MediaEvent> MediaReceiver::input(std::span<const std::uint8_t> bytes
                 return a.second.frame.first_arrival < b.second.frame.first_arrival;
             });
             s.loss(MediaReason::capacity, out);
-            if (s.codec == VideoCodec::hevc) { s.reset(MediaReason::capacity, out); break; }
+            if (s.codec != VideoCodec::mjpeg) { s.reset(MediaReason::capacity, out); break; }
             s.retired = std::max(s.retired, oldest->first); s.erase(oldest);
         }
         if (h->sequence <= s.retired || (s.counters.waiting_idr && !h->idr)) { s.periodic(now, out); return out; }
@@ -255,7 +256,7 @@ std::vector<MediaEvent> MediaReceiver::input(std::span<const std::uint8_t> bytes
     }
     if (conflict) {
         s.loss(MediaReason::conflict, out);
-        if (s.codec == VideoCodec::hevc) s.reset(MediaReason::conflict, out);
+        if (s.codec != VideoCodec::mjpeg) s.reset(MediaReason::conflict, out);
         else { s.retired = std::max(s.retired, h->sequence); s.erase(it); }
         s.periodic(now, out); return out;
     }
@@ -280,7 +281,7 @@ std::vector<MediaEvent> MediaReceiver::input(std::span<const std::uint8_t> bytes
     if (e.present == e.count && !e.complete) {
         if (!valid_body(e.frame)) {
             s.loss(MediaReason::invalid_body, out);
-            if (s.codec == VideoCodec::hevc) s.reset(MediaReason::invalid_body, out);
+            if (s.codec != VideoCodec::mjpeg) s.reset(MediaReason::invalid_body, out);
             else { s.retired = std::max(s.retired, h->sequence); s.erase(it); }
         } else {
             e.complete = true;
@@ -305,14 +306,14 @@ struct MediaPacer::Impl {
     std::size_t ordinal{};
     MediaPacerStats counters;
     Impl(VideoCodec c, std::uint64_t g, std::uint64_t r, MediaTime now)
-        : codec(c), generation(g), rate(r), updated(now) { counters.waiting_idr = c == VideoCodec::hevc; }
+        : codec(c), generation(g), rate(r), updated(now) { counters.waiting_idr = c != VideoCodec::mjpeg; }
     double credit(MediaTime now) const {
         return std::min(2400.0, tokens + std::max(0.0, std::chrono::duration<double>(now - updated).count()) * static_cast<double>(rate));
     }
     MediaAdmission drop(MediaReason reason) {
         active.reset(); ordinal = 0;
         if (reason == MediaReason::sender_deadline || reason == MediaReason::source_stale) ++counters.sender_deadlines;
-        if (codec == VideoCodec::hevc) { counters.waiting_idr = true; ++counters.skipped_access_units; }
+        if (codec != VideoCodec::mjpeg) { counters.waiting_idr = true; ++counters.skipped_access_units; }
         return {false, reason, counters.waiting_idr};
     }
 };
@@ -335,7 +336,7 @@ MediaAdmission MediaPacer::submit(MediaFrame f, MediaTime now) {
     if (!valid_shape(f) || f.codec != s.codec || f.generation != s.generation || !valid_body(f) || f.sequence <= s.last_sequence)
         return reject(MediaReason::invalid_body);
     if (f.first_arrival > now || now - f.first_arrival >= 250ms) return reject(MediaReason::source_stale);
-    if (s.codec == VideoCodec::hevc && (s.counters.waiting_idr || (s.last_sequence && f.sequence != s.last_sequence + 1)) && !f.idr)
+    if (s.codec != VideoCodec::mjpeg && (s.counters.waiting_idr || (s.last_sequence && f.sequence != s.last_sequence + 1)) && !f.idr)
         return reject(MediaReason::skipped_access_unit);
     const auto deadline = std::min(now + 100ms, f.first_arrival + 250ms);
     const auto budget = s.credit(now) + static_cast<double>(s.rate) * std::chrono::duration<double>(deadline - now).count();

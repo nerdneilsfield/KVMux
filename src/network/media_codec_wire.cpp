@@ -28,8 +28,8 @@ bool annex_b_prefix(std::span<const std::uint8_t> bytes) {
         bytes.size() >= 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 1 ? 4 : 0;
     return prefix != 0 && bytes.size() >= prefix + 2;
 }
-bool valid_hevc_metadata(const EncodedAccessUnit& unit) {
-    return unit.codec == VideoCodec::hevc && valid_dimensions(unit.width, unit.height) &&
+bool valid_annex_b_metadata(const EncodedAccessUnit& unit) {
+    return (unit.codec == VideoCodec::hevc || unit.codec == VideoCodec::h264) && valid_dimensions(unit.width, unit.height) &&
         unit.sample_aspect_ratio.num > 0 && unit.sample_aspect_ratio.den > 0 &&
         static_cast<unsigned>(unit.color_range) <= 2U &&
         static_cast<unsigned>(unit.color_space) <= 17U && unit.color_space != AVCOL_SPC_RESERVED &&
@@ -56,8 +56,8 @@ std::optional<CaptureSample> decode_mjpeg(std::span<const std::uint8_t> data, st
     if(!sequence||!width||!height||!range||!matrix||!reserved||!size||*reserved!=0||*range>static_cast<std::uint8_t>(ColorRange::unknown)||*matrix>static_cast<std::uint8_t>(ColorMatrix::unknown)||data.size()-pos!=*size) return {};
     auto sample=CaptureSample::make_mjpeg(generation,*sequence,std::chrono::steady_clock::now(),*width,*height,data.subspan(pos)); if(!sample)return{}; sample->color_range=static_cast<ColorRange>(*range);sample->color_matrix=static_cast<ColorMatrix>(*matrix);return sample;
 }
-std::vector<std::uint8_t> encode_hevc(const EncodedAccessUnit& unit) {
-    if (!valid_hevc_metadata(unit) || unit.bytes.size() > kMaxCompressedSampleBytes ||
+std::vector<std::uint8_t> encode_annex_b(const EncodedAccessUnit& unit) {
+    if (!valid_annex_b_metadata(unit) || unit.bytes.size() > kMaxCompressedSampleBytes ||
         !annex_b_prefix(unit.bytes)) return {};
     std::vector<std::uint8_t> out;
     out.reserve(58 + unit.bytes.size());
@@ -77,11 +77,11 @@ std::vector<std::uint8_t> encode_hevc(const EncodedAccessUnit& unit) {
     out.insert(out.end(), unit.bytes.begin(), unit.bytes.end());
     return out;
 }
-std::optional<EncodedAccessUnit> decode_hevc(std::span<const std::uint8_t> data) {
+std::optional<EncodedAccessUnit> decode_annex_b(std::span<const std::uint8_t> data, VideoCodec codec) {
     if (data.size() < 58 || data.size() > 58 + kMaxCompressedSampleBytes) return {};
     EncodedAccessUnit unit;
     std::size_t pos{};
-    unit.codec = VideoCodec::hevc;
+    unit.codec = codec;
     unit.generation = *read_be<std::uint64_t>(data, pos);
     unit.encoded_sequence = *read_be<std::uint64_t>(data, pos);
     unit.capture_sequence = *read_be<std::uint64_t>(data, pos);
@@ -100,7 +100,7 @@ std::optional<EncodedAccessUnit> decode_hevc(std::span<const std::uint8_t> data)
     const auto idr = *byte(data, pos), reserved = *byte(data, pos);
     const auto size = *read_be<std::uint32_t>(data, pos);
     if (idr > 1 || reserved != 0 || size != data.size() - pos ||
-        !valid_hevc_metadata(unit) || !annex_b_prefix(data.subspan(pos))) return {};
+        !valid_annex_b_metadata(unit) || !annex_b_prefix(data.subspan(pos))) return {};
     unit.idr = idr != 0;
     // All lengths and metadata are checked before allocating compressed storage.
     unit.bytes.assign(data.begin() + static_cast<std::ptrdiff_t>(pos), data.end());

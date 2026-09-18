@@ -73,7 +73,7 @@ struct ServerSession::Impl {
     std::optional<wire::Sync> pending_sync, completed_sync;
     bool barrier{};
     explicit Impl(VideoCodec c):codec(c) {
-        if(c!=VideoCodec::mjpeg&&c!=VideoCodec::hevc) throw std::invalid_argument("session codec");
+        if(c!=VideoCodec::mjpeg&&c!=VideoCodec::hevc&&c!=VideoCodec::h264) throw std::invalid_argument("session codec");
     }
     wire::PasteStatus status(wire::PasteStatusReason reason=wire::PasteStatusReason::none) const {
         if(!paste) return {};
@@ -192,7 +192,7 @@ SessionActions ServerSession::on_datagram(const udp::Endpoint& peer,std::span<co
             else send(out,peer,EnvelopeKind::busy,e->tuple,wire::Busy{});
             return out;
         }
-        auto bit=s.codec==VideoCodec::mjpeg?1:2;
+        auto bit=s.codec==VideoCodec::mjpeg?1:s.codec==VideoCodec::hevc?2:4;
         if(!(hello.codecs&bit)) { send(out,peer,EnvelopeKind::busy,e->tuple,wire::Busy{wire::BusyReason::no_common_codec}); return out; }
         if(!ids.session||!ids.conversation||!ids.generation) return out;
         s.phase=SessionPhase::pending; s.peer=peer; s.tuple={ids.session,e->tuple.nonce,ids.conversation};
@@ -415,7 +415,7 @@ struct ClientSession::Impl {
     std::uint64_t presented{};
     std::optional<wire::Cancel> cancellation;
     Impl(udp::Endpoint p,std::uint8_t c):peer(std::move(p)),codecs(c) {
-        if(!c||c>3) throw std::invalid_argument("supported codecs");
+        if(!c||c>7) throw std::invalid_argument("supported codecs");
     }
     void close(SessionActions& out) {
         phase=SessionPhase::idle; active=video_fresh=false; cancellation.reset(); tuple={}; challenge=0;
@@ -450,7 +450,7 @@ SessionActions ClientSession::on_datagram(const udp::Endpoint& peer,std::span<co
     }
     if(e->kind==EnvelopeKind::welcome&&s.phase==SessionPhase::pending) {
         auto welcome=std::get<wire::Welcome>(*wire::decode_raw(e->kind,e->body));
-        auto bit=welcome.codec==VideoCodec::mjpeg?1:2;
+        auto bit=welcome.codec==VideoCodec::mjpeg?1:welcome.codec==VideoCodec::hevc?2:4;
         if(!(s.codecs&bit)||(s.tuple.session&&(s.tuple!=e->tuple||s.welcome!=welcome))) return out;
         s.tuple=e->tuple; s.welcome=welcome; s.retry=now+100ms; s.handshake(out); return out;
     }

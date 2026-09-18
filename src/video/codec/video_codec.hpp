@@ -8,7 +8,8 @@
 
 namespace kvmux {
 
-enum class VideoCodec { mjpeg = 0, hevc = 1 };
+enum class VideoCodec { mjpeg = 0, hevc = 1, h264 = 2 };
+enum class EncodingPriority { quality, size };
 enum class CodecBackend { automatic, jetson_gstreamer, videotoolbox, ffmpeg_software };
 enum class CodecStatus { ok, again, invalid_input, unsupported, failed, end_of_stream };
 
@@ -26,6 +27,8 @@ struct CodecDiagnostic {
 };
 
 struct CodecConfig {
+    VideoCodec codec{VideoCodec::hevc};
+    EncodingPriority priority{EncodingPriority::quality};
     std::uint32_t width{}, height{};
     std::uint32_t fps_numerator{60}, fps_denominator{1};
     std::uint32_t bitrate{8'000'000}, keyframe_interval{60};

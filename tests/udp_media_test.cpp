@@ -23,7 +23,7 @@ MediaFrame make_frame(VideoCodec codec, std::uint64_t seq, std::size_t compresse
     EncodedAccessUnit au;
     au.bytes = std::move(data); au.width = 16; au.height = 16;
     au.generation = 7; au.encoded_sequence = seq; au.capture_sequence = seq; au.idr = idr;
-    return {codec, 7, seq, idr, encode_hevc(au), epoch};
+    return {codec, 7, seq, idr, encode_annex_b(au), epoch};
 }
 struct Events {
     std::vector<MediaFrame> frames;
