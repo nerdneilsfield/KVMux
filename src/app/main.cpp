@@ -514,7 +514,7 @@ int main(int argc, char** argv) {
   bool snapshot_queued = false;
   enum class RegionSelection { none, screenshot, scrolling, recording };
   RegionSelection region_selection = RegionSelection::none;
-  bool region_selecting = false, region_dragging = false, region_ready = false;
+  bool region_selecting = false, region_dragging = false, region_ready = false, region_confirm_requested = false;
   bool scroll_active = false;
   std::optional<std::pair<std::uint64_t, std::uint64_t>> scroll_sample_after;
   ImVec2 region_start{}, region_end{};
@@ -558,6 +558,7 @@ int main(int argc, char** argv) {
           region_selecting = region_dragging = region_ready = false;
           if (event.type == SDL_EVENT_KEY_DOWN) continue;
         }
+        if (preview && region_ready && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT && event.button.clicks >= 2 && event.button.x >= std::min(region_start.x, region_end.x) && event.button.x <= std::max(region_start.x, region_end.x) && event.button.y >= std::min(region_start.y, region_end.y) && event.button.y <= std::max(region_start.y, region_end.y)) { region_confirm_requested = true; continue; }
         if (preview && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
             event.button.button == SDL_BUTTON_LEFT &&
             displayed_video_rect.contains(event.button.x, event.button.y)) {
@@ -1455,51 +1456,6 @@ int main(int argc, char** argv) {
     }
     ImGui::End();
     ImGui::PopStyleVar();
-    const bool recording_controls =
-        media_status.state == RecordingState::recording ||
-        media_status.state == RecordingState::paused;
-    if (scroll_active || recording_controls) {
-      ImGui::SetNextWindowPos(
-          {viewport->Pos.x + viewport->Size.x - 8.F, viewport->Pos.y + 8.F},
-          ImGuiCond_Always, {1.F, 0.F});
-      if (!relative_capture)
-        ImGui::SetNextWindowSize({200.F, 48.F}, ImGuiCond_Always);
-      ImGui::SetNextWindowBgAlpha(.94F);
-      ImGui::Begin("Media controls", nullptr,
-                   (relative_capture ? ImGuiWindowFlags_AlwaysAutoResize : 0) |
-                       ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
-                       ImGuiWindowFlags_NoSavedSettings);
-      record_local_region();
-      if (relative_capture) {
-        ImGui::TextUnformatted(
-            config.host_scancode == 231
-                ? "Press Right GUI/Command to release before clicking"
-                : "Press Right Control to release before clicking");
-        ImGui::Separator();
-      }
-      if (scroll_active) {
-        if (ImGui::Button("Finish")) {
-          (void)recording.finish_scroll();
-          scroll_active = false;
-          scroll_sample_after.reset();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
-          recording.cancel_scroll();
-          scroll_active = false;
-          scroll_sample_after.reset();
-        }
-      }
-      if (recording_controls) {
-        if (ImGui::Button("Stop")) (void)recording.stop();
-        ImGui::SameLine();
-        if (media_status.state == RecordingState::recording) {
-          if (ImGui::Button("Pause")) (void)recording.pause();
-        } else if (ImGui::Button("Resume"))
-          (void)recording.resume();
-      }
-      ImGui::End();
-    }
     if (region_selecting && region_ready && !remote_input) {
       ImGui::SetNextWindowPos({std::min(region_start.x, region_end.x),
                                std::max(region_start.y, region_end.y) + 6.F},
@@ -1513,7 +1469,8 @@ int main(int argc, char** argv) {
           region_selection == RegionSelection::scrolling   ? "Start scrolling"
           : region_selection == RegionSelection::recording ? "Start recording"
                                                            : "Save region";
-      if (ImGui::Button(region_action)) {
+      if (ImGui::Button(region_action) || region_confirm_requested) {
+        region_confirm_requested = false;
         const double left = std::min(region_start.x, region_end.x),
                      top = std::min(region_start.y, region_end.y);
         const double right = std::max(region_start.x, region_end.x),
@@ -1547,6 +1504,7 @@ int main(int argc, char** argv) {
             queued = recording.snapshot(*current_frame, crop);
         }
         if (queued) {
+          session->activate_control();
           if (region_selection == RegionSelection::scrolling) {
             scroll_active = true;
             media_message =

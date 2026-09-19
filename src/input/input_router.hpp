@@ -144,6 +144,7 @@ class InputRouter {
   void set_relative_gain(double gain) noexcept;
   void set_mouse_mode(MouseMode mode);
 
+  void activate() noexcept;
   void handle(const InputEvent& event);
   void tick(Clock::time_point now = Clock::now());
   void focus_lost() noexcept;

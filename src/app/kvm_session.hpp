@@ -80,6 +80,7 @@ class KvmSession {
   [[nodiscard]] TextPasteSnapshot text_paste_progress() const noexcept;
 
   void set_video_rect(Rect rect) noexcept;
+  void activate_control() noexcept;
   void handle_input(const InputEvent& event);
   void tick(Clock::time_point now = Clock::now());
   void update_ui_heartbeat() noexcept;

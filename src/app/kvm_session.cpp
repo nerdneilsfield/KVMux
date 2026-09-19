@@ -160,6 +160,10 @@ bool KvmSession::set_mouse_mode(MouseMode mode) {
 void KvmSession::set_video_rect(Rect rect) noexcept {
   input_.set_video_rect(rect);
 }
+void KvmSession::activate_control() noexcept {
+  input_.activate();
+}
+
 void KvmSession::handle_input(const InputEvent& event) {
   control_->set_control_active(input_.capture_intended() ||
                                input_.injected_active());

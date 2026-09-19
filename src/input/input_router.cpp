@@ -126,6 +126,14 @@ std::optional<std::uint64_t> InputRouter::submit(ControlPayload payload) {
   return sequence;
 }
 
+void InputRouter::activate() noexcept {
+  if (state_ == InputState::preview && video_fresh_ && sink_ready_released()) {
+    state_ = InputState::arming;
+    activation_released_ = true;
+    ++intent_;
+  }
+}
+
 void InputRouter::handle(const InputEvent& event) {
   // A physical key edge cancels synthetic text before it can inject another
   // character.
