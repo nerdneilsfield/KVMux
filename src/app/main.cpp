@@ -693,7 +693,14 @@ int main(int argc, char** argv) {
       // A local popup owns injectable input, but SDL and ImGui still receive
       // close and window-management events.
       if (local_click && injectable_event) continue;
-      if (popup_open && !remote_input && injectable_event) continue;
+      const bool paste_cancel_event =
+          session->snapshot().text_paste_active ||
+          (event.type == SDL_EVENT_KEY_DOWN ||
+           event.type == SDL_EVENT_KEY_UP) &&
+              event.key.scancode == config.host_scancode;
+      if (popup_open && !remote_input && injectable_event &&
+          !paste_cancel_event)
+        continue;
       if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input)
         remote_buttons |= SDL_BUTTON_MASK(event.button.button);
       if (event.type == SDL_EVENT_MOUSE_BUTTON_UP)
