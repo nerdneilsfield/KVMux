@@ -683,15 +683,21 @@ int main(int argc, char** argv) {
         session->handle_input(to_input(event));
     }
     if (devices_future.valid() && devices_future.wait_for(std::chrono::seconds(
-                                      0)) == std::future_status::ready)
+                                      0)) == std::future_status::ready) {
       devices = devices_future.get();
+      if (selected_device < 0 ||
+          selected_device >= static_cast<int>(devices.size()))
+        selected_device = devices.empty() ? -1 : 0;
+    }
     if (modes_future && modes_future->wait_for(std::chrono::seconds(0)) ==
                             std::future_status::ready) {
       modes = modes_future->get();
       selected_mode = modes.empty() ? -1 : 0;
       modes_future.reset();
     }
-    if (std::chrono::steady_clock::now() >= next_serial_scan) {
+    if (!remote && open_connections &&
+        session->snapshot().input_state == InputState::preview &&
+        std::chrono::steady_clock::now() >= next_serial_scan) {
       ports = enumerate_serial_ports();
       next_serial_scan =
           std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -1042,8 +1048,12 @@ int main(int argc, char** argv) {
         if (ImGui::MenuItem("Resume recording")) (void)recording.resume();
       }
       ImGui::BeginDisabled(status.state != RecordingState::recording &&
-                           status.state != RecordingState::paused);
-      if (ImGui::MenuItem("Stop recording")) (void)recording.stop();
+                           status.state != RecordingState::paused &&
+                           status.state != RecordingState::failed);
+      if (ImGui::MenuItem(status.state == RecordingState::failed
+                              ? "Reset failed recording"
+                              : "Stop recording"))
+        (void)recording.stop();
       ImGui::EndDisabled();
       if (scroll_active && ImGui::MenuItem("Finish scrolling screenshot")) {
         (void)recording.finish_scroll();
@@ -1157,6 +1167,12 @@ int main(int argc, char** argv) {
           ImGui::SameLine();
           if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
           if (requested_remote != remote && !retiring) {
+            (void)recording.stop();
+            if (scroll_active) {
+              recording.cancel_scroll();
+              scroll_active = false;
+              scroll_sample_after.reset();
+            }
             retire_session();
             remote = requested_remote;
             session = std::make_unique<KvmSession>();
@@ -1511,6 +1527,12 @@ int main(int argc, char** argv) {
         ImGui::TextWrapped("%s", media_message.c_str());
         ImGui::Separator();
       }
+      if (!snapshot.session_error.empty())
+        ImGui::TextWrapped("Session error: %s", snapshot.session_error.c_str());
+      if (!snapshot.capture.error.empty())
+        ImGui::TextWrapped("Capture error: %s", snapshot.capture.error.c_str());
+      if (!snapshot.control.error.empty())
+        ImGui::TextWrapped("Control error: %s", snapshot.control.error.c_str());
       const auto origin = ImGui::GetCursorScreenPos();
       const float line_height = ImGui::GetTextLineHeight();
       const bool connected =
