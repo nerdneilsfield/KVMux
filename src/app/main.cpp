@@ -1011,7 +1011,6 @@ int main(int argc, char** argv) {
       if (ImGui::MenuItem("Save screenshot")) {
         if (recording.snapshot(*current_frame, *saved_region)) {
           snapshot_queued = true;
-          session->activate_control();
           media_message = "Screenshot queued.";
           ImGui::CloseCurrentPopup();
         } else
@@ -1030,10 +1029,9 @@ int main(int argc, char** argv) {
       ImGui::BeginDisabled(!valid_visible_cpu_frame || !saved_region ||
                            status.state != RecordingState::idle);
       if (ImGui::MenuItem("Start recording")) {
-        media_message =
-            recording.start(*current_frame, *saved_region)
-                ? (session->activate_control(), "Recording started.")
-                : "Could not start recording.";
+        media_message = recording.start(*current_frame, *saved_region)
+                            ? "Recording started."
+                            : "Could not start recording.";
         ImGui::CloseCurrentPopup();
       }
       ImGui::EndDisabled();
@@ -1273,7 +1271,8 @@ int main(int argc, char** argv) {
               ImGui::TableSetColumnIndex(1);
               if (ImGui::BeginCombo(
                       "##capture_device",
-                      selected_device >= 0
+                      selected_device >= 0 &&
+                              selected_device < static_cast<int>(devices.size())
                           ? devices[selected_device].display_name.c_str()
                           : "Select device")) {
                 for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
@@ -1309,7 +1308,8 @@ int main(int argc, char** argv) {
               ImGui::TableSetColumnIndex(1);
               if (ImGui::BeginCombo(
                       "##capture_mode",
-                      selected_mode >= 0
+                      selected_mode >= 0 &&
+                              selected_mode < static_cast<int>(modes.size())
                           ? mode_text(modes[selected_mode]).c_str()
                           : "Select mode")) {
                 for (int i = 0; i < static_cast<int>(modes.size()); ++i)
