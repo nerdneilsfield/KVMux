@@ -511,8 +511,8 @@ int main(int argc, char** argv) {
   std::string displayed_snapshot_error, displayed_scroll_error;
   bool snapshot_queued = false;
   std::optional<FrameCrop> saved_region;
-  bool region_selecting = false, region_dragging = false, region_ready = false,
-       region_confirm_requested = false;
+  bool region_selecting = false, region_dragging = false, region_ready = false;
+  bool region_confirm_requested = false;
   bool scroll_active = false;
   std::optional<std::pair<std::uint64_t, std::uint64_t>> scroll_sample_after;
   ImVec2 region_start{}, region_end{};
@@ -522,6 +522,7 @@ int main(int argc, char** argv) {
   std::string last_status;
 
   while (running) {
+    const auto frame_started = std::chrono::steady_clock::now();
     std::erase_if(retired_sessions, [](auto& future) {
       return future.wait_for(std::chrono::seconds(0)) ==
              std::future_status::ready;
@@ -564,6 +565,7 @@ int main(int argc, char** argv) {
             event.button.x <= std::max(region_start.x, region_end.x) &&
             event.button.y >= std::min(region_start.y, region_end.y) &&
             event.button.y <= std::max(region_start.y, region_end.y)) {
+          // The confirmation is handled by the common region action below.
           region_confirm_requested = true;
           continue;
         }
@@ -621,21 +623,8 @@ int main(int argc, char** argv) {
           event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
         const Uint32 bit = SDL_BUTTON_MASK(event.button.button);
         if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-          const auto event_media = recording.status();
-          const bool media_controls =
-              scroll_active || event_media.state == RecordingState::recording ||
-              event_media.state == RecordingState::paused;
-          constexpr int media_controls_width = 200;
-          constexpr int media_controls_height = 48;
-          const bool in_media_controls =
-              media_controls && config.mouse_mode == MouseMode::absolute &&
-              event.button.x >=
-                  std::max(0, event_width - media_controls_width - 8) &&
-              event.button.x < event_width - 8 && event.button.y >= 8 &&
-              event.button.y < 8 + media_controls_height;
           local_click =
-              in_media_controls ||
-              ((event_state == InputState::preview) &&
+              (event_state == InputState::preview &&
                (popup_open || open_floating_menu ||
                 std::any_of(local_regions.begin(), local_regions.end(),
                             [&](const ImVec4& r) {
@@ -656,6 +645,7 @@ int main(int argc, char** argv) {
         if (local_click) local_ui_input_seen = true;
       }
       if (event.type == SDL_EVENT_QUIT) {
+        session->release_control();
         running = false;
         continue;
       }
@@ -974,7 +964,8 @@ int main(int argc, char** argv) {
           current_frame->generation == snapshot.capture.generation &&
           snapshot.video_fresh && renderer.texture_id() != 0;
       if (region_selecting) {
-        if (ImGui::MenuItem("Confirm region", nullptr, false, region_ready)) {
+        if (region_confirm_requested ||
+            ImGui::MenuItem("Confirm region", nullptr, false, region_ready)) {
           const double left = std::min(region_start.x, region_end.x),
                        top = std::min(region_start.y, region_end.y);
           const double right = std::max(region_start.x, region_end.x),
@@ -1000,6 +991,7 @@ int main(int argc, char** argv) {
             saved_region = FrameCrop{x, y, r - x, b - y};
             media_message = "Region saved.";
             region_selecting = region_ready = false;
+            region_confirm_requested = false;
           } else
             media_message = "Select a larger region.";
         }
@@ -1093,10 +1085,7 @@ int main(int argc, char** argv) {
           ImGui::OpenPopup("Floating menu");
           open_floating_menu = false;
         }
-        if (ImGui::MenuItem("Connections") || open_connections) {
-          ImGui::OpenPopup("Connections");
-          open_connections = false;
-        }
+        if (ImGui::MenuItem("Connections")) open_connections = true;
         if (ImGui::BeginMenu("Media")) {
           media_actions();
           ImGui::EndMenu();
@@ -1147,11 +1136,15 @@ int main(int argc, char** argv) {
             {viewport->Pos.x + 8.F, viewport->Pos.y + ImGui::GetFrameHeight()});
         ImGui::SetNextWindowSize(
             {std::min(900.F, viewport->Size.x - 16.F), 0.F});
-        if (ImGui::BeginPopup("Connections")) {
+        if (open_connections &&
+            ImGui::Begin("Connections", &open_connections,
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                             ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
           record_local_region();
           if (close_connections_when_ready && snapshot.video_fresh &&
               snapshot.control.state == ControlConnectionState::ready) {
-            ImGui::CloseCurrentPopup();
+            open_connections = false;
             close_connections_when_ready = false;
           }
           const bool controls_enabled = !captured;
@@ -1192,38 +1185,47 @@ int main(int argc, char** argv) {
               }
               ImGui::EndCombo();
             }
-            if (ImGui::IsItemHovered())
-              if (ImGui::Button("Connect relay") && retired_sessions.empty() &&
-                  control_port > 0 && control_port <= 65535 && video_port > 0 &&
-                  video_port <= 65535) {
-                close_connections_when_ready = true;
-                retire_session();
-                devices_future = {};
-                modes_future.reset();
-                devices.clear();
-                modes.clear();
-                selected_device = selected_mode = -1;
-                relay::ClientOptions client_options{
-                    remote_host, static_cast<std::uint16_t>(control_port),
-                    static_cast<std::uint16_t>(video_port)};
-                client_options.decoder_backend = config.decoder_backend;
-                auto client = std::make_shared<relay::RelayClient>(
-                    std::move(client_options));
-                remote_client = client;
-                auto capture =
-                    std::make_unique<relay::NetworkCaptureSource>(client);
-                const auto device = capture->enumerate_devices().front();
-                const auto mode =
-                    capture->enumerate_modes(device.stable_id).front();
-                session = std::make_unique<KvmSession>(
-                    std::move(capture),
-                    std::make_unique<relay::NetworkControlSink>(client));
-                session->set_host_key(config.host_scancode);
-                (void)session->set_mouse_mode(config.mouse_mode);
-                (void)session->select_capture(device, mode);
-                current_frame.reset();
-                renderer.destroy();
+            if (ImGui::Button("Connect relay") && retired_sessions.empty() &&
+                control_port > 0 && control_port <= 65535 && video_port > 0 &&
+                video_port <= 65535) {
+              relay::ClientOptions client_options{
+                  remote_host, static_cast<std::uint16_t>(control_port),
+                  static_cast<std::uint16_t>(video_port)};
+              client_options.decoder_backend = config.decoder_backend;
+              auto client = std::make_shared<relay::RelayClient>(
+                  std::move(client_options));
+              auto capture =
+                  std::make_unique<relay::NetworkCaptureSource>(client);
+              const auto remote_devices = capture->enumerate_devices();
+              if (remote_devices.empty()) {
+                media_message = "Relay returned no capture devices.";
+              } else {
+                const auto remote_device = remote_devices.front();
+                const auto remote_modes =
+                    capture->enumerate_modes(remote_device.stable_id);
+                if (remote_modes.empty()) {
+                  media_message = "Relay returned no capture modes.";
+                } else {
+                  const auto remote_mode = remote_modes.front();
+                  close_connections_when_ready = true;
+                  retire_session();
+                  devices_future = {};
+                  modes_future.reset();
+                  devices.clear();
+                  modes.clear();
+                  selected_device = selected_mode = -1;
+                  remote_client = client;
+                  session = std::make_unique<KvmSession>(
+                      std::move(capture),
+                      std::make_unique<relay::NetworkControlSink>(client));
+                  session->set_host_key(config.host_scancode);
+                  (void)session->set_mouse_mode(config.mouse_mode);
+                  (void)session->select_capture(remote_device, remote_mode);
+                  current_frame.reset();
+                  renderer.destroy();
+                }
               }
+            }
             ImGui::SameLine();
             if (ImGui::Button("Disconnect relay")) {
               session->release_control();
@@ -1381,7 +1383,7 @@ int main(int argc, char** argv) {
 #endif
           session->set_host_key(config.host_scancode);
           ImGui::EndDisabled();
-          ImGui::EndPopup();
+          ImGui::End();
         }
         ImGui::EndMenuBar();
       }
@@ -1394,7 +1396,8 @@ int main(int argc, char** argv) {
                  overlay_flags | ImGuiWindowFlags_NoInputs |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
-    // Chrome overlays never change the video fit or the remote input mapping.
+    // Chrome overlays never change the video fit or the remote input
+    // mapping.
     const ImVec2 video_size = viewport->Size;
     const ImVec2 start = viewport->Pos;
     ImGui::GetWindowDrawList()->AddRectFilled(
@@ -1457,8 +1460,8 @@ int main(int argc, char** argv) {
                     *control_bytes_per_second / 1024.0);
     else
       std::snprintf(rates, sizeof(rates), "V:-- C:--");
-    // Layout may have cleared event-time diagnostics after the earlier session
-    // snapshot.
+    // Layout may have cleared event-time diagnostics after the earlier
+    // session snapshot.
     const auto pointer_snapshot = session->snapshot().pointer;
     char pointer[96];
     if (pointer_snapshot.video_local)
@@ -1504,6 +1507,10 @@ int main(int argc, char** argv) {
                        (remote_input ? ImGuiWindowFlags_NoInputs : 0));
       ImGui::PopStyleVar();
       if (!remote_input) record_local_region();
+      if (!media_message.empty()) {
+        ImGui::TextWrapped("%s", media_message.c_str());
+        ImGui::Separator();
+      }
       const auto origin = ImGui::GetCursorScreenPos();
       const float line_height = ImGui::GetTextLineHeight();
       const bool connected =
@@ -1633,7 +1640,8 @@ int main(int argc, char** argv) {
         draw->AddImage(static_cast<ImTextureID>(brand_texture),
                        {pos.x + 3.F, pos.y + 3.F}, {end.x - 3.F, end.y - 3.F});
       } else {
-        // Keep the menu discoverable if an installation is missing its icon.
+        // Keep the menu discoverable if an installation is missing its
+        // icon.
         for (float y : {10.F, 16.F, 22.F})
           draw->AddLine({pos.x + 8.F, pos.y + y}, {pos.x + 24.F, pos.y + y},
                         ImGui::GetColorU32(ImGuiCol_Text), 2.F);
@@ -1650,6 +1658,15 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     const auto before = std::chrono::steady_clock::now();
     SDL_GL_SwapWindow(window);
+    if (!config.vsync) {
+      constexpr auto frame_budget = std::chrono::milliseconds(1000 / 120);
+      const auto elapsed = std::chrono::steady_clock::now() - frame_started;
+      if (elapsed < frame_budget)
+        SDL_Delay(static_cast<Uint32>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(frame_budget -
+                                                                  elapsed)
+                .count()));
+    }
     diagnostics.record_present_blocking(std::chrono::steady_clock::now() -
                                         before);
   }

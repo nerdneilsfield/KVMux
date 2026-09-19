@@ -584,7 +584,9 @@ bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
   ensure_worker();
   {
     std::lock_guard lock(mutex_);
-    if (status_.state != RecordingState::idle) return false;
+    if (status_.state != RecordingState::idle &&
+        status_.state != RecordingState::failed)
+      return false;
     status_.error.clear();
     status_.state = RecordingState::starting;
     start_ = std::pair{input, crop};
@@ -609,6 +611,11 @@ bool Recording::resume() {
 bool Recording::stop() {
   {
     std::lock_guard lock(mutex_);
+    if (status_.state == RecordingState::failed) {
+      status_.state = RecordingState::idle;
+      status_.error.clear();
+      return true;
+    }
     if (status_.state != RecordingState::recording &&
         status_.state != RecordingState::paused)
       return status_.state == RecordingState::idle;
