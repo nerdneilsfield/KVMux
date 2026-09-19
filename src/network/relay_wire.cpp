@@ -441,7 +441,7 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,
           w.bytes.insert(w.bytes.end(), b.payload.begin(), b.payload.end());
         } else if constexpr (std::is_same_v<T, PasteExecute>) {
           type = 10;
-          w.ok &= b.transaction_id;
+          w.ok &= b.transaction_id != 0;
           w.integer(b.transaction_id, 8);
         } else if constexpr (std::is_same_v<T, PasteCancel>) {
           type = 11;
@@ -452,7 +452,7 @@ std::optional<std::vector<std::uint8_t>> encode_control(const Control& c,
           w.zeros(7);
         } else if constexpr (std::is_same_v<T, PasteKeepalive>) {
           type = 13;
-          w.ok &= b.transaction_id;
+          w.ok &= b.transaction_id != 0;
           w.integer(b.transaction_id, 8);
         } else if constexpr (std::is_same_v<T, PasteStatus>) {
           type = 12;
@@ -614,7 +614,7 @@ std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,
     }
     case 10: {
       PasteExecute b{r.integer(8)};
-      r.ok &= b.transaction_id;
+      r.ok &= b.transaction_id != 0;
       c = b;
       break;
     }
@@ -631,7 +631,7 @@ std::optional<Control> decode_control(std::span<const std::uint8_t> bytes,
     }
     case 13: {
       PasteKeepalive b{r.integer(8)};
-      r.ok &= b.transaction_id;
+      r.ok &= b.transaction_id != 0;
       c = b;
       break;
     }

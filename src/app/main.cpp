@@ -520,6 +520,37 @@ int main(int argc, char** argv) {
   bool paste_was_active = false, paste_cancelled = false;
   bool local_ui_input_seen = false;
   std::string last_status;
+  const auto confirm_region = [&] {
+    const double left = std::min(region_start.x, region_end.x);
+    const double top = std::min(region_start.y, region_end.y);
+    const double right = std::max(region_start.x, region_end.x);
+    const double bottom = std::max(region_start.y, region_end.y);
+    const unsigned w = renderer.width(), h = renderer.height();
+    const unsigned x = static_cast<unsigned>(
+        std::clamp(std::floor((left - displayed_video_rect.x) * w /
+                              displayed_video_rect.width),
+                   0.0, static_cast<double>(w)));
+    const unsigned y = static_cast<unsigned>(
+        std::clamp(std::floor((top - displayed_video_rect.y) * h /
+                              displayed_video_rect.height),
+                   0.0, static_cast<double>(h)));
+    const unsigned r = static_cast<unsigned>(
+        std::clamp(std::ceil((right - displayed_video_rect.x) * w /
+                             displayed_video_rect.width),
+                   0.0, static_cast<double>(w)));
+    const unsigned b = static_cast<unsigned>(
+        std::clamp(std::ceil((bottom - displayed_video_rect.y) * h /
+                             displayed_video_rect.height),
+                   0.0, static_cast<double>(h)));
+    if (r > x && b > y) {
+      saved_region = FrameCrop{x, y, r - x, b - y};
+      media_message = "Region saved.";
+      region_selecting = region_ready = false;
+    } else {
+      media_message = "Select a larger region.";
+    }
+    region_confirm_requested = false;
+  };
 
   while (running) {
     const auto frame_started = std::chrono::steady_clock::now();
@@ -555,6 +586,7 @@ int main(int argc, char** argv) {
             (event.type == SDL_EVENT_KEY_DOWN &&
              event.key.scancode == SDL_SCANCODE_ESCAPE)) {
           region_selecting = region_dragging = region_ready = false;
+          region_confirm_requested = false;
           if (event.type == SDL_EVENT_KEY_DOWN) continue;
         }
         if (preview && region_ready &&
@@ -565,8 +597,7 @@ int main(int argc, char** argv) {
             event.button.x <= std::max(region_start.x, region_end.x) &&
             event.button.y >= std::min(region_start.y, region_end.y) &&
             event.button.y <= std::max(region_start.y, region_end.y)) {
-          // The confirmation is handled by the common region action below.
-          region_confirm_requested = true;
+          confirm_region();
           continue;
         }
         if (preview && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
