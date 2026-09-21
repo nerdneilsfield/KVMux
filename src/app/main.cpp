@@ -460,6 +460,7 @@ int main(int argc, char** argv) {
   (void)session->set_mouse_mode(config.mouse_mode);
   session->set_host_key(config.host_scancode);
   session->set_relative_gain(config.sensitivity);
+  session->set_keep_alive(config.keep_alive);
   bool remote = false;
   std::shared_ptr<relay::RelayClient> remote_client;
   std::optional<relay::TrafficSnapshot> traffic_baseline;
@@ -1150,6 +1151,8 @@ int main(int argc, char** argv) {
           ImGui::Separator();
           if (ImGui::MenuItem("Type ASCII")) open_text_paste = true;
           ImGui::MenuItem("Status overlay", nullptr, &show_status);
+          if (ImGui::MenuItem("Keep target awake", nullptr, &config.keep_alive))
+            session->set_keep_alive(config.keep_alive);
           if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
             fullscreen = !fullscreen;
             SDL_SetWindowFullscreen(window, fullscreen);
@@ -1221,6 +1224,7 @@ int main(int argc, char** argv) {
             renderer.destroy();
             (void)session->set_mouse_mode(config.mouse_mode);
             session->set_host_key(config.host_scancode);
+            session->set_keep_alive(config.keep_alive);
           }
           if (remote) {
             ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
@@ -1272,6 +1276,7 @@ int main(int argc, char** argv) {
                       std::make_unique<relay::NetworkControlSink>(client));
                   session->set_host_key(config.host_scancode);
                   (void)session->set_mouse_mode(config.mouse_mode);
+                  session->set_keep_alive(config.keep_alive);
                   (void)session->select_capture(remote_device, remote_mode);
                   current_frame.reset();
                   renderer.destroy();

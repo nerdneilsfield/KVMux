@@ -8,6 +8,7 @@ namespace kvmux {
 namespace {
 constexpr auto kCapturePoll = std::chrono::milliseconds(25);
 constexpr auto kStaleAfter = std::chrono::milliseconds(500);
+constexpr auto kKeepAliveInterval = std::chrono::seconds(60);
 constexpr std::array kReconnectBackoff{
     std::chrono::milliseconds(500), std::chrono::milliseconds(1000),
     std::chrono::milliseconds(2000), std::chrono::milliseconds(5000)};
@@ -128,6 +129,21 @@ void KvmSession::set_host_key(std::uint16_t usage) noexcept {
 }
 void KvmSession::set_relative_gain(double gain) noexcept {
   input_.set_relative_gain(gain);
+}
+
+void KvmSession::set_keep_alive(bool enabled) noexcept {
+  keep_alive_enabled_ = enabled;
+  last_control_activity_ = Clock::now();
+}
+
+void KvmSession::note_keep_alive(Clock::time_point now) noexcept {
+  if (input_.capture_intended() || input_.injected_active()) {
+    last_control_activity_ = now;
+  } else if (keep_alive_enabled_ && input_.state() == InputState::preview &&
+             now - last_control_activity_ >= kKeepAliveInterval) {
+    last_control_activity_ = now;
+    (void)input_.send_keep_alive();
+  }
 }
 bool KvmSession::send_special(SpecialKeys keys) {
   return video_fresh_ && input_.send_special(keys);
@@ -264,6 +280,7 @@ void KvmSession::tick(Clock::time_point now) {
   control_->set_control_active(input_.capture_intended() ||
                                input_.injected_active());
   input_.clear_fault();
+  note_keep_alive(now);
   input_.tick(now);
   control_->set_control_active(input_.capture_intended() ||
                                input_.injected_active());

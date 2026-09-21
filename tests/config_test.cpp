@@ -38,6 +38,14 @@ int main() {
     require(load_config(directory / "missing.json").decoder_backend ==
                 CodecBackend::automatic,
             "missing config defaults to automatic decoding");
+    require(!config.keep_alive, "keep-alive defaults to disabled");
+    config.keep_alive = true;
+    save_config(path, config);
+    require(load_config(path).keep_alive &&
+                load_config(path).serial_port == "test-port",
+            "keep-alive round trip preserves config");
+    config.keep_alive = false;
+    save_config(path, config);
     for (const auto backend :
          {CodecBackend::automatic, CodecBackend::videotoolbox,
           CodecBackend::ffmpeg_software}) {
@@ -54,13 +62,14 @@ int main() {
       input >> root;
     }
     root["control"].erase("target_aspect");
+    root["control"].erase("keep_alive");
     {
       std::ofstream output(path);
       output << root;
     }
     auto loaded = load_config(path);
     require(loaded.target_aspect == TargetAspect::full_frame &&
-                loaded.serial_port == "test-port",
+                !loaded.keep_alive && loaded.serial_port == "test-port",
             "existing schema without optional field retains settings and "
             "defaults to full frame");
     for (const auto& invalid : {nlohmann::json("21:9"), nlohmann::json(42)}) {

@@ -204,6 +204,7 @@ Config parse_config(const json& root) {
   result.host_scancode = control.at("host_scancode").get<std::uint16_t>();
   result.sensitivity = control.at("sensitivity").get<double>();
   result.vsync = control.at("vsync").get<bool>();
+  result.keep_alive = control.value("keep_alive", false);
   result.color_override =
       parse_color_override(control.at("color_override").get<std::string>());
 
@@ -262,6 +263,7 @@ json serialize_config(const Config& config) {
            {"host_scancode", config.host_scancode},
            {"sensitivity", config.sensitivity},
            {"vsync", config.vsync},
+           {"keep_alive", config.keep_alive},
            {"color_override", color_override_name(config.color_override)},
        }},
       {"window",

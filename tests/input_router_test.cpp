@@ -534,6 +534,33 @@ int main() {
   }
 
   {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
+    sink.snapshot_value.release_confirmed = false;
+    require(!router.send_keep_alive() && sink.events.empty(),
+            "keep-alive waits for a released, ready sink");
+    sink.snapshot_value.release_confirmed = true;
+    require(router.send_keep_alive(),
+            "idle preview sends one alternating wiggle");
+    require(sink.events.size() == 1 &&
+                std::get<RelativeMotion>(sink.events[0].payload).dx == 1 &&
+                std::get<RelativeMotion>(sink.events[0].payload).dy == 0,
+            "first keep-alive wiggle moves one count right");
+    sink.events.clear();
+    require(router.send_keep_alive(),
+            "wiggle direction alternates on the next attempt");
+    require(sink.events.size() == 1 &&
+                std::get<RelativeMotion>(sink.events[0].payload).dx == -1,
+            "second keep-alive wiggle moves one count left");
+    sink.events.clear();
+    router.set_video_rect({0, 0, 200, 200});
+    capture(router, sink);
+    require(!router.send_keep_alive() && sink.events.empty(),
+            "captured control needs no keep-alive wiggle");
+  }
+
+  {
     const std::string text(65536, 'a');
     const auto mapped = map_us_ascii_text(text);
     require(mapped && mapped.gestures.size() == text.size(),

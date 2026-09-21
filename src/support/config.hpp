@@ -37,6 +37,9 @@ struct Config {
 #endif
   double sensitivity{1.0};
   bool vsync{};
+  // Wiggle the target pointer while the session idles so an unattended
+  // target does not sleep.
+  bool keep_alive{};
   ColorOverride color_override{ColorOverride::automatic};
   CodecBackend decoder_backend{CodecBackend::automatic};
   WindowConfig window;

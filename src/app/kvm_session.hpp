@@ -73,6 +73,9 @@ class KvmSession {
   [[nodiscard]] bool set_mouse_mode(MouseMode mode);
   void set_host_key(std::uint16_t usage) noexcept;
   void set_relative_gain(double gain) noexcept;
+  // While enabled, an idle preview session wiggles the target pointer every
+  // kKeepAliveInterval so an unattended target does not sleep.
+  void set_keep_alive(bool enabled) noexcept;
   [[nodiscard]] bool send_special(SpecialKeys keys);
   [[nodiscard]] TextMappingResult start_text_paste(std::string_view text);
   void cancel_text_paste() noexcept;
@@ -104,6 +107,7 @@ class KvmSession {
   void capture_loop();
   void request_release() noexcept;
   void note_session_error(std::string error);
+  void note_keep_alive(Clock::time_point now) noexcept;
   [[nodiscard]] bool preview_only() const noexcept;
 
   std::unique_ptr<CaptureSource> capture_;
@@ -131,6 +135,9 @@ class KvmSession {
   bool received_current_generation_{};
   Clock::time_point last_sample_arrival_{};
   bool video_fresh_{};
+
+  bool keep_alive_enabled_{};
+  Clock::time_point last_control_activity_{};
 };
 
 }  // namespace kvmux

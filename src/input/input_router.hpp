@@ -156,6 +156,10 @@ class InputRouter {
   [[nodiscard]] bool send_special(SpecialKeys keys,
                                   Clock::time_point now = Clock::now());
 
+  // One relative one-count report that resets target idle timers. Direction
+  // alternates so repeated wiggles never drift the target cursor.
+  [[nodiscard]] bool send_keep_alive();
+
  private:
   struct SpecialStep {
     Clock::time_point due;
@@ -203,6 +207,7 @@ class InputRouter {
   bool activation_released_{};
   bool video_fresh_{};
   bool release_requested_{};
+  bool keep_alive_positive_{};
   std::uint64_t sequence_{};
   std::unordered_set<std::uint16_t> physical_keys_;
   std::unordered_set<std::uint16_t> isolated_keys_;

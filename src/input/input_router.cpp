@@ -596,6 +596,16 @@ bool InputRouter::send_special(const SpecialKeys keys,
   schedule_special(keys, now);
   return !special_steps_.empty();
 }
+
+bool InputRouter::send_keep_alive() {
+  if (state_ != InputState::preview || injected_active() ||
+      !sink_ready_released())
+    return false;
+  keep_alive_positive_ = !keep_alive_positive_;
+  return submit(RelativeMotion{keep_alive_positive_ ? 1.0 : -1.0, 0.0})
+      .has_value();
+}
+
 TextMappingResult InputRouter::start_text(const std::string_view text,
                                           const Clock::time_point now) {
   std::vector<std::uint8_t> normalized;
