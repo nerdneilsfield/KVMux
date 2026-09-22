@@ -142,7 +142,7 @@ void KvmSession::note_keep_alive(Clock::time_point now) noexcept {
   } else if (keep_alive_enabled_ && input_.state() == InputState::preview &&
              now - last_control_activity_ >= kKeepAliveInterval) {
     last_control_activity_ = now;
-    (void)input_.send_keep_alive();
+    (void)input_.send_keep_alive(now);
   }
 }
 bool KvmSession::send_special(SpecialKeys keys) {

@@ -561,6 +561,68 @@ int main() {
   }
 
   {
+    // A relay admits ordinary reports only behind a confirmed empty-state
+    // barrier with an active control lease, so the keep-alive wiggle must
+    // borrow the special-key lease and synchronization.
+    FakeSink sink;
+    sink.snapshot_value.recoverable_transport = true;
+    InputRouter router(sink);
+    router.set_video_rect({0, 0, 200, 200});
+    router.set_video_fresh(true);
+    const auto start = InputRouter::Clock::now();
+    require(!router.send_keep_alive(start) && sink.syncs.empty(),
+            "relay keep-alive skips a session with no known pointer");
+    router.handle({InputButton{InputMouseButton::left, true, 100, 100}});
+    router.handle({InputButton{InputMouseButton::left, false, 100, 100}});
+    router.tick(start + std::chrono::milliseconds(1));
+    require(router.state() == InputState::recovering && sink.syncs.size() == 1,
+            "relay capture arms through synchronization");
+    const auto& arm_sync = sink.syncs.back();
+    sink.snapshot_value.applied = {true, arm_sync.epoch,
+                                   arm_sync.intent_generation,
+                                   arm_sync.revision, arm_sync.state};
+    router.tick(start + std::chrono::milliseconds(2));
+    require(router.captured(), "acked relay synchronization captures");
+    router.handle({InputPointerMotion{100, 100}});
+    router.release();
+    sink.snapshot_value.release_confirmed = true;
+    router.tick(start + std::chrono::milliseconds(3));
+    require(router.state() == InputState::preview,
+            "released relay session returns to preview");
+    sink.events.clear();
+    require(router.send_keep_alive(start + std::chrono::milliseconds(4)),
+            "relay keep-alive takes the control lease");
+    require(router.injected_active() && sink.syncs.size() == 2 &&
+                sink.events.empty(),
+            "relay keep-alive synchronizes before any edge");
+    const auto& sync = sink.syncs.back();
+    sink.snapshot_value.applied = {true, sync.epoch, sync.intent_generation,
+                                   sync.revision, sync.state};
+    router.tick(start + std::chrono::milliseconds(5));
+    require(sink.events.size() == 1 &&
+                std::get<RelativeMotion>(sink.events[0].payload).dx != 0,
+            "relay wiggle follows the confirmed barrier");
+    const int first_wiggle =
+        static_cast<int>(std::get<RelativeMotion>(sink.events[0].payload).dx);
+    require(!router.injected_active(),
+            "relay keep-alive releases the lease after its wiggle");
+    router.release();
+    sink.snapshot_value.release_confirmed = true;
+    router.tick(start + std::chrono::milliseconds(6));
+    sink.events.clear();
+    require(router.send_keep_alive(start + std::chrono::milliseconds(7)),
+            "a second relay keep-alive schedules");
+    const auto& second = sink.syncs.back();
+    sink.snapshot_value.applied = {true, second.epoch, second.intent_generation,
+                                   second.revision, second.state};
+    router.tick(start + std::chrono::milliseconds(8));
+    require(sink.events.size() == 1 &&
+                std::get<RelativeMotion>(sink.events[0].payload).dx ==
+                    -first_wiggle,
+            "relay wiggle directions alternate");
+  }
+
+  {
     const std::string text(65536, 'a');
     const auto mapped = map_us_ascii_text(text);
     require(mapped && mapped.gestures.size() == text.size(),

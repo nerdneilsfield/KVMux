@@ -116,9 +116,10 @@ class InputRouter {
     return pending_special_.has_value() || !special_steps_.empty();
   }
   // Synthetic input needs the same temporary control lease as special-key
-  // gestures.
+  // gestures; the idle keep-alive wiggle leases control the same way while
+  // its synchronization barrier is in flight.
   [[nodiscard]] bool injected_active() const noexcept {
-    return special_active() || text_active_;
+    return special_active() || text_active_ || pending_keep_alive_;
   }
   [[nodiscard]] bool text_active() const noexcept { return text_active_; }
   [[nodiscard]] TextMappingResult start_text(
@@ -157,8 +158,10 @@ class InputRouter {
                                   Clock::time_point now = Clock::now());
 
   // One relative one-count report that resets target idle timers. Direction
-  // alternates so repeated wiggles never drift the target cursor.
-  [[nodiscard]] bool send_keep_alive();
+  // alternates so repeated wiggles never drift the target cursor. On a
+  // recoverable transport the wiggle borrows the special-key control lease
+  // and follows the confirmed empty-state barrier.
+  [[nodiscard]] bool send_keep_alive(Clock::time_point now = Clock::now());
 
  private:
   struct SpecialStep {
@@ -191,6 +194,7 @@ class InputRouter {
   Clock::time_point sync_at_{};
   std::uint16_t desired_x_{}, desired_y_{};
   std::optional<SpecialKeys> pending_special_;
+  bool pending_keep_alive_{};
   bool temporary_intent_{};
   ControlSink& sink_;
   InputState state_{InputState::preview};

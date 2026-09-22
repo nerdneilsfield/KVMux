@@ -391,6 +391,13 @@ void InputRouter::synchronize(Clock::time_point now) {
           auto keys = *pending_special_;
           pending_special_.reset();
           schedule_special(keys, now);
+        } else if (pending_keep_alive_) {
+          // The applied barrier report reaches the target, but only a real
+          // movement is guaranteed to reset idle timers; add the one-count
+          // wiggle now that the barrier and control lease are confirmed.
+          pending_keep_alive_ = false;
+          keep_alive_positive_ = !keep_alive_positive_;
+          (void)submit(RelativeMotion{keep_alive_positive_ ? 1.0 : -1.0, 0.0});
         } else if (!text_active_) {
           state_ = InputState::captured;
         }
@@ -450,6 +457,7 @@ void InputRouter::tick(const Clock::time_point now) {
   }
   if (snapshot.recoverable_transport &&
       (state_ == InputState::recovering || pending_special_ ||
+       pending_keep_alive_ ||
        (text_active_ && barrier_epoch_ != snapshot.epoch))) {
     synchronize(now);
   }
@@ -511,7 +519,7 @@ void InputRouter::tick(const Clock::time_point now) {
     }
   }
   if (temporary_intent_ && !pending_special_ && special_steps_.empty() &&
-      !text_active_) {
+      !text_active_ && !pending_keep_alive_) {
     // Keep the final up edges inside the active lease until the next UI turn.
     temporary_intent_ = false;
   }
@@ -525,6 +533,7 @@ void InputRouter::begin_release() noexcept {
   pointer_ = {};
   special_steps_.clear();
   pending_special_.reset();
+  pending_keep_alive_ = false;
   text_active_ = false;
   direct_ascii_paste_ = false;
   remote_ascii_paste_ = false;
@@ -597,10 +606,26 @@ bool InputRouter::send_special(const SpecialKeys keys,
   return !special_steps_.empty();
 }
 
-bool InputRouter::send_keep_alive() {
+bool InputRouter::send_keep_alive(const Clock::time_point now) {
   if (state_ != InputState::preview || injected_active() ||
       !sink_ready_released())
     return false;
+  if (sink_.snapshot().recoverable_transport) {
+    // The relay admits ordinary reports only behind a confirmed empty-state
+    // barrier while control is active. Borrow the special-key lease and
+    // synchronize first; the wiggle follows the confirmed barrier. A never
+    // captured session has no known pointer position to protect, so it
+    // skips instead of syncing the cursor to the (0,0) default.
+    if (desired_x_ == 0 && desired_y_ == 0) return false;
+    ++intent_;
+    revision_ = 0;
+    temporary_intent_ = true;
+    pending_keep_alive_ = true;
+    held_.clear();
+    buttons_ = 0;
+    synchronize(now);
+    return true;
+  }
   keep_alive_positive_ = !keep_alive_positive_;
   return submit(RelativeMotion{keep_alive_positive_ ? 1.0 : -1.0, 0.0})
       .has_value();
