@@ -239,7 +239,7 @@ const char* text_paste_error(TextPasteError error) {
     case TextPasteError::unsupported:
       return "Unsupported characters found.";
     case TextPasteError::too_long:
-      return "Text is limited to 1024 characters.";
+      return "Text is limited to 65536 characters.";
   }
   return "Could not prepare text.";
 }
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
   bool close_connections_when_ready = false;
   bool popup_open = false;
   bool open_text_paste = false;
-  std::array<char, 4097> text_paste_buffer{};
+  std::array<char, 65537> text_paste_buffer{};
   std::size_t text_paste_removed = 0;
   TextPasteError paste_error = TextPasteError::none;
   std::size_t clipboard_loaded_bytes = 0, clipboard_loaded_characters = 0;
@@ -989,11 +989,19 @@ int main(int argc, char** argv) {
                 "Clipboard text loaded: bytes={} characters={} mapping={}",
                 clipboard_loaded_bytes, clipboard_loaded_characters,
                 debug_text_paste_error(prepared.error));
-          std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(),
-                        "%s", clipboard);
+          // The mapper owns the 65536-character contract. A longer clipboard
+          // must be rejected, never silently truncated at the buffer size.
+          if (clipboard_loaded_bytes < text_paste_buffer.size()) {
+            std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(),
+                          "%s", clipboard);
+            text_paste_removed = 0;
+            paste_error = prepared.error;
+          } else {
+            clipboard_loaded_bytes = 0;
+            clipboard_loaded_characters = 0;
+            paste_error = TextPasteError::too_long;
+          }
           SDL_free(clipboard);
-          text_paste_removed = 0;
-          paste_error = prepared.error;
         }
       }
       if (clipboard_loaded_bytes) {
