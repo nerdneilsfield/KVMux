@@ -10,10 +10,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Prefer distribution binutils over a foreign/user-installed linker. The
     # system linker knows the host's multiarch library layout; Linuxbrew's
     # linker may otherwise be selected by the compiler driver through PATH.
-    find_program(KVMUX_SYSTEM_LINKER NAMES ld.bfd
-        PATHS /usr/bin /bin NO_DEFAULT_PATH)
-    if(KVMUX_SYSTEM_LINKER)
-        add_link_options("-fuse-ld=${KVMUX_SYSTEM_LINKER}")
+    if(EXISTS "/usr/bin/ld.bfd")
+        add_link_options("-B/usr/bin" "-fuse-ld=bfd")
     endif()
 endif()
 
