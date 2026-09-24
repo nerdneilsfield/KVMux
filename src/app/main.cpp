@@ -1054,9 +1054,19 @@ int main(int argc, char** argv) {
         }
         ImGui::Separator();
       }
+      ImGui::BeginDisabled(!valid_visible_cpu_frame);
+      if (ImGui::MenuItem("Save full screenshot")) {
+        if (recording.snapshot(*current_frame)) {
+          snapshot_queued = true;
+          media_message = "Screenshot queued.";
+          ImGui::CloseCurrentPopup();
+        } else
+          media_message = "Could not queue screenshot.";
+      }
+      ImGui::EndDisabled();
       ImGui::BeginDisabled(!valid_visible_cpu_frame || !saved_region);
-      if (ImGui::MenuItem("Save screenshot")) {
-        if (recording.snapshot(*current_frame, *saved_region)) {
+      if (ImGui::MenuItem("Save region screenshot")) {
+        if (recording.snapshot(*current_frame, saved_region)) {
           snapshot_queued = true;
           media_message = "Screenshot queued.";
           ImGui::CloseCurrentPopup();

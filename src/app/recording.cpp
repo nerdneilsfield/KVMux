@@ -153,38 +153,29 @@ bool Recording::snapshot_now(const VideoFrame& input,
     image->height = context->height;
     result = av_frame_get_buffer(image, 32);
   }
+  AVFrame* source = av_frame_clone(input.frame.get());
+  if (result >= 0 && !source) result = AVERROR(ENOMEM);
+  if (result >= 0) {
+    source->crop_left = crop.x;
+    source->crop_top = crop.y;
+    source->crop_right = source_width - crop.x - crop.width;
+    source->crop_bottom = source_height - crop.y - crop.height;
+    result = av_frame_apply_cropping(source, AV_FRAME_CROP_UNALIGNED);
+  }
+  if (result >= 0 && (source->width != static_cast<int>(crop.width) ||
+                      source->height != static_cast<int>(crop.height)))
+    result = AVERROR(EINVAL);
   SwsContext* convert = nullptr;
   if (result >= 0)
-    convert = sws_getContext(static_cast<int>(crop.width),
-                             static_cast<int>(crop.height),
-                             static_cast<AVPixelFormat>(input.frame->format),
+    convert = sws_getContext(source->width, source->height,
+                             static_cast<AVPixelFormat>(source->format),
                              image->width, image->height, context->pix_fmt,
                              SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (result >= 0 && !convert) result = AVERROR(ENOMEM);
-  std::array<const std::uint8_t*, 4> source_data{};
   if (result >= 0) {
-    const auto format = static_cast<AVPixelFormat>(input.frame->format);
-    const auto* descriptor = av_pix_fmt_desc_get(format);
-    for (int plane = 0; plane < 4 && input.frame->data[plane]; ++plane) {
-      const int shift_x = plane == 0 ? 0 : descriptor->log2_chroma_w;
-      const int shift_y = plane == 0 ? 0 : descriptor->log2_chroma_h;
-      const int step =
-          descriptor
-              ->comp[plane == 0
-                         ? 0
-                         : std::min(plane, descriptor->nb_components - 1)]
-              .step;
-      source_data[plane] =
-          input.frame->data[plane] +
-          (crop.y >> shift_y) *
-              static_cast<unsigned>(input.frame->linesize[plane]) +
-          (crop.x >> shift_x) * static_cast<unsigned>(step);
-    }
-    result = sws_scale(convert, source_data.data(), input.frame->linesize, 0,
-                       static_cast<int>(crop.height), image->data,
-                       image->linesize) < 0
-                 ? AVERROR(EINVAL)
-                 : 0;
+    const int rows = sws_scale(convert, source->data, source->linesize, 0,
+                               source->height, image->data, image->linesize);
+    result = rows == image->height ? 0 : AVERROR(EINVAL);
   }
   if (result >= 0) result = avcodec_send_frame(context, image);
   if (result >= 0) result = avcodec_receive_packet(context, packet);
@@ -208,6 +199,7 @@ bool Recording::snapshot_now(const VideoFrame& input,
     std::filesystem::remove(temporary, remove_error);
   }
   sws_freeContext(convert);
+  av_frame_free(&source);
   av_packet_free(&packet);
   av_frame_free(&image);
   avcodec_free_context(&context);
