@@ -504,7 +504,12 @@ MediaAdmission MediaPacer::submit(MediaFrame f, MediaTime now) {
        (s.last_sequence && f.sequence != s.last_sequence + 1)) &&
       !f.idr)
     return reject(MediaReason::skipped_access_unit);
-  const auto deadline = std::min(now + 100ms, f.first_arrival + 250ms);
+  // MJPEG frames are independent and may contain thousands of UDP fragments
+  // at 4K/8K. Give the bounded sender the full source-age budget instead of
+  // imposing the short access-unit deadline used by ordered H.26x output.
+  const auto deadline = s.codec == VideoCodec::mjpeg
+                            ? f.first_arrival + 250ms
+                            : std::min(now + 100ms, f.first_arrival + 250ms);
   const auto budget =
       s.credit(now) + static_cast<double>(s.rate) *
                           std::chrono::duration<double>(deadline - now).count();

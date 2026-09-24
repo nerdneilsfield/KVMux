@@ -342,6 +342,11 @@ void pacing() {
                  .accepted);
       assert(paused.next_datagram(epoch));
       auto expiry = paused.poll(epoch + blackout);
+      const auto deadline = codec == VideoCodec::mjpeg ? 250ms : 100ms;
+      if (blackout < deadline) {
+        assert(expiry.accepted && paused.next_datagram(epoch + blackout));
+        continue;
+      }
       assert(!expiry.accepted && !paused.next_datagram(epoch + blackout));
       auto next = make_frame(codec, 10, 4000, codec != VideoCodec::mjpeg);
       next.first_arrival = epoch + blackout;

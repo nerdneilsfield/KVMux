@@ -647,9 +647,10 @@ struct RelayServer::Impl {
           }
         }
       }
-      // At most two media datagrams before returning to challenge/control
-      // service.
-      for (unsigned i = 0; i < 2; ++i) {
+      // Send a bounded batch before returning to challenge/control service.
+      // Two packets per loop cannot drain 4K/8K MJPEG, which may contain
+      // thousands of fragments, before its source-age deadline.
+      for (unsigned i = 0; i < 32; ++i) {
         now = Clock::now();
         if (!pending) {
           auto deadline = pacer->active_deadline();
