@@ -179,7 +179,7 @@ Outer session envelope is owned by T3, reserves 32 bytes, and validates session 
 - u8 version=1, u8 codec (existing VideoCodec values), u8 kind (0=data, 1=XOR), u8 flags (bit0 IDR, otherwise zero; MJPEG requires zero).
 - u64 generation (agreed session generation for both codecs).
 - u64 frame_sequence (MJPEG capture sequence, HEVC encoded_sequence).
-- u32 serialized_size (1..16MiB+24 or +58 depending codec; codec decoder supplies actual lower-bound validation).
+- u32 serialized_size (1..50MiB+24 or +58 depending codec; codec decoder supplies actual lower-bound validation).
 - u16 data_fragment_count, u16 index (data index or XOR group index).
 - u16 payload_size, u16 reserved=0.
 - u64 reserved=0.
@@ -196,7 +196,7 @@ This is useful for independent random erasures: an 8-data group succeeds with pr
 
 Single-owner `MediaReceiver(codec,generation)` with `input(span, now)` and `poll(now)`; clock injected in tests. Return owned completed-frame events and typed recovery/feedback events, never call GUI/codec from transport. Process/deliver callbacks synchronously or return one bounded batch; do not hide another output queue.
 
-- Max 8 resident frames, **32 MiB total charged allocation**, including parity, bitmaps and frame buffers. Pre-charge worst-case allocation at admission (checked arithmetic); parity cost is ceil(count/8)*1128. Metadata is bounded too. No allocation for frame-ID-sized sparse arrays.
+- Max 8 resident frames, **64 MiB total charged allocation**, including parity, bitmaps and frame buffers. Pre-charge worst-case allocation at admission (checked arithmetic); parity cost is ceil(count/8)*1128. Metadata is bounded too. No allocation for frame-ID-sized sparse arrays.
 - Age deadline: 150 ms from first accepted packet for a frame; duplicate packets never renew it. Explicit poll expires frames even if socket is idle. Use the same first-arrival time on completed output; decode_mjpeg/hevc currently overwrite arrival, so T3 must restore transport first-arrival after decoding.
 - On capacity pressure evict oldest admitted frame; report capacity-loss. For HEVC loss of required/future AU triggers chain recovery. While waiting for IDR, reject non-IDR frames before large allocation.
 - MJPEG: publish newest complete frame immediately, purge incomplete frames <= published sequence, ignore all later arrivals for those sequences. Capture gaps are normal; no gap wait.
@@ -208,7 +208,7 @@ Single-owner `MediaReceiver(codec,generation)` with `input(span, now)` and `poll
 
 `MediaPacer` is not a socket/thread: configured byte/s rate, monotonic clock, max burst **2400 total UDP bytes**. Token bucket starts with one 1200-byte credit, caps at 2400; idle time cannot accumulate a giant burst. Charge actual 32-byte envelope + media body for data AND parity. `next_deadline(now)` and `next_datagram(now)` return at most one owned body, not all fragments of a frame. T3 sends control first on each event-loop turn, services KCP every 10 ms, then at most two video datagrams before checking control again. Do not place all media packets in kernel/output queues. Nonblocking send EAGAIN retains at most the current datagram until frame deadline; no sleeping send loop.
 
-Keep **one active serialized frame**, one latest-source slot, and at most one pending datagram; no vector of every packet. Active frame lifetime <=100 ms from packetization start AND source age <=250 ms. Expose `can_start(now)` and `offer_latest_source(owned source)`/`take_latest_source(now)` so the caller replaces raw HEVC sources BEFORE encode, and MJPEG sources BEFORE serialization/fragmentation. The primitive can expose this as a small latest-slot helper; it must not own VideoEncoder. Admission computes data+parity wire cost and rejects a frame that cannot fit its remaining 100ms deadline at current configured rate; receiver legal maximum is not a promise that a 16MiB frame is deliverable at every cap.
+Keep **one active serialized frame**, one latest-source slot, and at most one pending datagram; no vector of every packet. Active frame lifetime <=100 ms from packetization start AND source age <=250 ms. Expose `can_start(now)` and `offer_latest_source(owned source)`/`take_latest_source(now)` so the caller replaces raw HEVC sources BEFORE encode, and MJPEG sources BEFORE serialization/fragmentation. The primitive can expose this as a small latest-slot helper; it must not own VideoEncoder. Admission computes data+parity wire cost and rejects a frame that cannot fit its remaining 100ms deadline at current configured rate; receiver legal maximum is not a promise that a 50MiB frame is deliverable at every cap.
 
 HEVC encoded output is a dependency chain, not a latest-value slot. If an already encoded AU is skipped, active frame expires, or submission cannot be admitted: stop forwarding dependents, signal encoder request_keyframe, drain/discard non-IDR outputs until fresh IDR, then resume. Do not renumber dropped encoded AUs to hide gaps. Source replacement before encoding does not break references. For MJPEG drop expired active frame and take latest source at the next slot. Expose dropped-source, sender-deadline, receiver-gap/age/capacity, XOR-recovered, unrecoverable and waiting-IDR counters.
 
@@ -219,8 +219,8 @@ Use configurable fixed transport rate cap in T2, with receiver feedback event ev
 New CTest `udp_media`, target `kvmux_udp_media_test`, using virtual clock and deterministic datagram fixture; use real native UDP pair from T1 for a short packet roundtrip, no RelayClient/Server required.
 
 1. Existing serialized MJPEG/HEVC body roundtrip byte-identically under out-of-order/duplicates; single-erasure recovery for first/middle/final fragment, short final group, parity loss alone, two erasures unrecoverable. Validate codec metadata with actual decode helpers, not arbitrary bytes only.
-2. Boundary sizes: 1 fragment, 1128 boundary, >65535-byte body, maximum 16MiB compressed data with codec overhead; 1200-byte full envelope ceiling; reject malformed count/index/length, unknown fields, wrong generation, conflicts, cross-frame parity.
-3. Flood admissions and high sequence IDs; allocation charge never exceeds 32MiB and resident count never exceeds eight; duplicate arrival cannot extend age. No-traffic poll expires an incomplete frame and a wholly missing HEVC hole.
+2. Boundary sizes: 1 fragment, 1128 boundary, >65535-byte body, maximum 50MiB compressed data with codec overhead; 1200-byte full envelope ceiling; reject malformed count/index/length, unknown fields, wrong generation, conflicts, cross-frame parity.
+3. Flood admissions and high sequence IDs; allocation charge never exceeds 64MiB and resident count never exceeds eight; duplicate arrival cannot extend age. No-traffic poll expires an incomplete frame and a wholly missing HEVC hole.
 4. HEVC deterministic trace IDR1/P2/P3, lose P2, reorder P3: no P3 emitted; <=40ms after gap evidence reset+refresh. Burst removes multiple data/group including IDR; no false repair, periodic <=10Hz refresh, then fresh complete IDR10/P11 resumes strictly ordered. Test reset marker integration seam, generation switch and no replay of retired packets. MJPEG resumes with next complete frame without IDR.
 5. Pacer offered source every 5ms at capped link: max two packets/turn, <=rate*elapsed+2400 bytes, bounded active age and memory, latest unsent source replaces older one before packetization; HEVC skipped AU requests IDR. A control sentinel queued between data packets is handled before next video batch. Source suitable for cap eventually delivers; intentionally oversized IDR returns explicit budget failure.
 6. Seeded independent 1% loss comparison, >=1000 moderately sized frames, verifies parity recovers substantially more whole frames than no parity; no assertion of guaranteed delivery. Fixed burst test verifies recovery contract instead. Virtual 100/300/800/2000ms blackouts retain no stale frame backlog and resume from new MJPEG/IDR after return; no session liveness claim at this layer.
@@ -259,11 +259,11 @@ CMake registration. Public header was supplied before implementation. Bodies use
 existing decode_mjpeg/decode_hevc validation, never TCP packet framing. Stateless
 indexed packetization and single-active-frame pacing allocate no packet vector.
 
-Receiver enforces 8 resident frames and 32 MiB charged resident allocation:
+Receiver enforces 8 resident frames and 64 MiB charged resident allocation:
 serialized body, XOR parity, byte bitmaps and 512 bytes of metadata per frame.
 This is not a process-RSS claim. One codec validation temporary is bounded by
-16 MiB + codec header/padding; returned frame bodies move without copying and
-sum to <=32 MiB per synchronous batch, with <=32 event records. Caller must not
+50 MiB + codec header/padding; returned frame bodies move without copying and
+sum to <=64 MiB per synchronous batch, with <=32 event records. Caller must not
 accumulate batches. Source mailbox/drop-source accounting remains caller-owned.
 
 Final-packet EAGAIN seam: caller saves active_deadline before pulling each body,
@@ -287,7 +287,7 @@ Checks passed on native macOS Debug:
 - ctest --preset macos-debug -R '^(udp_media|udp_kcp|relay_protocol)$' --output-on-failure
   Result: 3/3 passed (udp_media, udp_kcp, relay_protocol).
 - Byte-identical MJPEG/HEVC at one fragment, 1128-byte serialized boundary,
-  >65535 bytes and maximum 16 MiB compressed data plus codec overhead.
+>65535 bytes and maximum 50 MiB compressed data plus codec overhead.
 - Reordering/duplicates, first/middle/final erasure, short-group recovery,
   parity-only loss, unrecoverable two-data erasure, malformed headers/lengths,
   metadata conflicts, cross-frame parity and generation rejection.

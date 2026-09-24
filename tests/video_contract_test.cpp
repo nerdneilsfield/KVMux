@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
   require(!CaptureSample::make_raw(2, 11, now, 3, 3, PixelFormat::yuy2,
                                    bad_plane, raw_bytes),
           "out-of-bounds plane rejected");
-  require(!CaptureSample::make_raw(2, 12, now, 1921, 1, PixelFormat::yuy2,
+  require(!CaptureSample::make_raw(2, 12, now, 7681, 1, PixelFormat::yuy2,
                                    planes, raw_bytes),
           "oversized dimensions rejected");
 

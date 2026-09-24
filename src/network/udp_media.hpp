@@ -13,7 +13,8 @@ namespace kvmux::relay {
 using MediaTime = std::chrono::steady_clock::time_point;
 inline constexpr std::size_t kMediaPayloadBytes = 1128;
 inline constexpr std::size_t kMediaHeaderBytes = 40;
-inline constexpr std::size_t kMediaAllocationLimit = 32U * 1024U * 1024U;
+inline constexpr std::size_t kMediaAllocationLimit =
+    64U * 1024U * 1024U;
 struct MediaFrame {
   VideoCodec codec{VideoCodec::mjpeg};
   std::uint64_t generation{}, sequence{};
@@ -57,10 +58,10 @@ struct MediaEvent {
   MediaStats stats{};
 };
 // Single owner. Each call returns a bounded batch; caller consumes it
-// synchronously. 32 MiB is resident reassembly charge (body, parity, bitmaps,
+// synchronously. 64 MiB is resident reassembly charge (body, parity, bitmaps,
 // 512 bytes/entry), not process RSS. Codec validation temporarily owns at most
-// one extra 16 MiB body + 58 bytes/padding. Returned bodies are moved, total
-// <=32 MiB/call; at most 32 event records. Do not accumulate batches in another
+// one extra 50 MiB body + 58 bytes/padding. Returned bodies are moved, total
+// <=64 MiB/call; at most 32 event records. Do not accumulate batches in another
 // queue. Construct a new receiver for a new negotiated generation. Reset
 // markers fence decoder output; caller restores first_arrival after decode_*
 // validation/copy.
