@@ -13,8 +13,7 @@ namespace kvmux::relay {
 using MediaTime = std::chrono::steady_clock::time_point;
 inline constexpr std::size_t kMediaPayloadBytes = 1128;
 inline constexpr std::size_t kMediaHeaderBytes = 40;
-inline constexpr std::size_t kMediaAllocationLimit =
-    64U * 1024U * 1024U;
+inline constexpr std::size_t kMediaAllocationLimit = 64U * 1024U * 1024U;
 struct MediaFrame {
   VideoCodec codec{VideoCodec::mjpeg};
   std::uint64_t generation{}, sequence{};

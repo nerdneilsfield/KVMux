@@ -3,7 +3,18 @@ cmake_minimum_required(VERSION 3.25)
 if(APPLE)
     project(KVMux VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
 else()
-    project(KVMux VERSION 0.1.0 LANGUAGES C CXX)
+project(KVMux VERSION 0.1.0 LANGUAGES C CXX)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Prefer distribution binutils over a foreign/user-installed linker. The
+    # system linker knows the host's multiarch library layout; Linuxbrew's
+    # linker may otherwise be selected by the compiler driver through PATH.
+    find_program(KVMUX_SYSTEM_LINKER NAMES ld.bfd
+        PATHS /usr/bin /bin NO_DEFAULT_PATH)
+    if(KVMUX_SYSTEM_LINKER)
+        add_link_options("-fuse-ld=${KVMUX_SYSTEM_LINKER}")
+    endif()
 endif()
 
 include(CTest)
@@ -91,6 +102,30 @@ target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avformat FFmpeg:
 
 target_link_libraries(kvmux_core PRIVATE kvmux::kcp)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Ubuntu's FFmpeg/GStreamer shared objects keep their dependencies in the
+    # same multiarch directory.  Some non-system binutils do not search that
+    # directory for DT_NEEDED libraries during final executable linking.
+    set(kvmux_system_library_dirs)
+    foreach(ffmpeg_library IN ITEMS
+            FFmpeg_AVCODEC_LIBRARY FFmpeg_AVFORMAT_LIBRARY
+            FFmpeg_AVUTIL_LIBRARY FFmpeg_SWSCALE_LIBRARY)
+        get_filename_component(ffmpeg_library_dir
+            "${${ffmpeg_library}}" DIRECTORY)
+        if(ffmpeg_library_dir)
+            list(APPEND kvmux_system_library_dirs "${ffmpeg_library_dir}")
+        endif()
+    endforeach()
+    if(KVMUX_GSTREAMER_LIBRARY_DIRS)
+        list(APPEND kvmux_system_library_dirs ${KVMUX_GSTREAMER_LIBRARY_DIRS})
+    endif()
+    list(REMOVE_DUPLICATES kvmux_system_library_dirs)
+    foreach(system_library_dir IN LISTS kvmux_system_library_dirs)
+        target_link_options(kvmux_core PUBLIC
+            "-Wl,-rpath-link,${system_library_dir}")
+    endforeach()
+endif()
+
 if(WIN32)
     target_link_libraries(kvmux_core PRIVATE ws2_32)
 endif()
@@ -118,7 +153,7 @@ if(KVMUX_ENABLE_SANITIZERS)
 endif()
 
 add_executable(kvmux-relay src/app/relay_main.cpp)
-target_link_libraries(kvmux-relay PRIVATE kvmux::core kvmux::capture)
+target_link_libraries(kvmux-relay PRIVATE kvmux::capture)
 
 if(KVMUX_BUILD_GUI)
     add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp src/app/recording.cpp src/app/scroll_stitcher.cpp)
