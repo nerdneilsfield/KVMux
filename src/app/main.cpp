@@ -889,7 +889,9 @@ int main(int argc, char** argv) {
         paste_status = "active";
         paste_was_active = true;
       } else if (paste_was_active) {
-        paste_status = paste_cancelled ? "cancelled" : "scheduled";
+        paste_status = paste_cancelled                       ? "cancelled"
+                       : paste.error != TextPasteError::none ? "failed"
+                                                             : "scheduled";
         paste_was_active = false;
         paste_cancelled = false;
       }

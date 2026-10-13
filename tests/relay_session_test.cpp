@@ -120,8 +120,13 @@ void execute_upload_contract() {
   const auto crc = support::crc32_ieee(text);
   check(f.s.paste_begin({9, 4, crc}, at(0)).items[0].paste_status->state ==
         w::PasteState::uploading);
-  check(f.s.paste_begin({10, 4, crc}, at(1)).items[0].paste_status->reason ==
-        w::PasteStatusReason::conflict);
+  auto conflict = f.s.paste_begin({10, 4, crc}, at(1));
+  check(conflict.items[0].paste_status->transaction_id == 10 &&
+        conflict.items[0].paste_status->state == w::PasteState::finished &&
+        conflict.items[0].paste_status->reason ==
+            w::PasteStatusReason::conflict);
+  check(f.s.paste_status()->transaction_id == 9 &&
+        f.s.paste_status()->state == w::PasteState::uploading);
   check(f.s.paste_chunk({9, 0, {'a', 'b', 'c', 'd'}}, at(3))
             .items[0]
             .paste_status->state == w::PasteState::uploaded);
@@ -139,6 +144,18 @@ void execute_upload_contract() {
   auto bad_chunk = malformed.s.paste_chunk({19, 1, text}, at(1));
   check(bad_chunk.items[0].paste_status->state == w::PasteState::finished &&
         bad_chunk.items[0].paste_status->outcome == w::PasteOutcome::rejected);
+  Fixture corrupt;
+  corrupt.establish();
+  corrupt.s.paste_begin({20, 4, crc ^ 1U}, at(0));
+  corrupt.s.paste_chunk({20, 0, text}, at(1));
+  corrupt.proof(50, 51);
+  auto checksum = corrupt.s.paste_execute({20}, at(52));
+  check(checksum.items[0].paste_status->state == w::PasteState::finished &&
+        checksum.items[0].paste_status->reason ==
+            w::PasteStatusReason::checksum &&
+        checksum.items[0].paste_status->outcome == w::PasteOutcome::rejected);
+  check(!corrupt.s.paste_status() ||
+        corrupt.s.paste_status()->state == w::PasteState::finished);
   // A fresh proof for a recently sent frame remains an authorization lease
   // while the sender starts pacing a newer frame and this upload completes.
   f.proof(50, 51);

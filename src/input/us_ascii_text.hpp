@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,5 +48,10 @@ struct TextMappingResult {
 // becomes LF.
 [[nodiscard]] TextMappingResult map_us_ascii_text(
     std::string_view text, std::vector<std::uint8_t>* normalized = nullptr);
+
+// True when every byte is TAB, LF, or a printable US-ASCII character. A bare
+// CR is rejected. CRLF is not accepted here; callers normalize it first.
+[[nodiscard]] bool accepted_us_ascii_bytes(
+    std::span<const std::uint8_t> text) noexcept;
 
 }  // namespace kvmux

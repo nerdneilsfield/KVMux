@@ -1,5 +1,6 @@
 #include "input/us_ascii_text.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 using namespace kvmux;
@@ -22,5 +23,10 @@ int main() {
   auto filtered = filter_us_ascii_text("A\r\nB\r\x01\xC3\xA9");
   check(filtered.text == "A\nB" && filtered.removed == 4 &&
         filtered.normalized_characters == 3);
+  const std::uint8_t accepted[] = {'a', '\t', '\n'};
+  const std::uint8_t crlf[] = {'a', '\r', '\n'};
+  check(accepted_us_ascii_bytes(accepted));
+  check(!accepted_us_ascii_bytes(crlf));
+  check(!accepted_us_ascii_bytes({}));
   return EXIT_SUCCESS;
 }

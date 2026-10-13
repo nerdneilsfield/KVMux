@@ -451,6 +451,9 @@ void InputRouter::tick(const Clock::time_point now) {
   if (direct_ascii_paste_) {
     direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
     if (!direct_paste_snapshot_.active()) {
+      if (direct_paste_snapshot_.state == AsciiPasteState::failed ||
+          direct_paste_snapshot_.state == AsciiPasteState::canceled)
+        text_result_.error = TextPasteError::unsupported;
       text_active_ = false;
       direct_ascii_paste_ = false;
     }
@@ -529,7 +532,11 @@ void InputRouter::begin_release() noexcept {
   if (direct_ascii_paste_) {
     sink_.cancel_ascii_paste();
     direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    if (direct_paste_snapshot_.state == AsciiPasteState::failed ||
+        direct_paste_snapshot_.state == AsciiPasteState::canceled)
+      text_result_.error = TextPasteError::unsupported;
   }
+  if (text_active_) text_result_.error = TextPasteError::unsupported;
   pointer_ = {};
   special_steps_.clear();
   pending_special_.reset();

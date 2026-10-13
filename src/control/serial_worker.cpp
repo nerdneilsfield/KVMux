@@ -590,20 +590,27 @@ struct Ch9329ControlSink::Impl {
       }
     }
 
-    if (transaction &&
+    if (transaction && transaction->written == 0 &&
         (transaction->purpose == Purpose::sync_keyboard ||
-         transaction->purpose == Purpose::sync_mouse) &&
-        transaction->written == 0) {
+         transaction->purpose == Purpose::sync_mouse ||
+         transaction->ascii_paste)) {
       bool canceled{};
       {
         std::lock_guard lock(mutex);
-        canceled = !input_sync || queue.release_pending() ||
-                   input_sync->epoch != status.epoch || !control_active ||
-                   now - heartbeat > kHeartbeatTimeout;
-        if (canceled) {
-          invalidate_sync();
-          sync_inflight = false;
-          (void)queue.take_release_request();
+        if (transaction->ascii_paste) {
+          canceled = paste.state != AsciiPasteState::active ||
+                     queue.release_pending() || !control_active ||
+                     now - heartbeat > kHeartbeatTimeout;
+          if (canceled) cancel_paste_locked(AsciiPasteState::canceled);
+        } else {
+          canceled = !input_sync || queue.release_pending() ||
+                     input_sync->epoch != status.epoch || !control_active ||
+                     now - heartbeat > kHeartbeatTimeout;
+          if (canceled) {
+            invalidate_sync();
+            sync_inflight = false;
+            (void)queue.take_release_request();
+          }
         }
       }
       if (canceled) {

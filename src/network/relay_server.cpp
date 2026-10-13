@@ -319,8 +319,12 @@ struct RelayServer::Impl {
           case SessionAction::Kind::paste_ready:
             paste_status = action.paste_status;
             if (action.paste_status &&
-                (action.paste_status->state == wire::PasteState::finished)) {
-              sink.cancel_ascii_paste();
+                action.paste_status->state == wire::PasteState::finished) {
+              const auto live = session.paste_status();
+              const bool rejects_other =
+                  live && live->state != wire::PasteState::finished &&
+                  live->transaction_id != action.paste_status->transaction_id;
+              if (!rejects_other) sink.cancel_ascii_paste();
             }
             break;
           case SessionAction::Kind::expired:
@@ -334,6 +338,7 @@ struct RelayServer::Impl {
             history.clear();
             ack.reset();
             status.reset();
+            paste_status.reset();
             control_output.clear();
             control_index = 0;
             {
@@ -464,7 +469,6 @@ struct RelayServer::Impl {
             wire::decode_control(*bytes, wire::Direction::client_to_server);
         if (!message) continue;
         now = Clock::now();
-        if (!kcp) break;
         if (auto value = std::get_if<wire::Cancel>(&*message))
           actions(session.cancel(*value, now));
         else if (auto value = std::get_if<wire::Sync>(&*message)) {
@@ -536,8 +540,10 @@ struct RelayServer::Impl {
       // KCP controls and terminal serial state take precedence over expiry
       // at this instant. Status transmission may remain coalesced, but the
       // snapshot must be applied every loop before the deadline pass.
+      // tick() can expire the session and destroy this channel.
       actions(session.update_ascii_paste(sink.ascii_paste_snapshot(), now));
       actions(session.tick(now));
+      if (!kcp) continue;
       actions(session.update_control_snapshot(sink.snapshot(), now));
       // Serial progress status is coalesced after its state was sampled.
       if (now - status_at >= 50ms) {
@@ -552,6 +558,7 @@ struct RelayServer::Impl {
         status_at = now;
       }
       auto submit = [&](const wire::Control& value) {
+        if (!kcp) return false;
         auto bytes =
             wire::encode_control(value, wire::Direction::server_to_client);
         return bytes && kcp->submit(*bytes) == SubmitResult::accepted;
@@ -589,6 +596,7 @@ struct RelayServer::Impl {
         return control_index == control_output.size();
       };
       if (!drain_control()) continue;
+      if (!kcp) continue;
       kcp->update(milliseconds(now));
       if (kcp->failed()) {
         fatal = true;

@@ -10,9 +10,14 @@ int main() {
                                PasteStatusReason::none};
   snapshot = merge_paste_status(
       snapshot, {7, PasteState::preparing, 1, 100, 0, PasteOutcome::none,
-                 PasteStatusReason::none});
+                 PasteStatusReason::proof});
   assert(snapshot.state == PasteUploadState::preparing &&
-         snapshot.accepted_bytes == 100);
+         snapshot.accepted_bytes == 100 &&
+         snapshot.reason == PasteStatusReason::proof);
+  snapshot = merge_paste_status(
+      snapshot, {7, PasteState::preparing, 1, 100, 0, PasteOutcome::none,
+                 PasteStatusReason::none});
+  assert(snapshot.reason == PasteStatusReason::proof);
 
   snapshot = merge_paste_status(
       snapshot, {7, PasteState::uploaded, 1, 80, 0, PasteOutcome::none,

@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 
+#include "input/us_ascii_text.hpp"
 #include "network/kcp_channel.hpp"
 #include "network/media_codec_wire.hpp"
 #include "network/paste_execute_retry.hpp"
@@ -46,7 +47,11 @@ PasteUploadSnapshot merge_paste_status(
   current.completed_bytes =
       std::max(current.completed_bytes,
                std::min(status.completed_bytes, current.total_bytes));
-  current.reason = status.reason;
+  // Ordinary progress carries reason=none. Keep the last informative reason
+  // until a later status actually names one, or the transaction ends.
+  if (status.reason != wire::PasteStatusReason::none ||
+      status.state == wire::PasteState::finished)
+    current.reason = status.reason;
   switch (status.state) {
     case wire::PasteState::uploading:
       current.state = PasteUploadState::uploading;
@@ -103,7 +108,7 @@ struct RelayClient::Impl {
     PasteUploadSnapshot snapshot;
     std::uint64_t epoch{}, intent{};
     std::uint32_t next_chunk{};
-    bool begin_sent{}, cancel_pending{};
+    bool begin_sent{}, cancel_pending{}, execute_armed{};
     // A full KCP window retries without a new proof, but never spins.
     PasteExecuteRetry execute_retry;
   };
@@ -159,13 +164,19 @@ struct RelayClient::Impl {
       return;
     const auto previous = paste->snapshot;
     paste->snapshot = merge_paste_status(paste->snapshot, value);
-    if (!previous.terminal() && paste->snapshot.terminal())
+    if (!previous.terminal() && paste->snapshot.terminal()) {
       paste->bytes.clear();
+      paste->execute_armed = false;
+    }
     if (paste->snapshot.state == PasteUploadState::executing)
       paste->bytes.clear();
   }
   void abandon_paste(PasteUploadState state, wire::PasteStatusReason reason) {
     if (!paste) return;
+    if (paste->snapshot.terminal()) {
+      paste->execute_armed = false;
+      return;
+    }
     paste->snapshot.state = state;
     paste->snapshot.reason = reason;
     paste->snapshot.accepted_bytes = 0;
@@ -177,6 +188,7 @@ struct RelayClient::Impl {
     std::lock_guard lock(mutex);
     stopped = true;
     suspend();
+    abandon_paste(PasteUploadState::expired, wire::PasteStatusReason::session);
     active = false;
     control.state = ControlConnectionState::disconnected;
     control.target_usb_ready = control.release_confirmed = false;
@@ -483,7 +495,10 @@ struct RelayClient::Impl {
           const auto paste_action = paste_lifecycle_action(
               !paste->snapshot.terminal() || paste->cancel_pending,
               paste->epoch, paste->intent, control.epoch, intent, active,
-              ready(now));
+              ready(now),
+              paste->execute_armed ||
+                  paste->snapshot.state == PasteUploadState::executing ||
+                  paste->snapshot.state == PasteUploadState::preparing);
           if (paste_action == PasteLifecycleAction::abandon_owner) {
             abandon_paste(PasteUploadState::canceled,
                           wire::PasteStatusReason::canceled);
@@ -668,12 +683,13 @@ struct RelayClient::Impl {
             if (submit(wire::PasteCancel{job.snapshot.transaction_id,
                                          wire::PasteCancelReason::user}))
               job.cancel_pending = false;
-          } else if (job.snapshot.state == PasteUploadState::executing) {
-            // A completed transaction keeps its own control lease. Video may
-            // recover independently. Status is optional progress feedback, not
-            // a transport ACK. Send one coalesced renewal per interval, with
-            // KCP's bounded window as the backpressure limit, so dropped server
-            // statuses cannot end the lease.
+          } else if (!job.snapshot.terminal() &&
+                     (job.execute_armed ||
+                      job.snapshot.state == PasteUploadState::executing ||
+                      job.snapshot.state == PasteUploadState::preparing)) {
+            // Preparing already holds the server lease. Renew it before the
+            // first executing status returns, and keep renewing while the
+            // serial job runs. Video freshness is a separate lease.
             if (now - paste_keepalive_at >= 100ms &&
                 submit(wire::PasteKeepalive{job.snapshot.transaction_id})) {
               paste_keepalive_at = now;
@@ -703,8 +719,10 @@ struct RelayClient::Impl {
               // Execute consumes the final lifecycle slot. A full window
               // retries at a bounded cadence until it drains, rather than
               // waiting for another proof.
-              if (submit(wire::PasteExecute{job.snapshot.transaction_id}))
+              if (submit(wire::PasteExecute{job.snapshot.transaction_id})) {
                 accept_paste_execute(job.execute_retry, challenge);
+                job.execute_armed = true;
+              }
             }
           }
         }
@@ -959,17 +977,9 @@ kvmux::SubmitResult RelayClient::start_ascii_paste_text(
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
   if (normalized.empty() || normalized.size() > 65536 ||
-      !p.ready(Clock::now()) || !p.barrier || !p.active ||
-      (p.paste && !p.paste->snapshot.terminal()))
+      !accepted_us_ascii_bytes(normalized) || !p.ready(Clock::now()) ||
+      !p.barrier || !p.active || (p.paste && !p.paste->snapshot.terminal()))
     return kvmux::SubmitResult::not_ready;
-  for (std::size_t i = 0; i < normalized.size(); ++i) {
-    const auto c = normalized[i];
-    if (c >= 0x80 ||
-        (c == '\r' &&
-         (i + 1 == normalized.size() || normalized[++i] != '\n')) ||
-        !(c == '\t' || c == '\n' || (c >= 0x20 && c <= 0x7e)))
-      return kvmux::SubmitResult::not_ready;
-  }
   std::random_device random;
   std::uint64_t id{};
   while (!id) id = (std::uint64_t(random()) << 32U) ^ random();
@@ -1025,7 +1035,13 @@ ControlSnapshot RelayClient::control_snapshot() const {
     result.release_confirmed = false;
     result.applied.known = false;
   }
-  if (result.state == ControlConnectionState::ready && !p.fresh(Clock::now())) {
+  const bool paste_running =
+      p.paste && !p.paste->snapshot.terminal() &&
+      (p.paste->execute_armed ||
+       p.paste->snapshot.state == PasteUploadState::executing ||
+       p.paste->snapshot.state == PasteUploadState::preparing);
+  if (result.state == ControlConnectionState::ready && !p.fresh(Clock::now()) &&
+      !paste_running) {
     result.state = ControlConnectionState::stalled;
     result.applied.known = false;
   }

@@ -167,4 +167,13 @@ TextMappingResult map_us_ascii_text(
   return result;
 }
 
+bool accepted_us_ascii_bytes(
+    const std::span<const std::uint8_t> text) noexcept {
+  if (text.empty()) return false;
+  for (const auto c : text) {
+    if (!(c == '\t' || c == '\n' || (c >= 0x20 && c <= 0x7e))) return false;
+  }
+  return true;
+}
+
 }  // namespace kvmux

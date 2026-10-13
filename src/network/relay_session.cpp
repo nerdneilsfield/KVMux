@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 
+#include "input/us_ascii_text.hpp"
 #include "support/crc32.hpp"
 
 namespace kvmux::relay {
@@ -29,19 +30,6 @@ void send(SessionActions& out, const udp::Endpoint& peer, EnvelopeKind kind,
 bool ready(const ControlSnapshot& s) {
   return s.epoch != 0 && s.state == ControlConnectionState::ready &&
          s.target_usb_ready && s.release_confirmed;
-}
-bool valid_paste_text(std::span<const std::uint8_t> text) {
-  if (text.empty()) return false;
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    const auto c = text[i];
-    if (c >= 0x80) return false;
-    if (c == '\r') {
-      if (i + 1 >= text.size() || text[++i] != '\n') return false;
-      continue;
-    }
-    if (!(c == '\t' || c == '\n' || (c >= 0x20 && c <= 0x7e))) return false;
-  }
-  return true;
 }
 void paste_action(SessionActions& out, const wire::PasteStatus& status) {
   action(out, SessionAction::Kind::paste_ready);
@@ -78,6 +66,7 @@ struct ServerSession::Impl {
     wire::PasteBegin begin;
     std::vector<std::uint8_t> bytes;
     std::uint32_t accepted_bytes{};
+    std::uint32_t completed_bytes{};
     std::uint32_t next{};
     SessionTime deadline{};
     wire::PasteState state{wire::PasteState::uploading};
@@ -100,8 +89,13 @@ struct ServerSession::Impl {
       wire::PasteStatusReason reason = wire::PasteStatusReason::none) const {
     if (!paste) return {};
     const auto& p = *paste;
-    return {p.begin.transaction_id,   p.state, p.next, p.accepted_bytes, 0,
-            wire::PasteOutcome::none, reason};
+    return {p.begin.transaction_id,
+            p.state,
+            p.next,
+            p.accepted_bytes,
+            p.completed_bytes,
+            wire::PasteOutcome::none,
+            reason};
   }
   void clear_paste() { paste.reset(); }
   bool paste_owner_valid() const {
@@ -154,8 +148,13 @@ struct ServerSession::Impl {
     tuple = {};
     count = head = 0;
   }
-  void deadlines(SessionActions& out, SessionTime now) {
-    if (paste && paste->state == wire::PasteState::uploading &&
+  void deadlines(SessionActions& out, SessionTime now,
+                 bool execution_lease = true) {
+    // Uploaded text waits for Execute under the same Begin deadline. Leaving
+    // it unbounded pins the only transaction slot for the rest of the session.
+    if (paste &&
+        (paste->state == wire::PasteState::uploading ||
+         paste->state == wire::PasteState::uploaded) &&
         now >= paste->deadline) {
       auto st = status(wire::PasteStatusReason::deadline);
       st.state = wire::PasteState::finished;
@@ -166,14 +165,11 @@ struct ServerSession::Impl {
     else if (phase == SessionPhase::established) {
       if (now >= session_deadline)
         expire(out);
-      else if (paste &&
+      else if (execution_lease && paste &&
                (paste->state == wire::PasteState::executing ||
                 paste->state == wire::PasteState::preparing) &&
                paste->lease && now >= *paste->lease) {
-        if (paste->state == wire::PasteState::executing)
-          cancel_paste(out, wire::PasteStatusReason::deadline);
-        else
-          cancel_paste(out, wire::PasteStatusReason::deadline);
+        cancel_paste(out, wire::PasteStatusReason::deadline);
       } else if (execution && now >= *execution &&
                  (!paste || (paste->state != wire::PasteState::executing &&
                              paste->state != wire::PasteState::preparing)))
@@ -222,8 +218,27 @@ struct ServerSession::Impl {
       if (bind_provisional_paste) paste->owner_intent = intent;
       revision = last_edge = 0;
     }
-    if (!p.active || !p.video_fresh || !video_valid || !ready(snapshot)) {
+    if (!p.active || !ready(snapshot)) {
       revoke(out);
+      return;
+    }
+    if (!p.video_fresh || !video_valid) {
+      // A frame stall withdraws admission for new input. A paste already
+      // accepted for serial execution keeps the lease renewed by keepalive.
+      const bool paste_running =
+          paste &&
+          (paste->state == wire::PasteState::preparing ||
+           paste->state == wire::PasteState::executing) &&
+          paste->lease && now < *paste->lease;
+      if (!paste_running)
+        revoke(out);
+      else {
+        execution.reset();
+        valid_proof.reset();
+        barrier = false;
+        pending_sync.reset();
+        completed_sync.reset();
+      }
       return;
     }
     auto deadline = deferred ? now + 250ms : *time + 250ms;
@@ -260,7 +275,9 @@ SessionActions ServerSession::on_datagram(
     std::optional<SessionTime> proof_received_at) {
   auto& s = *impl_;
   SessionActions out;
-  s.deadlines(out, now);
+  // Reliable keepalive and serial completion in this loop run after raw
+  // packets. Expiring an execution lease here would discard both.
+  s.deadlines(out, now, false);
   auto e = wire::decode_envelope(bytes);
   if (!e) return out;
   if (e->kind == EnvelopeKind::hello) {
@@ -396,8 +413,15 @@ SessionActions ServerSession::paste_begin(const wire::PasteBegin& begin,
         p.begin.crc32 == begin.crc32)
       paste_action(out, s.status());
     else {
-      auto st = s.status(wire::PasteStatusReason::conflict);
-      st.state = wire::PasteState::finished;
+      // Reject the requester. A finished status for the live transaction would
+      // make RelayServer cancel a job that this session still owns.
+      wire::PasteStatus st{begin.transaction_id,
+                           wire::PasteState::finished,
+                           0,
+                           0,
+                           0,
+                           wire::PasteOutcome::rejected,
+                           wire::PasteStatusReason::conflict};
       paste_action(out, st);
     }
     return out;
@@ -428,6 +452,11 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk,
       chunk.transaction_id != s.paste->begin.transaction_id)
     return out;
   auto& p = *s.paste;
+  if (p.state == wire::PasteState::preparing ||
+      p.state == wire::PasteState::executing) {
+    paste_action(out, s.status());
+    return out;
+  }
   const auto fail = [&](wire::PasteStatusReason reason) {
     auto st = s.status(reason);
     st.state = wire::PasteState::finished;
@@ -438,6 +467,12 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk,
     return out;
   }
   if (chunk.chunk_index < p.next) {
+    // Source bytes are released once the serial job starts. A repeated chunk
+    // cannot be compared after that, and must not cancel the live job.
+    if (p.bytes.empty()) {
+      paste_action(out, s.status());
+      return out;
+    }
     const auto off = static_cast<std::size_t>(chunk.chunk_index) * 960;
     if (off + chunk.payload.size() <= p.bytes.size() &&
         std::equal(chunk.payload.begin(), chunk.payload.end(),
@@ -483,11 +518,22 @@ SessionActions ServerSession::paste_execute(const wire::PasteExecute& execute,
     paste_action(out, s.status());
     return out;
   }
-  if (p.state != wire::PasteState::uploaded ||
-      p.bytes.size() != p.begin.normalized_bytes ||
-      support::crc32_ieee(p.bytes) != p.begin.crc32 ||
-      !valid_paste_text(p.bytes)) {
+  if (p.state != wire::PasteState::uploaded) {
+    // The upload is still open. Keep the transaction and let the client retry.
     paste_action(out, s.status(wire::PasteStatusReason::invalid));
+    return out;
+  }
+  if (p.bytes.size() != p.begin.normalized_bytes ||
+      support::crc32_ieee(p.bytes) != p.begin.crc32) {
+    auto st = s.status(wire::PasteStatusReason::checksum);
+    st.state = wire::PasteState::finished;
+    s.finish_paste(out, st);
+    return out;
+  }
+  if (!accepted_us_ascii_bytes(p.bytes)) {
+    auto st = s.status(wire::PasteStatusReason::invalid);
+    st.state = wire::PasteState::finished;
+    s.finish_paste(out, st);
     return out;
   }
   // Execute is authorized by an actually validated video proof for this
@@ -523,7 +569,8 @@ SessionActions ServerSession::paste_keepalive(
   auto& s = *impl_;
   SessionActions out;
   if (s.phase != SessionPhase::established || !s.paste ||
-      s.paste->state != wire::PasteState::executing ||
+      (s.paste->state != wire::PasteState::executing &&
+       s.paste->state != wire::PasteState::preparing) ||
       s.paste->begin.transaction_id != keepalive.transaction_id ||
       !s.paste->lease)
     return out;
@@ -579,6 +626,7 @@ SessionActions ServerSession::update_ascii_paste(
       st.accepted_bytes *
       (snapshot.total_gestures ? snapshot.completed_gestures : 0) /
       (snapshot.total_gestures ? snapshot.total_gestures : 1));
+  s.paste->completed_bytes = st.completed_bytes;
   if (snapshot.state == AsciiPasteState::completed) {
     st.state = wire::PasteState::finished;
     st.outcome = wire::PasteOutcome::completed;

@@ -56,6 +56,9 @@ void paste_lifecycle() {
         PasteLifecycleAction::cancel_current);
   check(paste_lifecycle_action(true, 7, 11, 7, 11, true, true) ==
         PasteLifecycleAction::none);
+  // Execute and the serial job outlive a stalled presented frame.
+  check(paste_lifecycle_action(true, 7, 11, 7, 11, true, false, true) ==
+        PasteLifecycleAction::none);
 
   // A new control owner cannot submit PasteCancel for an old owner.
   check(paste_lifecycle_action(true, 7, 11, 8, 11, false, false) ==
