@@ -369,6 +369,35 @@ struct FloatingMenuIcon {
   }
 };
 
+// Window that owns a keyboard, pointer or window event; 0 for other events.
+SDL_WindowID event_window_id(const SDL_Event& event) {
+  switch (event.type) {
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+      return event.key.windowID;
+    case SDL_EVENT_MOUSE_MOTION:
+      return event.motion.windowID;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      return event.button.windowID;
+    case SDL_EVENT_MOUSE_WHEEL:
+      return event.wheel.windowID;
+    default:
+      return event.type >= SDL_EVENT_WINDOW_FIRST &&
+                     event.type <= SDL_EVENT_WINDOW_LAST
+                 ? event.window.windowID
+                 : 0;
+  }
+}
+
+bool is_injectable_input(const SDL_Event& event) {
+  return event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP ||
+         event.type == SDL_EVENT_MOUSE_MOTION ||
+         event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+         event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
+         event.type == SDL_EVENT_MOUSE_WHEEL;
+}
+
 InputEvent to_input(const SDL_Event& event) {
   if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
     const auto usage = usb_usage_from_sdl(event.key.scancode);
@@ -482,6 +511,48 @@ int main(int argc, char** argv) {
         }));
   };
   VideoRenderer renderer;
+  // Second screen: a view-only capture session whose window feeds input to the
+  // main session. Both windows share the one GL context.
+  const SDL_WindowID main_window_id = SDL_GetWindowID(window);
+  SDL_Window* window2 = nullptr;
+  SDL_WindowID second_window_id = 0;
+  std::unique_ptr<KvmSession> session2;
+  VideoRenderer renderer2;
+  std::vector<CaptureMode> modes2;
+  std::optional<std::future<std::vector<CaptureMode>>> modes2_future;
+  std::string primary_device_id, second_device_id;
+  int selected_device2 = -1, selected_mode2 = -1;
+  bool close_second_requested = false;
+  Uint32 local_buttons = 0, remote_buttons = 0;
+  // Screen 2 may take the pointer only while it has recent, uploaded video.
+  bool second_valid = false;
+  bool second_upload_failed = false, second_display_failed = false;
+  std::chrono::steady_clock::time_point second_uploaded_at{};
+  // Focus is tracked in event order; only leaving both windows releases.
+  bool main_focused = true, second_focused = false;
+  bool focus_release_pending = false;
+  const auto close_second = [&] {
+    if (!window2) return;
+    session->release_control();
+    auto old = std::move(session2);
+    retired_sessions.push_back(
+        std::async(std::launch::async, [old = std::move(old)]() mutable {
+          old->shutdown();
+          old.reset();
+        }));
+    renderer2.destroy();
+    SDL_DestroyWindow(window2);
+    window2 = nullptr;
+    second_window_id = 0;
+    second_device_id.clear();
+    second_valid = second_focused = false;
+    second_upload_failed = second_display_failed = false;
+    remote_buttons = 0;
+    close_second_requested = false;
+    modes2.clear();
+    modes2_future.reset();
+    selected_mode2 = -1;
+  };
   Diagnostics diagnostics;
   std::vector<DeviceInfo> devices;
   std::vector<CaptureMode> modes;
@@ -501,7 +572,6 @@ int main(int argc, char** argv) {
   TextPasteError paste_error = TextPasteError::none;
   std::size_t clipboard_loaded_bytes = 0, clipboard_loaded_characters = 0;
   std::vector<ImVec4> local_regions;
-  Uint32 local_buttons = 0, remote_buttons = 0;
   FloatingMenuIcon menu_icon;
   bool open_floating_menu = false, open_connections = false;
   auto next_serial_scan = std::chrono::steady_clock::now();
@@ -571,6 +641,71 @@ int main(int argc, char** argv) {
           !popup_open && !remote_buttons &&
           !(remote_input && config.mouse_mode == MouseMode::relative);
       const bool preview = event_state == InputState::preview;
+      // Focus is tracked in event order so an internal switch between the two
+      // windows is not mistaken for leaving the application.
+      if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
+          event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+        const bool gained = event.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
+        const SDL_WindowID wid = event_window_id(event);
+        if (wid == main_window_id)
+          main_focused = gained;
+        else if (wid == second_window_id)
+          second_focused = gained;
+        if (!gained) focus_release_pending = true;
+      }
+      const bool paste_cancel_event =
+          session->snapshot().text_paste_active ||
+          (event.type == SDL_EVENT_KEY_DOWN ||
+           event.type == SDL_EVENT_KEY_UP) &&
+              event.key.scancode == config.host_scancode;
+      if (const auto wid = event_window_id(event);
+          wid != 0 && wid != main_window_id) {
+        // Screen 2 never reaches window-1 chrome or ImGui. Events left over
+        // from an already destroyed window are dropped.
+        if (wid != second_window_id) continue;
+        if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+          close_second_requested = true;
+        } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                   event.type == SDL_EVENT_WINDOW_HIDDEN) {
+          remote_buttons = 0;
+          session->minimized();
+        } else if (is_injectable_input(event) &&
+                   config.mouse_mode == MouseMode::relative &&
+                   (remote_input || paste_cancel_event ||
+                    !(popup_open || open_floating_menu))) {
+          // Screen 2 without uploaded video must not activate or inject the
+          // pointer; keys still pass through so Host and cancel work.
+          if (!second_valid && event.type != SDL_EVENT_KEY_DOWN &&
+              event.type != SDL_EVENT_KEY_UP)
+            continue;
+          if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && remote_input)
+            remote_buttons |= SDL_BUTTON_MASK(event.button.button);
+          if (event.type == SDL_EVENT_MOUSE_BUTTON_UP)
+            remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
+          if (event.type == SDL_EVENT_MOUSE_MOTION) {
+            session->handle_input(
+                {InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
+          } else {
+            // Relative mode ignores coordinates except for the router's
+            // inside-the-video test, so report the centre of screen 1.
+            const Rect input =
+                target_input_rect(displayed_video_rect, config.target_aspect);
+            const auto cx = static_cast<float>(input.x + input.width / 2);
+            const auto cy = static_cast<float>(input.y + input.height / 2);
+            SDL_Event routed = event;
+            if (routed.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                routed.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+              routed.button.x = cx;
+              routed.button.y = cy;
+            } else if (routed.type == SDL_EVENT_MOUSE_WHEEL) {
+              routed.wheel.mouse_x = cx;
+              routed.wheel.mouse_y = cy;
+            }
+            session->handle_input(to_input(routed));
+          }
+        }
+        continue;
+      }
       if (scroll_active && (event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                             event.type == SDL_EVENT_WINDOW_MINIMIZED ||
                             event.type == SDL_EVENT_WINDOW_HIDDEN ||
@@ -676,12 +811,13 @@ int main(int argc, char** argv) {
         ImGui_ImplSDL3_ProcessEvent(&event);
         if (local_click) local_ui_input_seen = true;
       }
-      if (event.type == SDL_EVENT_QUIT) {
+      // Closing window 1 quits even while screen 2 keeps SDL from doing so.
+      if (event.type == SDL_EVENT_QUIT ||
+          event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
         session->release_control();
         running = false;
         continue;
       }
-      if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) session->focus_lost();
       if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
           event.type == SDL_EVENT_WINDOW_HIDDEN)
         session->minimized();
@@ -694,11 +830,6 @@ int main(int argc, char** argv) {
       // A local popup owns injectable input, but SDL and ImGui still receive
       // close and window-management events.
       if (local_click && injectable_event) continue;
-      const bool paste_cancel_event =
-          session->snapshot().text_paste_active ||
-          (event.type == SDL_EVENT_KEY_DOWN ||
-           event.type == SDL_EVENT_KEY_UP) &&
-              event.key.scancode == config.host_scancode;
       if (popup_open && !remote_input && injectable_event &&
           !paste_cancel_event)
         continue;
@@ -721,6 +852,21 @@ int main(int argc, char** argv) {
       else if (injectable_event)
         session->handle_input(to_input(event));
     }
+    // Only leaving both windows releases; a LOST that this batch already
+    // answered with another window's GAINED does not.
+    if (focus_release_pending) {
+      focus_release_pending = false;
+      SDL_Window* const focus = SDL_GetKeyboardFocus();
+      // Reconcile with the current SDL focus, not the queued event history, so
+      // a GAINED still sitting in the queue is not read as a loss.
+      if (focus == window) main_focused = true;
+      if (window2 && focus == window2) second_focused = true;
+      if (!main_focused && !second_focused && focus != window &&
+          (!window2 || focus != window2)) {
+        session->focus_lost();
+        remote_buttons = 0;
+      }
+    }
     if (devices_future.valid() && devices_future.wait_for(std::chrono::seconds(
                                       0)) == std::future_status::ready) {
       devices = devices_future.get();
@@ -740,6 +886,37 @@ int main(int argc, char** argv) {
       ports = enumerate_serial_ports();
       next_serial_scan =
           std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    }
+    if (close_second_requested) close_second();
+    if (modes2_future && modes2_future->wait_for(std::chrono::seconds(0)) ==
+                             std::future_status::ready) {
+      modes2 = modes2_future->get();
+      selected_mode2 = modes2.empty() ? -1 : 0;
+      modes2_future.reset();
+    }
+    if (session2) {
+      session2->tick();
+      if (auto newest = session2->take_latest_frame()) {
+        if (renderer2.upload(*newest, config.color_override)) {
+          second_uploaded_at = std::chrono::steady_clock::now();
+          second_upload_failed = false;
+        } else {
+          second_upload_failed = true;
+        }
+      }
+      const bool fresh = session2->snapshot().video_fresh &&
+                         renderer2.width() > 0 && !second_upload_failed &&
+                         !second_display_failed &&
+                         std::chrono::steady_clock::now() - second_uploaded_at <
+                             std::chrono::milliseconds(500);
+      // Losing screen 2 must not leave the target controlled half blind, and a
+      // black screen must not take the pointer back.
+      if (second_valid && !fresh) {
+        session->release_control();
+        // The drop below can eat the button up that would clear this bit.
+        remote_buttons = 0;
+      }
+      second_valid = fresh;
     }
     session->tick();
     if (auto newest = session->take_latest_frame()) {
@@ -1119,6 +1296,9 @@ int main(int argc, char** argv) {
     };
     if (SDL_GetWindowRelativeMouseMode(window) != relative_capture)
       SDL_SetWindowRelativeMouseMode(window, relative_capture);
+    // Whichever screen has focus owns the pointer while captured.
+    if (window2 && SDL_GetWindowRelativeMouseMode(window2) != relative_capture)
+      SDL_SetWindowRelativeMouseMode(window2, relative_capture);
     const auto mouse = ImGui::GetIO().MousePos;
     const bool at_top = mouse.x >= viewport->Pos.x &&
                         mouse.x < viewport->Pos.x + viewport->Size.x &&
@@ -1232,6 +1412,7 @@ int main(int argc, char** argv) {
               scroll_active = false;
               scroll_sample_after.reset();
             }
+            close_second();
             retire_session();
             remote = requested_remote;
             session = std::make_unique<KvmSession>();
@@ -1284,6 +1465,7 @@ int main(int argc, char** argv) {
                 } else {
                   const auto remote_mode = remote_modes.front();
                   close_connections_when_ready = true;
+                  close_second();
                   retire_session();
                   devices_future = {};
                   modes_future.reset();
@@ -1390,11 +1572,17 @@ int main(int argc, char** argv) {
             }
             if (ImGui::Button("Start preview") && selected_device >= 0 &&
                 selected_mode >= 0) {
-              close_connections_when_ready = true;
-              (void)session->select_capture(devices[selected_device],
-                                            modes[selected_mode]);
-              current_frame.reset();
-              renderer.destroy();
+              if (window2 &&
+                  devices[selected_device].stable_id == second_device_id) {
+                media_message = "That device is in use by screen 2.";
+              } else {
+                close_connections_when_ready = true;
+                primary_device_id = devices[selected_device].stable_id;
+                (void)session->select_capture(devices[selected_device],
+                                              modes[selected_mode]);
+                current_frame.reset();
+                renderer.destroy();
+              }
             }
             ImGui::SameLine();
             if (ImGui::Button("Connect") && selected_port >= 0) {
@@ -1406,6 +1594,71 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             if (ImGui::Button("Disconnect"))
               (void)session->disconnect_control();
+            // shortcut: screen 2 is not persisted and takes input in Relative
+            // mode only; upgrade once absolute coordinates span both screens.
+            ImGui::SeparatorText("Second screen (Relative mouse only)");
+            if (!window2) {
+              if (ImGui::BeginCombo(
+                      "Screen 2 device",
+                      selected_device2 >= 0 &&
+                              selected_device2 <
+                                  static_cast<int>(devices.size())
+                          ? devices[selected_device2].display_name.c_str()
+                          : "Select device")) {
+                for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
+                  if (devices[i].stable_id == primary_device_id) continue;
+                  if (ImGui::Selectable(devices[i].display_name.c_str(),
+                                        i == selected_device2)) {
+                    selected_device2 = i;
+                    modes2.clear();
+                    selected_mode2 = -1;
+                    modes2_future =
+                        session->enumerate_capture_modes(devices[i].stable_id);
+                  }
+                }
+                ImGui::EndCombo();
+              }
+              if (ImGui::BeginCombo(
+                      "Screen 2 mode",
+                      selected_mode2 >= 0 &&
+                              selected_mode2 < static_cast<int>(modes2.size())
+                          ? mode_text(modes2[selected_mode2]).c_str()
+                          : "Select mode")) {
+                for (int i = 0; i < static_cast<int>(modes2.size()); ++i)
+                  if (ImGui::Selectable(mode_text(modes2[i]).c_str(),
+                                        i == selected_mode2))
+                    selected_mode2 = i;
+                ImGui::EndCombo();
+              }
+              ImGui::BeginDisabled(
+                  !retired_sessions.empty() || selected_device2 < 0 ||
+                  selected_device2 >= static_cast<int>(devices.size()) ||
+                  selected_mode2 < 0 ||
+                  selected_mode2 >= static_cast<int>(modes2.size()));
+              if (ImGui::Button("Open screen 2")) {
+                if (devices[selected_device2].stable_id == primary_device_id) {
+                  media_message =
+                      "Screen 2 must use a different capture device.";
+                } else {
+                  window2 = SDL_CreateWindow("KVMux - Screen 2", 960, 540,
+                                             SDL_WINDOW_OPENGL |
+                                                 SDL_WINDOW_RESIZABLE |
+                                                 SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                  if (window2) {
+                    second_window_id = SDL_GetWindowID(window2);
+                    second_device_id = devices[selected_device2].stable_id;
+                    session2 = std::make_unique<KvmSession>();
+                    (void)session2->select_capture(devices[selected_device2],
+                                                   modes2[selected_mode2]);
+                  } else {
+                    media_message = "Could not open the second window.";
+                  }
+                }
+              }
+              ImGui::EndDisabled();
+            } else if (ImGui::Button("Close screen 2")) {
+              close_second();
+            }
           }
           if (ImGui::RadioButton("Absolute",
                                  config.mouse_mode == MouseMode::absolute)) {
@@ -1754,7 +2007,41 @@ int main(int argc, char** argv) {
     }
     diagnostics.record_present_blocking(std::chrono::steady_clock::now() -
                                         before);
+    if (window2) {
+      // A failed rebind would draw screen 2 into window 1's surface and must
+      // also revoke screen 2's pointer authority until it recovers.
+      if (SDL_GL_MakeCurrent(window2, context)) {
+        second_display_failed = false;
+        SDL_GL_SetSwapInterval(0);  // window 1 already paces the loop
+        int w2{}, h2{};
+        SDL_GetWindowSizeInPixels(window2, &w2, &h2);
+        glViewport(0, 0, w2, h2);
+        glClearColor(0.F, 0.F, 0.F, 1.F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (second_valid) {
+          const auto fit = fit_video_rect(
+              {0, 0, static_cast<double>(w2), static_cast<double>(h2)},
+              renderer2.width(), renderer2.height());
+          renderer2.blit(
+              static_cast<int>(std::lround(fit.x)),
+              static_cast<int>(std::lround(h2 - fit.y)),
+              static_cast<int>(std::lround(fit.x + fit.width)),
+              static_cast<int>(std::lround(h2 - fit.y - fit.height)));
+        }
+        SDL_GL_SwapWindow(window2);
+      } else {
+        spdlog::error("Could not bind the screen 2 GL context: {}",
+                      SDL_GetError());
+        second_display_failed = true;
+      }
+      if (!SDL_GL_MakeCurrent(window, context)) {
+        spdlog::error("Could not restore the main GL context: {}",
+                      SDL_GetError());
+        running = false;
+      }
+    }
   }
+  close_second();
   recording.shutdown();
   session->shutdown();
   if (pref) {

@@ -382,6 +382,15 @@ bool VideoRenderer::upload(const VideoFrame& input,
   return true;
 }
 
+void VideoRenderer::blit(int x0, int y0, int x1, int y1) const noexcept {
+  if (!framebuffer_ || width_ <= 0 || height_ <= 0) return;
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glBlitFramebuffer(0, 0, width_, height_, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT,
+                    GL_LINEAR);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 void VideoRenderer::destroy() noexcept {
   if (sws_) sws_freeContext(sws_);
   sws_ = nullptr;

@@ -35,6 +35,10 @@ class VideoRenderer {
 
   bool initialize();
   bool upload(const VideoFrame& frame, ColorOverride color_override);
+  // Scales the converted frame into the bound window's default framebuffer.
+  // Corners are GL window pixels (origin bottom-left); y0 > y1 puts source row
+  // zero at the top, matching the ImGui path.
+  void blit(int x0, int y0, int x1, int y1) const noexcept;
   void destroy() noexcept;
   [[nodiscard]] std::uintptr_t texture_id() const noexcept {
     return static_cast<std::uintptr_t>(output_texture_);
