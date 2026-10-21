@@ -90,7 +90,10 @@ class Diagnostics::Impl {
   TimeWindow capture;
   TimeWindow decode;
   TimeWindow present;
+  TimeWindow mouse_motion;
   DurationWindow sample_to_gpu_submit;
+  DurationWindow sdl_event_wait;
+  DurationWindow input_processing;
   DurationWindow sdl_to_control_dequeue;
   DurationWindow input_queue_age;
   DurationWindow ack_rtt;
@@ -99,6 +102,8 @@ class Diagnostics::Impl {
   std::uint64_t sample_mailbox_overwrites{};
   std::uint64_t frame_mailbox_overwrites{};
   std::uint64_t timeouts{};
+  std::uint64_t mouse_motion_events{};
+  std::uint64_t mouse_motion_folded{};
   std::string capture_mode;
   std::string pixel_path;
   std::string recent_error;
@@ -126,6 +131,24 @@ void Diagnostics::record_present(const std::uint64_t generation,
     impl_->present.push(at);
     impl_->last_present = identity;
   }
+}
+
+void Diagnostics::record_mouse_motion(const Clock::time_point at) noexcept {
+  std::lock_guard lock(impl_->mutex);
+  impl_->mouse_motion.push(at);
+  ++impl_->mouse_motion_events;
+}
+void Diagnostics::record_mouse_motion_folded() noexcept {
+  std::lock_guard lock(impl_->mutex);
+  ++impl_->mouse_motion_folded;
+}
+void Diagnostics::record_sdl_event_wait(const Duration duration) noexcept {
+  std::lock_guard lock(impl_->mutex);
+  impl_->sdl_event_wait.push(nonnegative(duration));
+}
+void Diagnostics::record_input_processing(const Duration duration) noexcept {
+  std::lock_guard lock(impl_->mutex);
+  impl_->input_processing.push(nonnegative(duration));
 }
 
 void Diagnostics::record_sample_to_gpu_submit(
@@ -187,6 +210,15 @@ DiagnosticsSnapshot Diagnostics::snapshot() const {
   result.capture_fps = fps(impl_->capture);
   result.decode_fps = fps(impl_->decode);
   result.unique_present_fps = fps(impl_->present);
+  const auto now = Clock::now();
+  const auto& motion = impl_->mouse_motion;
+  if (motion.size() >= 2U &&
+      now - motion.ordered(motion.size() - 1U) < std::chrono::seconds(1))
+    result.mouse_events_per_second = fps(motion);
+  result.mouse_motion_events = impl_->mouse_motion_events;
+  result.mouse_motion_folded = impl_->mouse_motion_folded;
+  result.sdl_event_wait = latency_snapshot(impl_->sdl_event_wait);
+  result.input_processing = latency_snapshot(impl_->input_processing);
   result.sample_to_gpu_submit = latency_snapshot(impl_->sample_to_gpu_submit);
   result.sdl_to_control_dequeue =
       latency_snapshot(impl_->sdl_to_control_dequeue);

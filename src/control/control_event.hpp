@@ -37,6 +37,9 @@ struct ControlEvent {
   std::uint64_t sequence{};
   std::chrono::steady_clock::time_point timestamp{};
   ControlPayload payload;
+  // UI-thread receipt time of the originating input event; default (epoch)
+  // for synthetic or relayed events. Diagnostics only.
+  std::chrono::steady_clock::time_point received_at{};
 };
 
 enum class SubmitResult { accepted, not_ready, overloaded };

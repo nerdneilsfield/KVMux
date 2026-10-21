@@ -484,7 +484,8 @@ int main(int argc, char** argv) {
   ImGui_ImplSDL3_InitForOpenGL(window, context);
   ImGui_ImplOpenGL3_Init("#version 150");
 
-  auto session = std::make_unique<KvmSession>();
+  auto diagnostics = std::make_shared<Diagnostics>();
+  auto session = std::make_unique<KvmSession>(diagnostics);
   Recording recording;
   (void)session->set_mouse_mode(config.mouse_mode);
   session->set_host_key(config.host_scancode);
@@ -553,7 +554,6 @@ int main(int argc, char** argv) {
     modes2_future.reset();
     selected_mode2 = -1;
   };
-  Diagnostics diagnostics;
   std::vector<DeviceInfo> devices;
   std::vector<CaptureMode> modes;
   std::vector<SerialPortInfo> ports;
@@ -631,7 +631,15 @@ int main(int argc, char** argv) {
     });
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-      const auto event_state = session->snapshot().input_state;
+      const auto received_at = std::chrono::steady_clock::now();
+      if (const auto polled = SDL_GetTicksNS();
+          is_injectable_input(event) && event.common.timestamp != 0 &&
+          polled >= event.common.timestamp)
+        diagnostics->record_sdl_event_wait(
+            std::chrono::nanoseconds(polled - event.common.timestamp));
+      if (event.type == SDL_EVENT_MOUSE_MOTION)
+        diagnostics->record_mouse_motion(received_at);
+      const auto event_state = session->input_state();
       const bool remote_input = event_state == InputState::captured ||
                                 event_state == InputState::recovering ||
                                 event_state == InputState::arming;
@@ -654,7 +662,7 @@ int main(int argc, char** argv) {
         if (!gained) focus_release_pending = true;
       }
       const bool paste_cancel_event =
-          session->snapshot().text_paste_active ||
+          session->text_paste_active() ||
           (event.type == SDL_EVENT_KEY_DOWN ||
            event.type == SDL_EVENT_KEY_UP) &&
               event.key.scancode == config.host_scancode;
@@ -684,7 +692,8 @@ int main(int argc, char** argv) {
             remote_buttons &= ~SDL_BUTTON_MASK(event.button.button);
           if (event.type == SDL_EVENT_MOUSE_MOTION) {
             session->handle_input(
-                {InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
+                {InputRelativeMotion{event.motion.xrel, event.motion.yrel},
+                 received_at});
           } else {
             // Relative mode ignores coordinates except for the router's
             // inside-the-video test, so report the centre of screen 1.
@@ -701,7 +710,9 @@ int main(int argc, char** argv) {
               routed.wheel.mouse_x = cx;
               routed.wheel.mouse_y = cy;
             }
-            session->handle_input(to_input(routed));
+            auto converted = to_input(routed);
+            converted.received_at = received_at;
+            session->handle_input(converted);
           }
         }
         continue;
@@ -846,11 +857,15 @@ int main(int argc, char** argv) {
               std::pair{current_frame->generation, current_frame->sequence};
       }
       if (event.type == SDL_EVENT_MOUSE_MOTION &&
-          config.mouse_mode == MouseMode::relative)
+          config.mouse_mode == MouseMode::relative) {
         session->handle_input(
-            {InputRelativeMotion{event.motion.xrel, event.motion.yrel}});
-      else if (injectable_event)
-        session->handle_input(to_input(event));
+            {InputRelativeMotion{event.motion.xrel, event.motion.yrel},
+             received_at});
+      } else if (injectable_event) {
+        auto converted = to_input(event);
+        converted.received_at = received_at;
+        session->handle_input(converted);
+      }
     }
     // Only leaving both windows releases; a LOST that this batch already
     // answered with another window's GAINED does not.
@@ -921,7 +936,7 @@ int main(int argc, char** argv) {
     session->tick();
     if (auto newest = session->take_latest_frame()) {
       current_frame = std::move(newest);
-      diagnostics.record_decode(current_frame->decoded);
+      diagnostics->record_decode(current_frame->decoded);
     }
     if (current_frame &&
         current_frame->generation != session->snapshot().capture.generation)
@@ -935,10 +950,10 @@ int main(int argc, char** argv) {
         renderer.upload(*current_frame, config.color_override)) {
       session->video_presented(current_frame->generation,
                                current_frame->sequence);
-      diagnostics.record_sample_to_gpu_submit(std::chrono::steady_clock::now() -
-                                              current_frame->arrival);
-      diagnostics.record_present(current_frame->generation,
-                                 current_frame->sequence);
+      diagnostics->record_sample_to_gpu_submit(
+          std::chrono::steady_clock::now() - current_frame->arrival);
+      diagnostics->record_present(current_frame->generation,
+                                  current_frame->sequence);
     }
     const auto snapshot = session->snapshot();
     if (scroll_active &&
@@ -961,7 +976,7 @@ int main(int argc, char** argv) {
             ? std::to_string(current_frame->frame->width) + "x" +
                   std::to_string(current_frame->frame->height)
             : "--";
-    diagnostics.set_capture_mode(
+    diagnostics->set_capture_mode(
         remote ? "Relay MJPEG (decoded video: " + resolution + ")"
         : snapshot.capture.actual_mode.width
             ? mode_text(snapshot.capture.actual_mode)
@@ -998,12 +1013,11 @@ int main(int argc, char** argv) {
       video_bytes_per_second.reset();
       control_bytes_per_second.reset();
     }
-    diagnostics.set_mailbox_overwrites(snapshot.capture.overwritten_samples,
-                                       snapshot.video.overwritten_frames);
-    diagnostics.record_ack_rtt(snapshot.control.last_ack_rtt);
-    diagnostics.set_pixel_path(renderer.snapshot().pixel_path);
+    diagnostics->set_mailbox_overwrites(snapshot.capture.overwritten_samples,
+                                        snapshot.video.overwritten_frames);
+    diagnostics->set_pixel_path(renderer.snapshot().pixel_path);
     if (!renderer.snapshot().error.empty())
-      diagnostics.set_recent_error(renderer.snapshot().error);
+      diagnostics->set_recent_error(renderer.snapshot().error);
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
@@ -1415,7 +1429,8 @@ int main(int argc, char** argv) {
             close_second();
             retire_session();
             remote = requested_remote;
-            session = std::make_unique<KvmSession>();
+            diagnostics = std::make_shared<Diagnostics>();
+            session = std::make_unique<KvmSession>(diagnostics);
             devices.clear();
             modes.clear();
             selected_device = selected_mode = -1;
@@ -1473,9 +1488,11 @@ int main(int argc, char** argv) {
                   modes.clear();
                   selected_device = selected_mode = -1;
                   remote_client = client;
+                  diagnostics = std::make_shared<Diagnostics>();
                   session = std::make_unique<KvmSession>(
                       std::move(capture),
-                      std::make_unique<relay::NetworkControlSink>(client));
+                      std::make_unique<relay::NetworkControlSink>(client),
+                      diagnostics);
                   session->set_host_key(config.host_scancode);
                   (void)session->set_mouse_mode(config.mouse_mode);
                   session->set_keep_alive(config.keep_alive);
@@ -1784,7 +1801,7 @@ int main(int argc, char** argv) {
     }
     ImGui::End();
     ImGui::PopStyleVar();
-    const auto d = diagnostics.snapshot();
+    const auto d = diagnostics->snapshot();
     char rates[64];
     if (video_bytes_per_second && control_bytes_per_second)
       std::snprintf(rates, sizeof(rates), "V:%.2fM/s C:%.2fK/s",
@@ -1873,7 +1890,7 @@ int main(int argc, char** argv) {
     }
     ImGui::PopStyleVar(2);
     if (diagnostics_open && !remote_input) {
-      const auto d = diagnostics.snapshot();
+      const auto d = diagnostics->snapshot();
       const ImVec2 max_size{std::max(1.F, viewport->WorkSize.x - 16.F),
                             std::max(1.F, viewport->WorkSize.y - 16.F)};
       // A stable initial width prevents wrapped text from inflating the
@@ -1946,8 +1963,43 @@ int main(int argc, char** argv) {
       ImGui::Text("Sample/frame overwrites: %llu / %llu",
                   static_cast<unsigned long long>(d.sample_mailbox_overwrites),
                   static_cast<unsigned long long>(d.frame_mailbox_overwrites));
-      ImGui::Text("ACK %.2f ms  timeouts %llu", d.ack_rtt.latest_ms,
-                  static_cast<unsigned long long>(d.timeouts));
+      const auto latency_row = [](const char* label, const LatencySnapshot& l) {
+        ImGui::Text("%s: %.2f ms (p95 %.2f, n=%zu)", label, l.latest_ms,
+                    l.p95_ms, l.samples);
+      };
+      ImGui::SeparatorText("Pointer path (UI thread -> serial ACK)");
+      ImGui::Text("Mouse motion: %.0f ev/s  total %llu  folded %llu",
+                  d.mouse_events_per_second,
+                  static_cast<unsigned long long>(d.mouse_motion_events),
+                  static_cast<unsigned long long>(d.mouse_motion_folded));
+      latency_row("SDL stamp -> UI poll", d.sdl_event_wait);
+      latency_row("UI receipt -> input handler done (incl. lock wait)",
+                  d.input_processing);
+      if (remote) {
+        // The serial worker runs on the relay server; its timings are not
+        // carried by the relay protocol.
+        ImGui::TextUnformatted(
+            "Serial dequeue / queue age / ACK RTT / queue-merged / rejected / "
+            "timeouts: N/A (measured on the relay server's serial worker)");
+        ImGui::Text("Ordinary pending: %s",
+                    snapshot.control.ordinary_input_pending ? "yes" : "no");
+      } else {
+        latency_row("UI receipt -> serial dequeue", d.sdl_to_control_dequeue);
+        latency_row("Queue age (submit -> dequeue)", d.input_queue_age);
+        latency_row("Ordinary ACK RTT (begin -> ACK, not target response)",
+                    d.ack_rtt);
+        ImGui::Text(
+            "Queue-merged motion: %llu  ordinary pending: %s  rejected: %llu  "
+            "ACK timeouts: %llu",
+            static_cast<unsigned long long>(
+                snapshot.control.merged_motion_events),
+            snapshot.control.ordinary_input_pending ? "yes" : "no",
+            static_cast<unsigned long long>(snapshot.control.rejected_events),
+            static_cast<unsigned long long>(d.timeouts));
+      }
+      ImGui::SeparatorText("Video");
+      latency_row("Capture -> GPU submit", d.sample_to_gpu_submit);
+      latency_row("SwapWindow blocking (excl. limiter)", d.present_blocking);
       ImGui::Text("Pixel path: %s", d.pixel_path.c_str());
       ImGui::TextWrapped("%s", d.recent_error.c_str());
       ImGui::End();
@@ -1996,6 +2048,8 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     const auto before = std::chrono::steady_clock::now();
     SDL_GL_SwapWindow(window);
+    diagnostics->record_present_blocking(std::chrono::steady_clock::now() -
+                                         before);
     if (!config.vsync) {
       constexpr auto frame_budget = std::chrono::milliseconds(1000 / 120);
       const auto elapsed = std::chrono::steady_clock::now() - frame_started;
@@ -2005,8 +2059,6 @@ int main(int argc, char** argv) {
                                                                   elapsed)
                 .count()));
     }
-    diagnostics.record_present_blocking(std::chrono::steady_clock::now() -
-                                        before);
     if (window2) {
       // A failed rebind would draw screen 2 into window 1's surface and must
       // also revoke screen 2's pointer authority until it recovers.

@@ -62,6 +62,8 @@ struct ControlSnapshot {
   std::chrono::microseconds last_ack_rtt{};
   std::uint64_t timeout_count{};
   std::uint64_t rejected_events{};
+  // Adjacent motion events folded inside the bounded queue (local serial only).
+  std::uint64_t merged_motion_events{};
   // Ordinary input remains pending until the serial HID report is ACKed.
   bool ordinary_input_pending{};
   std::uint64_t completed_ordinary_sequence{};

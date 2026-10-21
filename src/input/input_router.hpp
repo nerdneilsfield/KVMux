@@ -54,6 +54,8 @@ using InputPayload = std::variant<InputKey, InputPointerMotion,
                                   InputRelativeMotion, InputButton, InputWheel>;
 struct InputEvent {
   InputPayload payload;
+  // UI-thread receipt time (steady_clock); default for synthetic input.
+  std::chrono::steady_clock::time_point received_at{};
 };
 
 struct Rect {
@@ -192,6 +194,7 @@ class InputRouter {
   std::uint64_t intent_{}, revision_{}, barrier_epoch_{};
   std::optional<InputSync> sync_;
   Clock::time_point sync_at_{};
+  Clock::time_point event_received_at_{};  // Only valid inside handle().
   std::uint16_t desired_x_{}, desired_y_{};
   std::optional<SpecialKeys> pending_special_;
   bool pending_keep_alive_{};

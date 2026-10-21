@@ -13,6 +13,7 @@
 
 #include "control/control_queue.hpp"
 #include "control/control_sink.hpp"
+#include "support/diagnostics.hpp"
 
 namespace kvmux {
 
@@ -26,7 +27,11 @@ struct SerialIo {
 class Ch9329ControlSink final : public ControlSink {
  public:
   Ch9329ControlSink();
-  explicit Ch9329ControlSink(SerialIo io);
+  // `diagnostics` (optional) receives serial-thread timings: queue age,
+  // ordinary ACK RTT and ACK timeouts. It must be thread-safe.
+  explicit Ch9329ControlSink(std::shared_ptr<Diagnostics> diagnostics);
+  explicit Ch9329ControlSink(SerialIo io,
+                             std::shared_ptr<Diagnostics> diagnostics = {});
   ~Ch9329ControlSink() override;
   Ch9329ControlSink(const Ch9329ControlSink&) = delete;
   Ch9329ControlSink& operator=(const Ch9329ControlSink&) = delete;

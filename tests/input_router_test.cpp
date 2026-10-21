@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -321,6 +322,24 @@ int main() {
     capture(router, sink);
     router.handle({InputRelativeMotion{0.6, 0.6}});
     require(sink.events.empty(), "mode switch discards old fractional motion");
+  }
+
+  {
+    // One dispatch cannot expand beyond the existing control-queue capacity,
+    // including a single event whose gain would overflow an integer cast.
+    for (const double dx : {5000.0, std::numeric_limits<double>::infinity()}) {
+      FakeSink sink;
+      InputRouter router(sink);
+      router.set_video_rect({0, 0, 100, 100});
+      router.set_video_fresh(true);
+      router.set_mouse_mode(MouseMode::relative);
+      router.set_relative_gain(4.0);
+      capture(router, sink);
+      router.handle({InputRelativeMotion{dx, 0}});
+      require(sink.events.empty() && sink.releases == 1 &&
+                  router.state() == InputState::releasing,
+              "oversized gained motion releases without partial reports");
+    }
   }
 
   {

@@ -23,6 +23,7 @@ SubmitResult ControlQueue::submit(
           old_absolute->x = next->x;
           old_absolute->y = next->y;
           previous.sequence = event.sequence;
+          ++merged_motion_;
           return SubmitResult::accepted;
         }
       }
@@ -31,6 +32,7 @@ SubmitResult ControlQueue::submit(
           old_relative->dx += next->dx;
           old_relative->dy += next->dy;
           previous.sequence = event.sequence;
+          ++merged_motion_;
           return SubmitResult::accepted;
         }
       }

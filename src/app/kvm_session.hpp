@@ -46,14 +46,19 @@ struct KvmSessionSnapshot {
 
 // Main-thread coordinator. Its public event and tick functions are intended to
 // be called by the UI thread; capture lifecycle work is performed by its
-// worker.
+// worker. Pointer motion is handed to a dedicated mouse thread through a
+// one-slot mailbox; every other input, release and state change stays on the
+// caller's thread and first applies the pending motion, so ordering is kept.
+// All InputRouter access is serialized by input_mutex_.
 class KvmSession {
  public:
   using Clock = std::chrono::steady_clock;
 
-  KvmSession();
+  // `diagnostics` (optional) receives serial-thread input timings.
+  explicit KvmSession(const std::shared_ptr<Diagnostics>& diagnostics = {});
   KvmSession(std::unique_ptr<CaptureSource> capture,
-             std::unique_ptr<ControlSink> control);
+             std::unique_ptr<ControlSink> control,
+             std::shared_ptr<Diagnostics> diagnostics = {});
   ~KvmSession();
   KvmSession(const KvmSession&) = delete;
   KvmSession& operator=(const KvmSession&) = delete;
@@ -96,6 +101,9 @@ class KvmSession {
   void video_presented(std::uint64_t generation,
                        std::uint64_t sequence) noexcept;
   [[nodiscard]] KvmSessionSnapshot snapshot() const;
+  // UI-thread reads that avoid copying the full snapshot per input event.
+  [[nodiscard]] InputState input_state() const noexcept;
+  [[nodiscard]] bool text_paste_active() const noexcept;
 
   // Idempotent. Serial release/close is observed for at most serial_timeout.
   void shutdown(std::chrono::milliseconds serial_timeout =
@@ -105,6 +113,13 @@ class KvmSession {
   enum class CaptureCommand { none, start, stop, shutdown };
 
   void capture_loop();
+  void mouse_loop();
+  void queue_motion(const InputEvent& event);
+  // Caller holds input_mutex_.
+  void drain_motion_locked();
+  void discard_motion() noexcept;
+  void apply_input_locked(const InputEvent& event);
+  void request_release_locked() noexcept;
   void request_release() noexcept;
   void note_session_error(std::string error);
   void note_keep_alive(Clock::time_point now) noexcept;
@@ -113,7 +128,20 @@ class KvmSession {
   std::unique_ptr<CaptureSource> capture_;
   std::unique_ptr<ControlSink> control_;
   VideoPipeline video_;
+  std::shared_ptr<Diagnostics> diagnostics_;
+  mutable std::mutex
+      input_mutex_;  // Guards input_; taken before motion_mutex_.
   InputRouter input_;
+  std::mutex motion_mutex_;  // Guards only the one-slot motion mailbox.
+  std::condition_variable motion_wake_;
+  // One slot. queued_at is the enqueue time of the oldest folded motion and
+  // drives the 100 ms staleness rule, independent of InputEvent::received_at.
+  struct PendingMotion {
+    InputEvent event;
+    Clock::time_point queued_at;
+  };
+  std::optional<PendingMotion> pending_motion_;
+  bool motion_stop_{};
 
   mutable std::mutex mutex_;
   std::condition_variable wake_;
@@ -138,6 +166,8 @@ class KvmSession {
 
   bool keep_alive_enabled_{};
   Clock::time_point last_control_activity_{};
+
+  std::thread mouse_worker_;  // Last member: starts after all state exists.
 };
 
 }  // namespace kvmux

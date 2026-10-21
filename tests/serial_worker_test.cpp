@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "control/ch9329_protocol.hpp"
+#include "support/diagnostics.hpp"
 
 namespace {
 using namespace std::chrono_literals;
@@ -404,5 +405,45 @@ int main() {
       "sync hard timeout faults link");
   require(!synced.snapshot().applied.known, "fault cannot publish sync");
   synced.disconnect();
+
+  // Serial-thread timings reach the shared Diagnostics only for ordinary input.
+  FakeSerial timed;
+  auto diagnostics = std::make_shared<Diagnostics>();
+  Ch9329ControlSink measured(timed.io(), diagnostics);
+  measured.connect("fake", 57600);
+  require(eventually([&] {
+            return measured.snapshot().state == ControlConnectionState::ready;
+          }),
+          "measured sink ready");
+  require(diagnostics->snapshot().ack_rtt.samples == 0 &&
+              diagnostics->snapshot().input_queue_age.samples == 0,
+          "handshake and release are not ordinary input timings");
+  measured.set_control_active(true);
+  const auto stamped = std::chrono::steady_clock::now();
+  require(measured.submit({measured.snapshot().epoch, 1, stamped,
+                           RelativeMotion{3, 4}, stamped}) ==
+              SubmitResult::accepted,
+          "measured motion accepted");
+  require(eventually([&] {
+            return measured.snapshot().completed_ordinary_sequence == 1;
+          }),
+          "measured motion ACKed");
+  const auto timing = diagnostics->snapshot();
+  require(timing.ack_rtt.samples == 1 && timing.input_queue_age.samples == 1 &&
+              timing.sdl_to_control_dequeue.samples == 1 &&
+              timing.timeouts == 0,
+          "ordinary input records queue age, receipt-to-dequeue and ACK RTT");
+  const auto unstamped = std::chrono::steady_clock::now();
+  require(measured.submit({measured.snapshot().epoch, 2, unstamped,
+                           RelativeMotion{1, 1}}) == SubmitResult::accepted,
+          "unstamped motion accepted");
+  require(eventually([&] {
+            return measured.snapshot().completed_ordinary_sequence == 2;
+          }),
+          "unstamped motion ACKed");
+  require(diagnostics->snapshot().input_queue_age.samples == 2 &&
+              diagnostics->snapshot().sdl_to_control_dequeue.samples == 1,
+          "events without UI receipt time skip receipt-to-dequeue");
+  measured.disconnect();
   return EXIT_SUCCESS;
 }

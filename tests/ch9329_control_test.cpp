@@ -80,6 +80,7 @@ int main() {
                   SubmitResult::accepted &&
               queue.size() == 1,
           "motion merged");
+  require(queue.merged_motion() == 1, "queue counts folded motion");
   auto event = queue.pop();
   const auto merged = std::get<RelativeMotion>(event->payload);
   require(merged.dx == 2.0 && merged.dy == 1.0 && event->sequence == 2,

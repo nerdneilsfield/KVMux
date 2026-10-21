@@ -20,6 +20,10 @@ class ControlQueue {
   [[nodiscard]] bool release_pending() const noexcept {
     return release_pending_;
   }
+  // Motion events folded into their queued neighbour, since construction.
+  [[nodiscard]] std::uint64_t merged_motion() const noexcept {
+    return merged_motion_;
+  }
 
   void set_ready(bool ready) noexcept { ready_ = ready; }
   [[nodiscard]] SubmitResult submit(ControlEvent event,
@@ -33,6 +37,7 @@ class ControlQueue {
 
   std::deque<ControlEvent> events_;
   std::uint64_t epoch_{1};
+  std::uint64_t merged_motion_{};
   bool ready_{false};
   bool release_pending_{false};
 };

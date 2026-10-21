@@ -63,7 +63,8 @@ struct Ch9329ControlSink::Impl {
     bool ascii_paste{};
   };
 
-  explicit Impl(SerialIo value) : io(std::move(value)) {
+  Impl(SerialIo value, std::shared_ptr<Diagnostics> sink)
+      : io(std::move(value)), diagnostics(std::move(sink)) {
     // run() uses members declared after worker; start only after
     // initialization.
     worker = std::thread([this] { run(); });
@@ -315,6 +316,8 @@ struct Ch9329ControlSink::Impl {
     }
     const auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(
         now - transaction->started);
+    // Timed from begin(), not the first write; ordinary input only.
+    if (diagnostics && transaction->ordinary) diagnostics->record_ack_rtt(rtt);
     transaction.reset();
     update_snapshot([&](auto& value) {
       value.last_ack_rtt = rtt;
@@ -641,6 +644,7 @@ struct Ch9329ControlSink::Impl {
                 .count(),
             transaction->written, transaction->bytes.size());
         update_snapshot([](auto& value) { ++value.timeout_count; });
+        if (diagnostics) diagnostics->record_timeout();
         fail("CH9329 transaction timed out; release is unconfirmed", true);
       } else if (elapsed >= kStallTimeout && !transaction->stalled) {
         spdlog::debug(
@@ -722,6 +726,14 @@ struct Ch9329ControlSink::Impl {
         return;
       }
       if (auto event = queue.pop()) {
+        if (diagnostics) {
+          // `now` was taken before the pop; a concurrent submit can be newer.
+          const auto dequeued = Clock::now();
+          diagnostics->record_input_queue_age(dequeued - event->timestamp);
+          if (event->received_at != Clock::time_point{})
+            diagnostics->record_sdl_to_control_dequeue(dequeued -
+                                                       event->received_at);
+        }
         ordinary_inflight = true;
         ordinary_sequence = event->sequence;
         status.ordinary_input_pending = true;
@@ -765,6 +777,7 @@ struct Ch9329ControlSink::Impl {
   }
 
   SerialIo io;
+  std::shared_ptr<Diagnostics> diagnostics;
   mutable std::mutex mutex;
   std::condition_variable wake;
   ControlQueue queue;
@@ -810,8 +823,11 @@ struct Ch9329ControlSink::Impl {
 
 Ch9329ControlSink::Ch9329ControlSink()
     : Ch9329ControlSink(make_libserialport_io()) {}
-Ch9329ControlSink::Ch9329ControlSink(SerialIo io)
-    : impl_(std::make_unique<Impl>(std::move(io))) {}
+Ch9329ControlSink::Ch9329ControlSink(std::shared_ptr<Diagnostics> diagnostics)
+    : Ch9329ControlSink(make_libserialport_io(), std::move(diagnostics)) {}
+Ch9329ControlSink::Ch9329ControlSink(SerialIo io,
+                                     std::shared_ptr<Diagnostics> diagnostics)
+    : impl_(std::make_unique<Impl>(std::move(io), std::move(diagnostics))) {}
 Ch9329ControlSink::~Ch9329ControlSink() = default;
 
 void Ch9329ControlSink::connect(std::string port, int baud_rate,
@@ -883,6 +899,7 @@ SubmitResult Ch9329ControlSink::submit(ControlEvent event) {
     impl_->invalidate_sync();
   if (result == SubmitResult::accepted)
     impl_->status.ordinary_input_pending = true;
+  impl_->status.merged_motion_events = impl_->queue.merged_motion();
   if (result != SubmitResult::accepted) {
     ++impl_->status.rejected_events;
   }

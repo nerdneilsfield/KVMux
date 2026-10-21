@@ -26,11 +26,29 @@ struct DiagnosticsSnapshot {
   double decode_fps{};
   double unique_present_fps{};
 
+  // Mouse motion events seen by the UI thread per second over the recent
+  // window; 0 once the pointer has been idle for a second.
+  double mouse_events_per_second{};
+
   LatencySnapshot sample_to_gpu_submit;
+  // SDL event timestamp to the UI thread polling it (SDL's own clock).
+  LatencySnapshot sdl_event_wait;
+  // UI thread receipt to the input handler returning (includes waiting for
+  // the router lock and the router's own submits; a handler call need not
+  // submit anything, e.g. outside Captured).
+  LatencySnapshot input_processing;
+  // UI thread receipt (oldest merged event) to the serial thread dequeuing it.
   LatencySnapshot sdl_to_control_dequeue;
+  // ControlSink submit (oldest merged event) to the serial thread dequeuing it.
   LatencySnapshot input_queue_age;
+  // Ordinary input report written to ACK read. Not target response time.
   LatencySnapshot ack_rtt;
+  // SDL_GL_SwapWindow only; excludes the frame-rate limiter delay.
   LatencySnapshot present_blocking;
+
+  std::uint64_t mouse_motion_events{};
+  // Motion events folded into a neighbour before reaching the router.
+  std::uint64_t mouse_motion_folded{};
 
   std::uint64_t sample_mailbox_overwrites{};
   std::uint64_t frame_mailbox_overwrites{};
@@ -57,7 +75,11 @@ class Diagnostics {
   void record_present(std::uint64_t generation, std::uint64_t capture_sequence,
                       Clock::time_point at = Clock::now()) noexcept;
 
+  void record_mouse_motion(Clock::time_point at = Clock::now()) noexcept;
+  void record_mouse_motion_folded() noexcept;
   void record_sample_to_gpu_submit(Duration duration) noexcept;
+  void record_sdl_event_wait(Duration duration) noexcept;
+  void record_input_processing(Duration duration) noexcept;
   void record_sdl_to_control_dequeue(Duration duration) noexcept;
   void record_input_queue_age(Duration duration) noexcept;
   void record_ack_rtt(Duration duration) noexcept;

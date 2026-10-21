@@ -4,6 +4,8 @@
 #include <cmath>
 #include <utility>
 
+#include "control/control_queue.hpp"
+
 namespace kvmux {
 
 bool Rect::contains(const double px, const double py) const noexcept {
@@ -95,8 +97,8 @@ bool InputRouter::sink_ready_released() const {
 std::optional<std::uint64_t> InputRouter::submit(ControlPayload payload) {
   const auto snapshot = sink_.snapshot();
   const auto sequence = ++sequence_;
-  const auto result =
-      sink_.submit({snapshot.epoch, sequence, Clock::now(), payload});
+  const auto result = sink_.submit(
+      {snapshot.epoch, sequence, Clock::now(), payload, event_received_at_});
   if (result != SubmitResult::accepted) {
     if (snapshot.recoverable_transport)
       recover();
@@ -140,6 +142,7 @@ void InputRouter::handle(const InputEvent& event) {
   if (text_active_ && std::holds_alternative<InputKey>(event.payload)) {
     cancel_text();
   }
+  event_received_at_ = event.received_at;
   std::visit(
       [this](const auto& value) {
         using T = std::decay_t<decltype(value)>;
@@ -166,6 +169,7 @@ void InputRouter::handle(const InputEvent& event) {
         }
       },
       event.payload);
+  event_received_at_ = {};
 }
 
 void InputRouter::handle_key(const InputKey& key) {
@@ -223,6 +227,14 @@ void InputRouter::handle_relative(const InputRelativeMotion& motion) {
   }
   residual_x_ += motion.dx * relative_gain_;
   residual_y_ += motion.dy * relative_gain_;
+  // Bound one dispatch by the existing control-queue capacity, after gain.
+  constexpr double max_counts = 127.0 * ControlQueue::capacity;
+  if (!std::isfinite(residual_x_) || !std::isfinite(residual_y_) ||
+      std::abs(residual_x_) > max_counts ||
+      std::abs(residual_y_) > max_counts) {
+    begin_release();
+    return;
+  }
   const int dx = static_cast<int>(std::trunc(residual_x_));
   const int dy = static_cast<int>(std::trunc(residual_y_));
   residual_x_ -= static_cast<double>(dx);
