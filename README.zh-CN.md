@@ -126,5 +126,6 @@ Windows/Linux 可选 **Host: Right GUI**。
 
 - [构建选项与依赖](docs/building.md)
 - [局域网配置与故障排查](docs/lan-relay.md)
+- [Linux 下配置 CH9329 波特率](docs/ch9329-baud.md)
 - [硬件识别](docs/hardware-validation.md)与[验证状态](docs/acceptance.md)
 - 面向贡献者的[技术设计](docs/design/kvm-technical-design-v1.md)

@@ -170,5 +170,6 @@ USB HID cable if needed. For video, input or serial problems, see
 
 - [Build options and dependencies](docs/building.md)
 - [LAN configuration and troubleshooting](docs/lan-relay.md)
+- [Configure CH9329 baud rate on Linux](docs/ch9329-baud.md)
 - [Hardware identification](docs/hardware-validation.md) and [verification status](docs/acceptance.md)
 - [Technical design](docs/design/kvm-technical-design-v1.md) for contributors

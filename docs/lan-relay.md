@@ -39,7 +39,9 @@ build/macos-debug/kvmux.app/Contents/MacOS/kvmux --debug 2>gui-debug.log
 The relay and new GUI configurations default to 9600 baud. The CH9329 datasheet
 (page 1) specifies this factory rate; the serial protocol document (page 11)
 lists configuration field (4) as `0x00002580` (9600). Saved GUI baud settings
-are preserved. If the chip was reconfigured, select its actual baud rate.
+are preserved. If the chip was reconfigured, select its actual baud rate. To
+change an enclosed CH9329 from Linux through its existing serial connection,
+see [Configure CH9329 baud rate on Linux](ch9329-baud.md).
 
 The relay accepts `--debug` before or after its command, including `--help`
 and the device-list commands. Run `kvmux --debug --help` to check GUI options
