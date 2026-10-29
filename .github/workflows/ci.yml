@@ -20,11 +20,24 @@ jobs:
         run: brew install ninja ffmpeg
       - name: Install host dependencies (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Install host dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install -y ninja ffmpeg
+        run: |
+          choco install -y ninja
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne 'e4a40b46e3a3f3e5f2ed28352bd1fd6c733ae3808a8743682ef7f0d4e20c7d51') {
+            throw 'FFmpeg archive checksum mismatch'
+          }
+          Expand-Archive $archive -DestinationPath $env:RUNNER_TEMP
+          $ffmpeg = Join-Path $env:RUNNER_TEMP 'ffmpeg-8.0.1-full_build-shared'
+          "CMAKE_PREFIX_PATH=$ffmpeg" >> $env:GITHUB_ENV
+          "$ffmpeg/bin" >> $env:GITHUB_PATH
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
@@ -35,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev
       - run: cmake --preset linux-sanitizers
       - run: cmake --build --preset linux-sanitizers --parallel
       - run: ctest --preset linux-sanitizers --output-on-failure
