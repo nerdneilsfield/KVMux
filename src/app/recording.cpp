@@ -179,7 +179,8 @@ bool Recording::snapshot_now(const VideoFrame& input,
   }
   if (result >= 0) result = avcodec_send_frame(context, image);
   if (result >= 0) result = avcodec_receive_packet(context, packet);
-  const auto temporary = path.string() + ".part";
+  auto temporary = path;
+  temporary += ".part";
   if (result >= 0) {
     std::ofstream file(temporary, std::ios::binary);
     if (!file)
@@ -289,7 +290,8 @@ static bool write_rgb_jpeg(std::span<const std::uint8_t> rgb, unsigned width,
     result = AVERROR(EINVAL);
   if (result >= 0) result = avcodec_send_frame(context, image);
   if (result >= 0) result = avcodec_receive_packet(context, packet);
-  const auto temporary = path.string() + ".part";
+  auto temporary = path;
+  temporary += ".part";
   if (result >= 0) {
     std::ofstream f(temporary, std::ios::binary);
     f.write(reinterpret_cast<const char*>(packet->data), packet->size);
@@ -388,9 +390,12 @@ bool Recording::start_now(const VideoFrame& first,
     std::lock_guard lock(mutex_);
     status_.output_path = output;
   }
-  if (result >= 0)
-    result =
-        avio_open(&impl->format->pb, output.string().c_str(), AVIO_FLAG_WRITE);
+  if (result >= 0) {
+    const auto utf8_path = output.u8string();
+    result = avio_open(&impl->format->pb,
+                       reinterpret_cast<const char*>(utf8_path.c_str()),
+                       AVIO_FLAG_WRITE);
+  }
   if (result >= 0) result = avformat_write_header(impl->format, nullptr);
   if (result < 0) {
     if (impl->format->pb) avio_closep(&impl->format->pb);

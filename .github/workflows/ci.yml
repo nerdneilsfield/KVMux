@@ -12,6 +12,10 @@ jobs:
             preset: linux-debug
           - os: windows-2022
             preset: windows-debug
+          - os: windows-2022
+            preset: windows-debug-headless
+          - os: ubuntu-24.04
+            preset: linux-debug-headless
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +48,27 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }} --parallel
       - name: Test
         run: ctest --preset ${{ matrix.preset }} --output-on-failure
+      - name: Install Windows runtime
+        if: runner.os == 'Windows'
+        run: cmake --install build/${{ matrix.preset }} --prefix stage
+      - name: Check installed Windows executables
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Avoid letting the SDK PATH hide missing DLLs in the installed tree.
+          $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
+          & ./stage/bin/kvmux-relay.exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'Installed relay failed to start' }
+          if (Test-Path ./stage/bin/kvmux.exe) {
+            & ./stage/bin/kvmux.exe --help
+            if ($LASTEXITCODE -ne 0) { throw 'Installed GUI executable failed to load' }
+          }
+      - name: Install Linux runtime
+        if: runner.os == 'Linux'
+        run: |
+          cmake --install build/${{ matrix.preset }} --prefix stage
+          stage/bin/kvmux-relay --help
+          if [ -x stage/bin/kvmux ]; then stage/bin/kvmux --help; fi
   linux-sanitizers:
     runs-on: ubuntu-24.04
     steps:

@@ -67,8 +67,10 @@ static kvmux::RecordingStatus wait(kvmux::Recording& recording,
 static void parse_output(const std::filesystem::path& path,
                          int expected_width = 0, int expected_height = 0) {
   AVFormatContext* context = nullptr;
-  require(avformat_open_input(&context, path.string().c_str(), nullptr,
-                              nullptr) >= 0,
+  const auto utf8_path = path.u8string();
+  require(avformat_open_input(&context,
+                              reinterpret_cast<const char*>(utf8_path.c_str()),
+                              nullptr, nullptr) >= 0,
           "open output");
   require(avformat_find_stream_info(context, nullptr) >= 0, "stream info");
   bool found = false;
@@ -90,8 +92,10 @@ static void parse_output(const std::filesystem::path& path,
 
 static void require_nonblank_jpeg(const std::filesystem::path& path) {
   AVFormatContext* format = nullptr;
-  require(avformat_open_input(&format, path.string().c_str(), nullptr,
-                              nullptr) >= 0,
+  const auto utf8_path = path.u8string();
+  require(avformat_open_input(&format,
+                              reinterpret_cast<const char*>(utf8_path.c_str()),
+                              nullptr, nullptr) >= 0,
           "open JPEG");
   const int stream =
       av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
@@ -130,7 +134,7 @@ static void require_nonblank_jpeg(const std::filesystem::path& path) {
 
 int main() {
   const auto directory =
-      std::filesystem::temp_directory_path() / "kvmux-recording-test";
+      std::filesystem::temp_directory_path() / u8"kvmux-recording-测试";
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   kvmux::Recording recording(directory);

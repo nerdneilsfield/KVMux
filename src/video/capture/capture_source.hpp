@@ -63,6 +63,8 @@ class CaptureSource {
   [[nodiscard]] virtual std::vector<DeviceInfo> enumerate_devices() = 0;
   [[nodiscard]] virtual std::vector<CaptureMode> enumerate_modes(
       const std::string& stable_id) = 0;
+  // Before returning, publish the new generation and requested mode, even if
+  // opening the native device continues asynchronously.
   virtual void start(const CaptureMode& mode) = 0;
   virtual void stop() noexcept = 0;
   [[nodiscard]] virtual std::optional<CaptureSample> take_latest_sample() = 0;

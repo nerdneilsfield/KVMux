@@ -29,3 +29,17 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
   - `kcp/ikcp.c`: `dfd4a9a1c0c928238b10be2b0f10d178b314bccc67ca577f9da8455a1fa0b77d`
   - `kcp/ikcp.h`: `531991aa43f1055d6e9ddf233214bce9e66d63fd55fe95b55a65f295252f6692`
   - `kcp/LICENSE`: `6587fd02a924b97dbd6758b0573ddec056fb494a84f3709c5aaa33ce1f7f029c`
+
+## FFmpeg runtime (not vendored)
+
+- Windows CI SDK: Gyan FFmpeg `8.0.1`, `ffmpeg-8.0.1-full_build-shared.zip`.
+- Archive: https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip
+- SHA-256: `e4a40b46e3a3f3e5f2ed28352bd1fd6c733ae3808a8743682ef7f0d4e20c7d51`.
+- The full shared build includes GPL components. Installation preserves the SDK's
+  root LICENSE and README files under `share/kvmux/licenses/ffmpeg`.
+- Before distributing binaries, retain the exact build configuration, matching
+  FFmpeg and bundled codec-library sources, patches and build instructions, or a
+  valid corresponding-source offer. A link to upstream alone is not a source offer.
+- macOS/Linux use host FFmpeg libraries; their version, enabled features and
+  license obligations depend on the host package. No FFmpeg sources are modified
+  by KVMux, and configure does not download FFmpeg.

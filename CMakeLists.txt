@@ -75,7 +75,7 @@ target_include_directories(kvmux_capture PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src
 target_link_libraries(kvmux_capture PUBLIC kvmux::core)
 if(WIN32)
     target_sources(kvmux_capture PRIVATE src/video/capture/capture_media_foundation.cpp)
-    target_link_libraries(kvmux_capture PRIVATE mfplat mfreadwrite mfuuid ole32)
+    target_link_libraries(kvmux_capture PRIVATE mf mfplat mfreadwrite mfuuid ole32)
 elseif(APPLE)
     target_sources(kvmux_capture PRIVATE src/video/capture/capture_avfoundation.mm)
     target_compile_options(kvmux_capture PRIVATE -fobjc-arc)
@@ -126,9 +126,11 @@ endif()
 
 if(WIN32)
     target_link_libraries(kvmux_core PRIVATE ws2_32)
+    target_compile_definitions(kvmux_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 if(MSVC)
+    target_compile_options(kvmux_core PUBLIC /utf-8)
     target_compile_options(kvmux_core PRIVATE /W4 /permissive-)
     target_compile_options(kvmux_capture PRIVATE /W4 /permissive-)
     if(KVMUX_BUILD_GUI)
@@ -325,6 +327,46 @@ if(BUILD_TESTING)
 endif()
 
 include(GNUInstallDirs)
+if(WIN32)
+    # FFmpeg's shared SDK keeps its DLLs (including codec dependencies) in bin.
+    get_filename_component(kvmux_ffmpeg_prefix "${FFmpeg_INCLUDE_DIR}" DIRECTORY)
+    file(GLOB kvmux_ffmpeg_dlls "${kvmux_ffmpeg_prefix}/bin/*.dll")
+    if(NOT kvmux_ffmpeg_dlls)
+        message(FATAL_ERROR "Windows requires an FFmpeg shared SDK with DLLs beside include/ in bin/")
+    endif()
+    set(kvmux_runtime_dlls ${kvmux_ffmpeg_dlls} "$<TARGET_FILE:kvmux_libserialport>")
+    if(KVMUX_BUILD_GUI)
+        list(APPEND kvmux_runtime_dlls "$<TARGET_FILE:SDL3::SDL3>")
+    endif()
+    # All executables, including CTest binaries, share this output directory.
+    add_custom_target(kvmux_runtime ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${kvmux_runtime_dlls} "$<TARGET_FILE_DIR:kvmux-relay>"
+        COMMAND_EXPAND_LISTS VERBATIM)
+    add_dependencies(kvmux-relay kvmux_runtime)
+    if(KVMUX_BUILD_GUI)
+        add_dependencies(kvmux kvmux_runtime)
+    endif()
+    if(BUILD_TESTING)
+        get_property(kvmux_build_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(target IN LISTS kvmux_build_targets)
+            if(target MATCHES "^kvmux_.*_test$")
+                add_dependencies(${target} kvmux_runtime)
+            endif()
+        endforeach()
+    endif()
+    install(FILES ${kvmux_runtime_dlls} DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    file(GLOB kvmux_ffmpeg_notices
+        "${kvmux_ffmpeg_prefix}/LICENSE*" "${kvmux_ffmpeg_prefix}/README*")
+    install(FILES ${kvmux_ffmpeg_notices}
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux/licenses/ffmpeg")
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        # Debug installs are for local/CI smoke checks, not redistribution.
+        set(CMAKE_INSTALL_DEBUG_LIBRARIES TRUE)
+        set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
+    endif()
+    include(InstallRequiredSystemLibraries)
+endif()
 install(TARGETS kvmux-relay RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 if(KVMUX_BUILD_GUI)
     if(APPLE)
@@ -347,6 +389,9 @@ if(KVMUX_BUILD_GUI)
         install(FILES "${kvmux_branding}/logo.png" "${kvmux_branding}/app-icon.png"
             DESTINATION "${CMAKE_INSTALL_BINDIR}/assets/branding")
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set_target_properties(kvmux PROPERTIES
+                INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+            install(TARGETS SDL3-shared LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
             install(FILES "${kvmux_branding}/app-icon.png"
                 DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/1024x1024/apps" RENAME kvmux.png)
             install(FILES packaging/linux/dev.kvmux.desktop
@@ -355,3 +400,10 @@ if(KVMUX_BUILD_GUI)
     endif()
 endif()
 install(FILES third_party/INVENTORY.md DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux")
+foreach(dependency IN ITEMS SDL imgui libserialport glad nlohmann_json spdlog)
+    file(GLOB dependency_notices
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dependency}/LICENSE*"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dependency}/COPYING*")
+    install(FILES ${dependency_notices}
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux/licenses/${dependency}")
+endforeach()

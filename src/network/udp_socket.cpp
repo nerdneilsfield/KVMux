@@ -10,6 +10,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <mstcpip.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -121,6 +122,18 @@ std::optional<Socket> Socket::bind(std::string_view host, std::uint16_t port,
     return std::nullopt;
   }
   Socket socket(static_cast<std::intptr_t>(raw));
+#ifdef _WIN32
+  // A departed UDP peer must not terminate the shared relay listener. Session
+  // liveness and release are governed by the protocol's existing deadlines.
+  BOOL report_port_unreachable = FALSE;
+  DWORD returned = 0;
+  if (WSAIoctl(raw, SIO_UDP_CONNRESET, &report_port_unreachable,
+               sizeof(report_port_unreachable), nullptr, 0, &returned, nullptr,
+               nullptr) == SOCKET_ERROR) {
+    error = "could not configure UDP ICMP handling";
+    return std::nullopt;
+  }
+#endif
   if (!nonblocking(raw) ||
       ::bind(raw, reinterpret_cast<const sockaddr*>(&endpoint->address_->value),
              sizeof(sockaddr_in)) != 0) {

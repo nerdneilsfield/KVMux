@@ -103,6 +103,71 @@ ctest --preset linux-debug-headless
 The former `dev`, `headless`, `release` and `sanitizers` names are removed.
 Existing build directories are not migrated; configure the new preset once.
 
+## Windows GUI and relay
+
+Use an x64 MSVC developer shell, CMake 3.25 or newer, and Ninja. Install an
+FFmpeg **shared development SDK**, not just `ffmpeg.exe`: its root must contain
+`include/libavcodec/avcodec.h`, MSVC-compatible import libraries in `lib/`, and
+runtime DLLs in `bin/`. CI pins Gyan FFmpeg 8.0.1 full shared with a SHA-256 check.
+Set `CMAKE_PREFIX_PATH` to that SDK root before configuring:
+
+```powershell
+$env:CMAKE_PREFIX_PATH = 'C:/deps/ffmpeg-8.0.1-full_build-shared'
+cmake --preset windows-debug
+cmake --build --preset windows-debug --parallel 2
+ctest --preset windows-debug --output-on-failure
+./build/windows-debug/kvmux.exe
+```
+
+The normal build produces both `kvmux.exe` (Local and Remote GUI) and
+`kvmux-relay.exe`. Use `windows-debug-headless` to build only the relay and
+non-GUI tests. The build copies FFmpeg, libserialport and, for GUI builds, SDL
+DLLs alongside the executables. `cmake --install build/windows-release --prefix
+stage` installs the executables, DLLs and branding assets; build the release
+preset first. Keep the installed `bin` directory together when deploying.
+
+Native capture uses Media Foundation; Windows N editions need their Media
+Feature Pack, and camera privacy settings must allow desktop applications.
+Windows Server installations also require the Media Foundation feature; a
+headless relay build still links the native capture adapter.
+The relay needs access to the selected COM port and inbound UDP 17000/17001.
+These implementation paths still require Windows hardware acceptance.
+
+## Linux GUI and relay
+
+On Ubuntu 24.04, install the compiler, CMake, Ninja and GUI development libraries:
+
+```sh
+sudo apt-get install build-essential cmake ninja-build pkg-config \
+  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+  libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev \
+  libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev \
+  libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev
+make dev JOBS=2
+make test JOBS=2
+build/linux-debug/kvmux
+```
+
+SDL selects X11 or Wayland for the current desktop session. To exercise each
+backend explicitly, start with `SDL_VIDEO_DRIVER=x11` or
+`SDL_VIDEO_DRIVER=wayland` in the corresponding desktop session. Both need an
+OpenGL 3.2-capable driver. Headless relay builds use `make dev HEADLESS=1` and do
+not need these display development packages. Local capture uses V4L2; the user
+must have access to the selected video and serial devices.
+
+After `make release`, install with `cmake --install build/linux-release --prefix
+stage`. Installation includes the vendored SDL shared library and a relative
+runtime search path, so the GUI does not depend on SDL being installed globally.
+FFmpeg and system graphics libraries remain distribution runtime dependencies.
+X11/Wayland input behavior and real capture/control still need platform acceptance.
+
+Windows SDK DLL redistribution must retain the SDK's license notices and matching
+source/build information; the full shared FFmpeg build includes GPL components.
+The install tree is a development staging tree, not a signed release package or
+a complete FFmpeg source offer. See `third_party/INVENTORY.md` before distribution.
+Debug staging includes non-redistributable MSVC debug runtimes for local checks;
+only use Release builds when preparing a distribution.
+
 ## UDP/KCP relay builds
 
 Build both relay and GUI from the current source. Protocol v3 does not negotiate

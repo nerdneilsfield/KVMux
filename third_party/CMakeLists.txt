@@ -29,6 +29,7 @@ if(KVMUX_BUILD_GUI)
     target_include_directories(kvmux_imgui SYSTEM PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/imgui"
         "${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends")
+    target_compile_features(kvmux_imgui PUBLIC cxx_std_20)
     target_link_libraries(kvmux_imgui PUBLIC SDL3::SDL3)
     add_library(kvmux::imgui ALIAS kvmux_imgui)
 endif()
@@ -46,7 +47,13 @@ add_library(spdlog::spdlog_header_only ALIAS kvmux_spdlog)
 
 # libserialport 0.1.2 ships autotools and Visual Studio project files. This
 # target is the KVMux CMake integration for the unchanged upstream sources.
-add_library(kvmux_libserialport STATIC
+if(WIN32)
+    # Upstream's MSVC headers use dllexport/dllimport, not static linkage.
+    set(kvmux_serialport_library_type SHARED)
+else()
+    set(kvmux_serialport_library_type STATIC)
+endif()
+add_library(kvmux_libserialport ${kvmux_serialport_library_type}
     libserialport/serialport.c
     libserialport/timing.c)
 target_include_directories(kvmux_libserialport SYSTEM PUBLIC
@@ -54,7 +61,7 @@ target_include_directories(kvmux_libserialport SYSTEM PUBLIC
 if(WIN32)
     target_sources(kvmux_libserialport PRIVATE libserialport/windows.c)
     target_compile_definitions(kvmux_libserialport PRIVATE LIBSERIALPORT_MSBUILD)
-    target_link_libraries(kvmux_libserialport PRIVATE setupapi)
+    target_link_libraries(kvmux_libserialport PRIVATE setupapi cfgmgr32)
 elseif(APPLE)
     target_sources(kvmux_libserialport PRIVATE libserialport/macosx.c)
     target_compile_definitions(kvmux_libserialport PRIVATE

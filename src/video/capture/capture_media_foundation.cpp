@@ -109,7 +109,9 @@ bool same_mode(const CaptureMode& left, const CaptureMode& right) {
 
 class MediaFoundationCapture final : public CaptureSource {
  public:
-  MediaFoundationCapture() : worker_([this] { worker_main(); }) {
+  MediaFoundationCapture() {
+    // Start only after all mutexes and callback state have been constructed.
+    worker_ = std::thread([this] { worker_main(); });
     std::unique_lock lock(init_mutex_);
     init_cv_.wait(lock, [this] { return initialized_; });
     if (init_error_) {
@@ -139,14 +141,18 @@ class MediaFoundationCapture final : public CaptureSource {
   }
 
   void start(const CaptureMode& mode) override {
+    // Drain the previous reader before publishing a new generation. start()
+    // runs on the session capture thread, not the UI thread.
+    stop();
     {
       std::lock_guard lock(state_mutex_);
+      ++snapshot_.generation;
+      snapshot_.actual_mode = mode;
       snapshot_.state = CaptureState::starting;
       snapshot_.error.clear();
     }
     post([this, mode] {
       try {
-        stop_on_worker();
         start_on_worker(mode);
       } catch (const std::exception& error) {
         stop_on_worker();
@@ -296,7 +302,9 @@ class MediaFoundationCapture final : public CaptureSource {
     std::vector<ComPtr<IMFActivate>> devices;
     devices.reserve(count);
     for (UINT32 index = 0; index < count; ++index) {
-      devices.emplace_back(raw[index]);
+      ComPtr<IMFActivate> device;
+      device.Attach(raw[index]);
+      devices.push_back(std::move(device));
     }
     CoTaskMemFree(raw);
     return devices;
@@ -442,7 +450,6 @@ class MediaFoundationCapture final : public CaptureSource {
     native_type->GetUINT32(MF_MT_YUV_MATRIX, &yuv_matrix);
     {
       std::lock_guard lock(state_mutex_);
-      ++snapshot_.generation;
       snapshot_.actual_mode = actual;
       native_stride_ = static_cast<LONG>(stride_bits);
       sar_numerator_ = sar_numerator;
