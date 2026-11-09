@@ -75,6 +75,7 @@ struct AvfState {
   std::atomic<std::uint64_t> generation{0};
   std::atomic<bool> accepting{false};
   AVCaptureSession* session = nil;
+  AVCaptureDevice* locked_device = nil;
   AVCaptureVideoDataOutput* output = nil;
   id delegate = nil;
 };
@@ -255,6 +256,8 @@ static void tear_down(const std::shared_ptr<AvfState>& state, dispatch_queue_t c
                 });
   [delegate silence];
   [state->session stopRunning];
+  [state->locked_device unlockForConfiguration];
+  state->locked_device = nil;
   state->delegate = nil;
   state->output = nil;
   state->session = nil;
@@ -282,6 +285,11 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
         static_cast<std::uint32_t>(size.width) != requested.width ||
         static_cast<std::uint32_t>(size.height) != requested.height)
       continue;
+    if (fourcc_name(CMFormatDescriptionGetMediaSubType(format.formatDescription)) !=
+        requested.device_format_name)
+      continue;
+    // Keep the requested rational exact. enumerate_modes() publishes
+    // gcd-reduced frame rates, so the same arithmetic applies here.
     const CMTime candidate =
         CMTimeMake(requested.frame_rate.denominator, requested.frame_rate.numerator);
     for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges) {
@@ -305,15 +313,6 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
     set_failure(state, generation, CaptureState::fault, to_utf8(error.localizedDescription));
     return;
   }
-  if (![device lockForConfiguration:&error]) {
-    set_failure(state, generation, CaptureState::fault, to_utf8(error.localizedDescription));
-    return;
-  }
-  device.activeFormat = selected;
-  device.activeVideoMinFrameDuration = frame_duration;
-  device.activeVideoMaxFrameDuration = frame_duration;
-  [device unlockForConfiguration];
-
   AVCaptureSession* session = [[AVCaptureSession alloc] init];
   AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
   output.alwaysDiscardsLateVideoFrames = YES;
@@ -324,7 +323,6 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
   [session beginConfiguration];
   [session addInput:input];
   [session addOutput:output];
-
   OSType chosen = 0;
   NSArray<NSNumber*>* available = output.availableVideoCVPixelFormatTypes;
   const OSType preferences[] = {kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -344,6 +342,19 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
   output.videoSettings = @{(NSString*)kCVPixelBufferPixelFormatTypeKey : @(chosen)};
   [session commitConfiguration];
 
+  // On macOS, committing the session preset can reset the device format.
+  // Pin the native mode after the topology and output settings are committed.
+  if (![device lockForConfiguration:&error]) {
+    set_failure(state, generation, CaptureState::fault, to_utf8(error.localizedDescription));
+    return;
+  }
+  device.activeFormat = selected;
+  device.activeVideoMinFrameDuration = frame_duration;
+  device.activeVideoMaxFrameDuration = frame_duration;
+  // Keep the mode fixed while streaming; unlocking lets macOS restore its
+  // session-selected format. tear_down releases this configuration lock.
+  state->locked_device = device;
+
   KVMuxVideoDelegate* delegate = [[KVMuxVideoDelegate alloc] initWithState:state
                                                                 generation:generation];
   [output setSampleBufferDelegate:delegate queue:callback_queue];
@@ -358,13 +369,26 @@ static void configure(const std::shared_ptr<AvfState>& state, CaptureMode reques
     return;
   }
 
-  CaptureMode actual = requested;
+  // Report the device's delivered reality, never the requested mode; the
+  // driver can still adjust the format while the session starts.
+  AVCaptureDeviceFormat* active = device.activeFormat;
+  CaptureMode actual{};
+  actual.device_id = requested.device_id;
+  if (active == nil) {
+    tear_down(state, callback_queue);
+    set_failure(state, generation, CaptureState::fault,
+                "device active format unavailable after start");
+    return;
+  }
+  const CMVideoDimensions active_size =
+      CMVideoFormatDescriptionGetDimensions(active.formatDescription);
+  actual.width = static_cast<std::uint32_t>(active_size.width);
+  actual.height = static_cast<std::uint32_t>(active_size.height);
   actual.frame_rate = frame_rate_from_duration(device.activeVideoMinFrameDuration);
-  actual.device_format =
-      pixel_format(CMFormatDescriptionGetMediaSubType(selected.formatDescription));
+  actual.device_format = pixel_format(CMFormatDescriptionGetMediaSubType(active.formatDescription));
   actual.delivered_format = pixel_format(chosen);
   actual.device_format_name =
-      fourcc_name(CMFormatDescriptionGetMediaSubType(selected.formatDescription));
+      fourcc_name(CMFormatDescriptionGetMediaSubType(active.formatDescription));
   std::lock_guard lock(state->mutex);
   state->snapshot.actual_mode = std::move(actual);
   state->snapshot.state = CaptureState::streaming;
