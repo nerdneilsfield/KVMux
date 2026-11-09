@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -76,6 +77,9 @@ class KvmSession {
                                      std::uint8_t address = 0);
   [[nodiscard]] bool disconnect_control();
   [[nodiscard]] bool set_mouse_mode(MouseMode mode);
+  // Capture only disconnects the control sink, releases control via the
+  // common path and keeps every control path rejected at KvmSession level.
+  void set_capture_only(bool enabled) noexcept;
   void set_host_key(std::uint16_t usage) noexcept;
   void set_relative_gain(double gain) noexcept;
   // While enabled, an idle preview session wiggles the target pointer every
@@ -124,6 +128,7 @@ class KvmSession {
   void note_session_error(std::string error);
   void note_keep_alive(Clock::time_point now) noexcept;
   [[nodiscard]] bool preview_only() const noexcept;
+  [[nodiscard]] bool control_blocked() const noexcept;
 
   std::unique_ptr<CaptureSource> capture_;
   std::unique_ptr<ControlSink> control_;
@@ -165,6 +170,7 @@ class KvmSession {
   bool video_fresh_{};
 
   bool keep_alive_enabled_{};
+  std::atomic<bool> capture_only_{false};
   Clock::time_point last_control_activity_{};
 
   std::thread mouse_worker_;  // Last member: starts after all state exists.

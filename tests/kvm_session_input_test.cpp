@@ -334,5 +334,41 @@ int main() {
     std::this_thread::sleep_for(50ms);
     require(f.sink->count() == delivered, "no input after shutdown");
   }
+
+  {
+    // Capture only keeps the video path alive and rejects every control
+    // entry point, including the keep-alive wiggle, while the sink is
+    // disconnected.
+    Fixture f;
+    f.session->set_capture_only(true);
+    require(!f.session->connect_control("port", 57600),
+            "capture only refuses a new serial connection");
+    f.session->set_keep_alive(true);
+    f.session->tick(KvmSession::Clock::now() + 61s);
+    require(f.sink->count() == 0,
+            "capture only blocks keep-alive after its interval expires");
+    const auto perimeter = [&] {
+      f.session->tick();
+      f.session->handle_input({InputRelativeMotion{5, 0}});
+      f.session->activate_control();
+      f.session->handle_input({InputKey{0x04, true, false}});
+      (void)f.session->send_special(SpecialKeys::alt_tab);
+      const auto paste = f.session->start_text_paste("k");
+      require(!paste, "capture only refuses text paste");
+      f.session->handle_input(left_down());
+      f.session->handle_input(left_up());
+    };
+    require(eventually([&] {
+              perimeter();
+              std::this_thread::sleep_for(30ms);
+              perimeter();
+              return f.session->snapshot().video_fresh && f.sink->count() == 0;
+            }),
+            "video stays fresh with no submitted control event");
+    require(f.releases() >= 1,
+            "enabling capture only walked the common release path");
+    require(f.session->input_state() == InputState::preview,
+            "capture only keeps the session in preview");
+  }
   return EXIT_SUCCESS;
 }

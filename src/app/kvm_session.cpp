@@ -47,6 +47,21 @@ bool KvmSession::preview_only() const noexcept {
   return input_.state() == InputState::preview;
 }
 
+bool KvmSession::control_blocked() const noexcept {
+  return capture_only_.load(std::memory_order_acquire);
+}
+
+void KvmSession::set_capture_only(bool enabled) noexcept {
+  if (capture_only_.exchange(enabled, std::memory_order_acq_rel) == enabled)
+    return;
+  // Toggling on must walk the same release path as focus loss etc., so a
+  // previously connected session cannot keep half its HID state on target.
+  if (enabled) {
+    request_release();
+    control_->disconnect();
+  }
+}
+
 void KvmSession::note_session_error(std::string error) {
   std::lock_guard lock(mutex_);
   session_error_ = std::move(error);
@@ -129,7 +144,8 @@ bool KvmSession::stop_capture() {
 
 bool KvmSession::connect_control(std::string port, int baud_rate,
                                  std::uint8_t address) {
-  if (!preview_only() || port.empty() || baud_rate <= 0) return false;
+  if (!preview_only() || control_blocked() || port.empty() || baud_rate <= 0)
+    return false;
   {
     std::lock_guard lock(mutex_);
     if (shutting_down_) return false;
@@ -164,7 +180,8 @@ void KvmSession::set_keep_alive(bool enabled) noexcept {
 void KvmSession::note_keep_alive(Clock::time_point now) noexcept {
   if (input_.capture_intended() || input_.injected_active()) {
     last_control_activity_ = now;
-  } else if (keep_alive_enabled_ && input_.state() == InputState::preview &&
+  } else if (keep_alive_enabled_ && !control_blocked() &&
+             input_.state() == InputState::preview &&
              now - last_control_activity_ >= kKeepAliveInterval) {
     last_control_activity_ = now;
     (void)input_.send_keep_alive(now);
@@ -172,11 +189,17 @@ void KvmSession::note_keep_alive(Clock::time_point now) noexcept {
 }
 bool KvmSession::send_special(SpecialKeys keys) {
   std::lock_guard lock(input_mutex_);
+  if (control_blocked()) return false;
   drain_motion_locked();
   return video_fresh_ && input_.send_special(keys);
 }
 TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
   std::lock_guard lock(input_mutex_);
+  if (control_blocked()) {
+    TextMappingResult blocked;
+    blocked.error = TextPasteError::unsupported;
+    return blocked;
+  }
   drain_motion_locked();
   control_->set_control_active(true);
   auto result = input_.start_text(text);
@@ -214,6 +237,7 @@ void KvmSession::set_video_rect(Rect rect) noexcept {
 }
 void KvmSession::activate_control() noexcept {
   std::lock_guard lock(input_mutex_);
+  if (control_blocked()) return;
   drain_motion_locked();
   input_.activate();
 }
@@ -227,6 +251,7 @@ void KvmSession::apply_input_locked(const InputEvent& event) {
 }
 
 void KvmSession::handle_input(const InputEvent& event) {
+  if (control_blocked()) return;
   if (std::holds_alternative<InputRelativeMotion>(event.payload) ||
       std::holds_alternative<InputPointerMotion>(event.payload)) {
     queue_motion(event);

@@ -566,6 +566,7 @@ int main(int argc, char** argv) {
   double chrome_until = 0.0, captured_at = 0.0;
   bool close_connections_when_ready = false;
   bool popup_open = false;
+  bool capture_only = false;
   bool open_text_paste = false;
   std::array<char, 65537> text_paste_buffer{};
   std::size_t text_paste_removed = 0;
@@ -1149,7 +1150,8 @@ int main(int argc, char** argv) {
           ImGui::SameLine();
         }
       }
-      ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
+      ImGui::BeginDisabled(capture_only ||
+                           snapshot.input_state != InputState::preview);
       const auto prepared = map_us_ascii_text(text_paste_buffer.data());
       ImGui::Text("Prepared: %zu characters", prepared.normalized_characters);
       if (ImGui::Button("Type ASCII")) {
@@ -1266,7 +1268,7 @@ int main(int argc, char** argv) {
         } else
           media_message = "Could not queue screenshot.";
       }
-      if (ImGui::MenuItem("Start scrolling")) {
+      if (ImGui::MenuItem("Start scrolling", nullptr, false, !capture_only)) {
         if (recording.start_scroll(*current_frame, *saved_region)) {
           scroll_active = true;
           session->activate_control();
@@ -1351,7 +1353,8 @@ int main(int argc, char** argv) {
           media_actions();
           ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Type ASCII")) open_text_paste = true;
+        if (!capture_only && ImGui::MenuItem("Type ASCII"))
+          open_text_paste = true;
         ImGui::SetNextWindowPos(
             {viewport->Pos.x + menu_icon.pos.x,
              viewport->Pos.y + menu_icon.pos.y + FloatingMenuIcon::size},
@@ -1363,9 +1366,11 @@ int main(int argc, char** argv) {
           ImGui::Separator();
           media_actions();
           ImGui::Separator();
-          if (ImGui::MenuItem("Type ASCII")) open_text_paste = true;
+          if (!capture_only && ImGui::MenuItem("Type ASCII"))
+            open_text_paste = true;
           ImGui::MenuItem("Status overlay", nullptr, &show_status);
-          if (ImGui::MenuItem("Keep target awake", nullptr, &config.keep_alive))
+          if (!capture_only &&
+              ImGui::MenuItem("Keep target awake", nullptr, &config.keep_alive))
             session->set_keep_alive(config.keep_alive);
           if (ImGui::MenuItem(fullscreen ? "Exit fullscreen" : "Fullscreen")) {
             fullscreen = !fullscreen;
@@ -1419,6 +1424,14 @@ int main(int argc, char** argv) {
           if (ImGui::RadioButton("Local", !remote)) requested_remote = false;
           ImGui::SameLine();
           if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
+          ImGui::BeginDisabled(remote);
+          if (ImGui::Checkbox("Capture only", &capture_only))
+            session->set_capture_only(capture_only);
+          ImGui::EndDisabled();
+          if (capture_only)
+            ImGui::SetItemTooltip(
+                "Video and recording only; no serial "
+                "keyboard, mouse or keep-alive.");
           if (requested_remote != remote && !retiring) {
             (void)recording.stop();
             if (scroll_active) {
@@ -1429,6 +1442,7 @@ int main(int argc, char** argv) {
             close_second();
             retire_session();
             remote = requested_remote;
+            if (remote) capture_only = false;
             diagnostics = std::make_shared<Diagnostics>();
             session = std::make_unique<KvmSession>(diagnostics);
             devices.clear();
@@ -1439,6 +1453,7 @@ int main(int argc, char** argv) {
             current_frame.reset();
             renderer.destroy();
             (void)session->set_mouse_mode(config.mouse_mode);
+            session->set_capture_only(capture_only);
             session->set_host_key(config.host_scancode);
             session->set_keep_alive(config.keep_alive);
           }
@@ -1496,6 +1511,7 @@ int main(int argc, char** argv) {
                   session->set_host_key(config.host_scancode);
                   (void)session->set_mouse_mode(config.mouse_mode);
                   session->set_keep_alive(config.keep_alive);
+                  session->set_capture_only(capture_only);
                   (void)session->select_capture(remote_device, remote_mode);
                   current_frame.reset();
                   renderer.destroy();
@@ -1583,8 +1599,10 @@ int main(int argc, char** argv) {
               ImGui::TableSetColumnIndex(2);
               ImGui::TextUnformatted("Baud rate");
               ImGui::TableSetColumnIndex(3);
+              ImGui::BeginDisabled(capture_only);
               ImGui::InputInt("##baud", &config.serial_baud_rate);
               config.serial_baud_rate = std::max(1200, config.serial_baud_rate);
+              ImGui::EndDisabled();
               ImGui::EndTable();
             }
             if (ImGui::Button("Start preview") && selected_device >= 0 &&
@@ -1602,7 +1620,10 @@ int main(int argc, char** argv) {
               }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Connect") && selected_port >= 0) {
+            ImGui::BeginDisabled(capture_only);
+            bool connect_clicked = ImGui::Button("Connect");
+            ImGui::EndDisabled();
+            if (connect_clicked && selected_port >= 0) {
               close_connections_when_ready = true;
               (void)session->connect_control(ports[selected_port].name,
                                              config.serial_baud_rate,
@@ -1665,6 +1686,9 @@ int main(int argc, char** argv) {
                     second_window_id = SDL_GetWindowID(window2);
                     second_device_id = devices[selected_device2].stable_id;
                     session2 = std::make_unique<KvmSession>();
+                    // Screen 2 never owns a control channel already; the
+                    // switch keeps its keep-alive path quiet too.
+                    session2->set_capture_only(true);
                     (void)session2->select_capture(devices[selected_device2],
                                                    modes2[selected_mode2]);
                   } else {
@@ -1695,11 +1719,14 @@ int main(int argc, char** argv) {
             config.sensitivity = sensitivity;
           session->set_relative_gain(config.sensitivity);
           ImGui::SameLine();
-          if (ImGui::Button("Send Ctrl+Alt+Del"))
-            (void)session->send_special(SpecialKeys::control_alt_delete);
+          ImGui::BeginDisabled(capture_only);
+          bool send_ctrl_alt_del = ImGui::Button("Send Ctrl+Alt+Del");
           ImGui::SameLine();
-          if (ImGui::Button("Send Alt+Tab"))
-            (void)session->send_special(SpecialKeys::alt_tab);
+          bool send_alt_tab = ImGui::Button("Send Alt+Tab");
+          ImGui::EndDisabled();
+          if (send_ctrl_alt_del)
+            (void)session->send_special(SpecialKeys::control_alt_delete);
+          if (send_alt_tab) (void)session->send_special(SpecialKeys::alt_tab);
           ImGui::BeginDisabled(snapshot.input_state != InputState::preview);
           ImGui::SetNextItemWidth(150.F);
           const char* aspect_names[] = {"Full frame", "16:9", "16:10", "4:3"};
