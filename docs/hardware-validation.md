@@ -70,3 +70,27 @@ its udev rule matched `1a86/7523/*`. The user subsequently reported finding the
 port. No CH9329 transaction or input-control acceptance was established by
 this discovery. User-facing diagnosis and recovery steps are in
 [LAN relay troubleshooting](lan-relay.md#troubleshooting-usb-serial-port-is-missing-on-jetsonubuntu).
+
+## CH341 direct (libusb) prerequisites
+
+Build and install requirements are in [Building KVMux](building.md#ch341-direct-serial).
+This section records what a hardware run still has to establish. No `1A86:5523`
+device was attached on the Linux host that added the backend (`lsusb` showed
+no `1a86` or `ch34` device). Enumeration of a real `ch341-usb:` port, the
+open-failure text, a CH9329 session at 9600 through that port, and the macOS
+default path are unverified. Pending a macOS run.
+
+Before that run, the host has to meet one of these conditions:
+
+- Linux: permission to open USB `1a86:5523`, and acceptance that opening a
+  `ch341-usb:` name detaches the kernel driver on that device (usually
+  `ch341`). The open does not fall back to a `/dev/tty*` node.
+- Windows: the interface bound to WinUSB, and `LIBUSB_ROOT` set to the
+  official prebuilt tree described in the build document.
+- macOS: WCH `CH34xVCPDriver` left uninstalled. `KVMUX_CH341_USB` defaults to
+  `ON`, so the libusb development files must be present at configure time.
+  Auto-select may choose `ch341-usb:` when that device is listed.
+
+A later record should include the OS, libusb version, USB topology, the
+`ch341-usb:` port name, baud, which driver was bound before open, and whether
+CH9329 reached ready. A successful build is not that record.

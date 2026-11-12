@@ -149,15 +149,23 @@ Evidence:
 
 ### T2：文档与 CI
 
-Status: pending
+Status: done
 Depends on: T1
 Acceptance: B7
 Targets: `docs/building.md`、`docs/hardware-validation.md`、`third_party/INVENTORY.md` 或第三方声明、`.github/workflows/ci.yml`
 
-- [ ] 写明支持版本、安装方式、许可证义务、三个平台的使用前提。
-- [ ] CI 三个平台安装 libusb 开发包（Windows 提供 `LIBUSB_ROOT`）。
-- [ ] 提交 `docs(control): document CH341 libusb backend`。
+- [x] 写明支持版本、安装方式、许可证义务、三个平台的使用前提。
+- [x] CI 三个平台安装 libusb 开发包（Windows 提供 `LIBUSB_ROOT`）。
+- [x] 提交 `docs(control): document CH341 libusb backend`。
+
+Evidence:
+
+- `docs/building.md` 增加 “CH341 direct serial”：`KVMUX_CH341_USB` 的默认值、pkg-config `libusb-1.0`、1.0.27 或更新（本机开发核对的是 1.0.27）、Windows `LIBUSB_ROOT`、LGPL-2.1-or-later，以及 Linux 分离内核驱动和 udev、Windows WinUSB、macOS 不安装 WCH `CH34xVCPDriver`。Ubuntu 安装列表加入 `libusb-1.0-0-dev`。
+- Windows 官方包是发布页的 `libusb-1.0.27.7z`，本机下载后 SHA-256 为 `19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8`。该压缩包没有 `COPYING`。许可证文本来自官方源码包 `libusb-1.0.27.tar.bz2`，SHA-256 `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`。`libusb.h` 写明 LGPL-2.1 或更新版本。这两条哈希写入 `third_party/INVENTORY.md` 和 CI。
+- `.github/workflows/ci.yml`：macOS `brew install` 增加 `pkg-config libusb`；两处 Ubuntu `apt-get` 增加 `libusb-1.0-0-dev`；Windows 在配置前下载并校验上述两个包，解压后把 `COPYING` 放到 `LIBUSB_ROOT`，并设置该环境变量。CMake 仍不下载 libusb。
+- `docs/hardware-validation.md` 只记前提和未验证状态。本机 `lsusb` 没有 `1a86`/`ch34`。枚举、打开失败文案、9600 上的 CH9329、macOS 默认路径：未验证（无硬件），待用户在 macOS 上测试。自检命令的操作步骤留给 probe 计划 T2，这里没有写。
+- 本任务没有改 C++。提交前 `make format-check` 退出码 2，仍只有 `tests/codec_startup_fallback_test.cpp:21`。cppcheck 退出码 1，仍只有 `src/network/relay_server.cpp:566`。`make test` 27 项中 26 项通过，real 60.07 秒。这次整套测试里 `relay_client` 停在 `chunked_ascii_paste_loopback`（`tests/relay_client_test.cpp:291`）。紧接着单独重跑 `relay_client`：`chunked_ascii_paste_loopback` 通过，失败回到 `paste_keepalive_blackholed_status` 的 `tests/relay_integration_fakes.hpp:216`。clang-tidy 在 T1 最后一次 C++ 修改之后已经对本次文件复跑过，这次没有新的第一方源文件。
 
 ## 进度
 
-T1 完成。下一步 T2。
+T1 与 T2 完成。

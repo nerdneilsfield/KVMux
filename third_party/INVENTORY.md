@@ -43,3 +43,26 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 - macOS/Linux use host FFmpeg libraries; their version, enabled features and
   license obligations depend on the host package. No FFmpeg sources are modified
   by KVMux, and configure does not download FFmpeg.
+
+## libusb runtime (not vendored)
+
+- Not downloaded by CMake and not stored under `third_party/`.
+- License: LGPL-2.1-or-later. Upstream `COPYING` is the GNU Lesser General
+  Public License, version 2.1, and `libusb.h` grants version 2.1 or any later
+  version. KVMux does not modify libusb.
+- Development verified with 1.0.27 (`pkg-config --modversion libusb-1.0` on the
+  Linux host used for this change). Use 1.0.27 or newer. Ubuntu 24.04's
+  `libusb-1.0-0-dev` is 1.0.27. A macOS Homebrew install may be newer.
+- Linux and macOS: pkg-config module `libusb-1.0`.
+- Windows CI binary: official `libusb-1.0.27.7z`.
+  Archive: https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.7z
+  SHA-256: `19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8`.
+  That archive has the DLL and import library. It does not include `COPYING`.
+- Windows license text: official source `libusb-1.0.27.tar.bz2`.
+  Archive: https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2
+  SHA-256: `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`.
+  CI copies `libusb-1.0.27/COPYING` to the root of `LIBUSB_ROOT`. The Windows
+  build then copies `libusb-1.0.dll` and that `COPYING` next to the executables.
+- A binary distribution must ship the LGPL notice and a corresponding-source
+  offer for the libusb version that was actually linked. A link to upstream
+  alone is not that offer.

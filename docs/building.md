@@ -122,7 +122,9 @@ ctest --preset windows-debug --output-on-failure
 The normal build produces both `kvmux.exe` (Local and Remote GUI) and
 `kvmux-relay.exe`. Use `windows-debug-headless` to build only the relay and
 non-GUI tests. The build copies FFmpeg, libserialport and, for GUI builds, SDL
-DLLs alongside the executables. `cmake --install build/windows-release --prefix
+DLLs alongside the executables. When the CH341 direct backend is compiled it
+also copies `libusb-1.0.dll`, and a `COPYING` or `LICENSE` file from
+`LIBUSB_ROOT` when that file is present. `cmake --install build/windows-release --prefix
 stage` installs the executables, DLLs and branding assets; build the release
 preset first. Keep the installed `bin` directory together when deploying.
 
@@ -140,6 +142,7 @@ On Ubuntu 24.04, install the compiler, CMake, Ninja and GUI development librarie
 ```sh
 sudo apt-get install build-essential cmake ninja-build pkg-config \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+  libusb-1.0-0-dev \
   libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev \
   libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev
@@ -167,6 +170,60 @@ The install tree is a development staging tree, not a signed release package or
 a complete FFmpeg source offer. See `third_party/INVENTORY.md` before distribution.
 Debug staging includes non-redistributable MSVC debug runtimes for local checks;
 only use Release builds when preparing a distribution.
+
+## CH341 direct serial
+
+`KVMUX_CH341_USB` selects a libusb backend for WCH `1A86:5523`. A port name
+`ch341-usb:<bus>-<port path>` (for example `ch341-usb:1-2.3`) uses that
+backend. Every other name stays on libserialport. The option accepts only
+`AUTO`, `ON`, or `OFF`.
+
+| Host | Default | When libusb is missing |
+| --- | --- | --- |
+| macOS | `ON` | Configure fails. |
+| Linux, Windows | `AUTO` | Configure prints that the backend is not compiled and continues. |
+
+`OFF` does not compile the backend and lists no `ch341-usb:` ports. Opening
+that name then fails with `未编译 CH341 direct 支持`. `ON` fails configure
+when the development files are missing. KVMux does not download or vendor
+libusb.
+
+Linux and macOS discover pkg-config module `libusb-1.0`. Use 1.0.27 or newer.
+This tree was developed against 1.0.27. Ubuntu 24.04's `libusb-1.0-0-dev` is
+1.0.27. On macOS, `brew install libusb` may install a newer release; install
+`pkg-config` as well so CMake can see the module. Windows reads `LIBUSB_ROOT`
+(a CMake variable or the same environment variable) as the official prebuilt
+tree from
+`libusb-1.0.27.7z`
+(<https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.7z>,
+SHA-256 `19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8`).
+That tree must contain `include/libusb.h` or `include/libusb-1.0/libusb.h`,
+and for an x64 MSVC build `VS2022/MS64/dll/libusb-1.0.dll` together with
+`libusb-1.0.lib`. The official `.7z` does not contain the license text. Copy
+`COPYING` from the official source tarball
+`libusb-1.0.27.tar.bz2`
+(<https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2>,
+SHA-256 `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`)
+to the root of `LIBUSB_ROOT`. The build then installs it beside the DLL.
+
+libusb is LGPL-2.1-or-later and is linked dynamically. KVMux does not modify
+it. A binary distribution keeps that license notice and a corresponding-source
+offer for the libusb version that was linked. See `third_party/INVENTORY.md`.
+
+These platform prerequisites are documented here. They are not hardware
+acceptance:
+
+- Linux: opening `ch341-usb:` detaches the kernel driver bound to that device,
+  usually `ch341`, and does not fall back to a `/dev/tty*` node. The process
+  needs permission to open the USB device. One udev rule that grants it is
+  `SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="5523", MODE="0660", GROUP="plugdev"`.
+- Windows: bind the interface to WinUSB with Zadig. A device left on another
+  driver fails the open with `设备没有绑定 WinUSB，需用 Zadig 绑定`.
+- macOS: leave the WCH vendor driver `CH34xVCPDriver` uninstalled. If that
+  driver owns the interface, open fails with the busy or permission text and
+  does not fall back to `/dev/cu.*`. Auto-select on macOS can choose a
+  `ch341-usb:` entry. Linux and Windows auto-select keep the system serial
+  port unless the `ch341-usb:` name is requested explicitly.
 
 ## UDP/KCP relay builds
 
