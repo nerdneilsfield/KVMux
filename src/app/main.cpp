@@ -30,6 +30,19 @@
 namespace {
 using namespace kvmux;
 
+enum class VideoSource { local, relay };
+enum class ControlTarget { local_serial, relay, none };
+
+struct TrafficRate {
+  std::optional<relay::TrafficSnapshot> baseline;
+  std::chrono::steady_clock::time_point sampled_at{};
+  std::optional<double> bytes_per_second;
+  void clear() noexcept {
+    baseline.reset();
+    bytes_per_second.reset();
+  }
+};
+
 // Keep these base colors aligned with assets/branding/logo.svg.
 constexpr ImVec4 brand_color(unsigned rgb, float alpha = 1.F) {
   return {static_cast<float>((rgb >> 16) & 255) / 255.F,
@@ -491,19 +504,21 @@ int main(int argc, char** argv) {
   session->set_host_key(config.host_scancode);
   session->set_relative_gain(config.sensitivity);
   session->set_keep_alive(config.keep_alive);
-  bool remote = false;
-  std::shared_ptr<relay::RelayClient> remote_client;
-  std::optional<relay::TrafficSnapshot> traffic_baseline;
-  std::chrono::steady_clock::time_point traffic_sampled_at{};
-  std::optional<double> video_bytes_per_second, control_bytes_per_second;
-  char remote_host[64] = "127.0.0.1";
-  int control_port = 17000, video_port = 17001;
+  VideoSource video_source = VideoSource::local;
+  ControlTarget control_target = ControlTarget::local_serial;
+  std::shared_ptr<relay::RelayClient> video_client;
+  std::shared_ptr<relay::RelayClient> control_client;
+  TrafficRate video_rate, control_rate;
+  char video_host[64] = "127.0.0.1";
+  char control_host[64] = "127.0.0.1";
+  int video_control_port = 17000, video_port = 17001;
+  int control_relay_port = 17000;
   std::vector<std::future<void>> retired_sessions;
   auto retire_session = [&] {
-    remote_client.reset();
-    traffic_baseline.reset();
-    video_bytes_per_second.reset();
-    control_bytes_per_second.reset();
+    video_client.reset();
+    control_client.reset();
+    video_rate.clear();
+    control_rate.clear();
     auto old = std::move(session);
     retired_sessions.push_back(
         std::async(std::launch::async, [old = std::move(old)]() mutable {
@@ -622,6 +637,122 @@ int main(int argc, char** argv) {
       media_message = "Select a larger region.";
     }
     region_confirm_requested = false;
+  };
+  const auto rebuild_local_session = [&] {
+    (void)recording.stop();
+    if (scroll_active) {
+      recording.cancel_scroll();
+      scroll_active = false;
+      scroll_sample_after.reset();
+    }
+    close_second();
+    retire_session();
+    capture_only = control_target == ControlTarget::none;
+    diagnostics = std::make_shared<Diagnostics>();
+    session = std::make_unique<KvmSession>(diagnostics);
+    devices.clear();
+    modes.clear();
+    selected_device = selected_mode = -1;
+    modes_future.reset();
+    devices_future = session->enumerate_capture_devices();
+    current_frame.reset();
+    renderer.destroy();
+    (void)session->set_mouse_mode(config.mouse_mode);
+    session->set_capture_only(capture_only);
+    session->set_host_key(config.host_scancode);
+    session->set_keep_alive(config.keep_alive);
+  };
+  // Relay clients are built here, not on the selector change. The selector
+  // only releases and rebuilds a local session; Connect uses the endpoints
+  // the user has typed. A video relay still needs its control port for the
+  // handshake. Control-only has no media port on the form, so its unused
+  // remote video port stays 0. Matching host and control port collapse to
+  // one both client. A separate control client is started here because
+  // capture start does not run it.
+  const auto connect_relay = [&] {
+    const bool want_video = video_source == VideoSource::relay;
+    const bool want_control = control_target == ControlTarget::relay;
+    const bool same = want_video && want_control &&
+                      std::strcmp(video_host, control_host) == 0 &&
+                      video_control_port == control_relay_port;
+    std::shared_ptr<relay::RelayClient> new_video;
+    std::shared_ptr<relay::RelayClient> new_control;
+    const auto make_client = [&](relay::wire::RelayRole role, const char* host,
+                                 int control, int video) {
+      relay::ClientOptions options{host, static_cast<std::uint16_t>(control),
+                                   static_cast<std::uint16_t>(video)};
+      options.decoder_backend = config.decoder_backend;
+      options.role = role;
+      return std::make_shared<relay::RelayClient>(std::move(options));
+    };
+    if (same) {
+      new_video = new_control =
+          make_client(relay::wire::RelayRole::both, video_host,
+                      video_control_port, video_port);
+    } else {
+      if (want_video)
+        new_video = make_client(relay::wire::RelayRole::video, video_host,
+                                video_control_port, video_port);
+      if (want_control)
+        new_control = make_client(relay::wire::RelayRole::control, control_host,
+                                  control_relay_port, 0);
+    }
+    std::unique_ptr<relay::NetworkCaptureSource> network_capture;
+    DeviceInfo relay_device;
+    CaptureMode relay_mode;
+    if (new_video) {
+      network_capture =
+          std::make_unique<relay::NetworkCaptureSource>(new_video);
+      const auto relay_devices = network_capture->enumerate_devices();
+      if (relay_devices.empty()) {
+        media_message = "Relay returned no capture devices.";
+        return;
+      }
+      relay_device = relay_devices.front();
+      const auto relay_modes =
+          network_capture->enumerate_modes(relay_device.stable_id);
+      if (relay_modes.empty()) {
+        media_message = "Relay returned no capture modes.";
+        return;
+      }
+      relay_mode = relay_modes.front();
+    }
+    if (want_control) close_connections_when_ready = true;
+    close_second();
+    retire_session();
+    video_client = std::move(new_video);
+    control_client = std::move(new_control);
+    diagnostics = std::make_shared<Diagnostics>();
+    std::unique_ptr<CaptureSource> capture =
+        video_client
+            ? std::unique_ptr<CaptureSource>(std::move(network_capture))
+            : create_platform_capture_source();
+    std::unique_ptr<ControlSink> sink =
+        control_client
+            ? std::unique_ptr<ControlSink>(
+                  std::make_unique<relay::NetworkControlSink>(control_client))
+            : std::unique_ptr<ControlSink>(
+                  std::make_unique<Ch9329ControlSink>(diagnostics));
+    devices_future = {};
+    modes_future.reset();
+    devices.clear();
+    modes.clear();
+    selected_device = selected_mode = -1;
+    session = std::make_unique<KvmSession>(std::move(capture), std::move(sink),
+                                           diagnostics);
+    session->set_host_key(config.host_scancode);
+    (void)session->set_mouse_mode(config.mouse_mode);
+    session->set_keep_alive(config.keep_alive);
+    capture_only = control_target == ControlTarget::none;
+    session->set_capture_only(capture_only);
+    if (video_client)
+      (void)session->select_capture(relay_device, relay_mode);
+    else
+      devices_future = session->enumerate_capture_devices();
+    if (control_client && control_client != video_client)
+      control_client->start();
+    current_frame.reset();
+    renderer.destroy();
   };
 
   while (running) {
@@ -896,7 +1027,7 @@ int main(int argc, char** argv) {
       selected_mode = modes.empty() ? -1 : 0;
       modes_future.reset();
     }
-    if (!remote && open_connections &&
+    if (control_target == ControlTarget::local_serial && open_connections &&
         session->snapshot().input_state == InputState::preview &&
         std::chrono::steady_clock::now() >= next_serial_scan) {
       ports = enumerate_serial_ports();
@@ -978,42 +1109,46 @@ int main(int argc, char** argv) {
                   std::to_string(current_frame->frame->height)
             : "--";
     diagnostics->set_capture_mode(
-        remote ? "Relay MJPEG (decoded video: " + resolution + ")"
+        video_source == VideoSource::relay
+            ? "Relay MJPEG (decoded video: " + resolution + ")"
         : snapshot.capture.actual_mode.width
             ? mode_text(snapshot.capture.actual_mode)
             : "--");
-    const bool relay_connected =
-        remote_client && snapshot.capture.state == CaptureState::streaming &&
-        snapshot.control.state != ControlConnectionState::disconnected &&
-        snapshot.control.state != ControlConnectionState::fault;
-    if (relay_connected) {
+    const auto sample_rate = [](TrafficRate& rate,
+                                const relay::TrafficSnapshot& traffic,
+                                auto bytes_of) {
       const auto now = std::chrono::steady_clock::now();
-      const auto traffic = remote_client->traffic_snapshot();
-      if (!traffic_baseline) {
-        traffic_baseline = traffic;
-        traffic_sampled_at = now;
-      } else if (const double seconds =
-                     std::chrono::duration<double>(now - traffic_sampled_at)
-                         .count();
-                 seconds >= 1.0) {
-        video_bytes_per_second =
-            static_cast<double>(traffic.video_received_bytes -
-                                traffic_baseline->video_received_bytes) /
-            seconds;
-        control_bytes_per_second =
-            (static_cast<double>(traffic.control_received_bytes -
-                                 traffic_baseline->control_received_bytes) +
-             static_cast<double>(traffic.control_sent_bytes -
-                                 traffic_baseline->control_sent_bytes)) /
-            seconds;
-        traffic_baseline = traffic;
-        traffic_sampled_at = now;
+      if (!rate.baseline) {
+        rate.baseline = traffic;
+        rate.sampled_at = now;
+        return;
       }
-    } else {
-      traffic_baseline.reset();
-      video_bytes_per_second.reset();
-      control_bytes_per_second.reset();
-    }
+      const double seconds =
+          std::chrono::duration<double>(now - rate.sampled_at).count();
+      if (seconds < 1.0) return;
+      rate.bytes_per_second =
+          static_cast<double>(bytes_of(traffic) - bytes_of(*rate.baseline)) /
+          seconds;
+      rate.baseline = traffic;
+      rate.sampled_at = now;
+    };
+    if (video_client && snapshot.capture.state == CaptureState::streaming)
+      sample_rate(video_rate, video_client->traffic_snapshot(),
+                  [](const relay::TrafficSnapshot& traffic) {
+                    return traffic.video_received_bytes;
+                  });
+    else
+      video_rate.clear();
+    if (control_client &&
+        snapshot.control.state != ControlConnectionState::disconnected &&
+        snapshot.control.state != ControlConnectionState::fault)
+      sample_rate(control_rate, control_client->traffic_snapshot(),
+                  [](const relay::TrafficSnapshot& traffic) {
+                    return traffic.control_received_bytes +
+                           traffic.control_sent_bytes;
+                  });
+    else
+      control_rate.clear();
     diagnostics->set_mailbox_overwrites(snapshot.capture.overwritten_samples,
                                         snapshot.video.overwritten_frames);
     diagnostics->set_pixel_path(renderer.snapshot().pixel_path);
@@ -1420,46 +1555,41 @@ int main(int argc, char** argv) {
           const bool retiring = !retired_sessions.empty();
           if (retiring) ImGui::TextUnformatted("Stopping previous session...");
           ImGui::BeginDisabled(retiring);
-          bool requested_remote = remote;
-          if (ImGui::RadioButton("Local", !remote)) requested_remote = false;
+          auto requested_video = video_source;
+          auto requested_control = control_target;
+          ImGui::TextUnformatted("Video source");
           ImGui::SameLine();
-          if (ImGui::RadioButton("Remote", remote)) requested_remote = true;
-          ImGui::BeginDisabled(remote);
-          if (ImGui::Checkbox("Capture only", &capture_only))
-            session->set_capture_only(capture_only);
-          ImGui::EndDisabled();
-          if (capture_only)
-            ImGui::SetItemTooltip(
-                "Video and recording only; no serial "
-                "keyboard, mouse or keep-alive.");
-          if (requested_remote != remote && !retiring) {
-            (void)recording.stop();
-            if (scroll_active) {
-              recording.cancel_scroll();
-              scroll_active = false;
-              scroll_sample_after.reset();
-            }
-            close_second();
-            retire_session();
-            remote = requested_remote;
-            if (remote) capture_only = false;
-            diagnostics = std::make_shared<Diagnostics>();
-            session = std::make_unique<KvmSession>(diagnostics);
-            devices.clear();
-            modes.clear();
-            selected_device = selected_mode = -1;
-            modes_future.reset();
-            devices_future = session->enumerate_capture_devices();
-            current_frame.reset();
-            renderer.destroy();
-            (void)session->set_mouse_mode(config.mouse_mode);
-            session->set_capture_only(capture_only);
-            session->set_host_key(config.host_scancode);
-            session->set_keep_alive(config.keep_alive);
+          if (ImGui::RadioButton("Local device",
+                                 video_source == VideoSource::local))
+            requested_video = VideoSource::local;
+          ImGui::SameLine();
+          if (ImGui::RadioButton("Relay##video",
+                                 video_source == VideoSource::relay))
+            requested_video = VideoSource::relay;
+          ImGui::TextUnformatted("Control target");
+          ImGui::SameLine();
+          if (ImGui::RadioButton("Local serial",
+                                 control_target == ControlTarget::local_serial))
+            requested_control = ControlTarget::local_serial;
+          ImGui::SameLine();
+          if (ImGui::RadioButton("Relay##control",
+                                 control_target == ControlTarget::relay))
+            requested_control = ControlTarget::relay;
+          ImGui::SameLine();
+          if (ImGui::RadioButton("None", control_target == ControlTarget::none))
+            requested_control = ControlTarget::none;
+          ImGui::SetItemTooltip(
+              "Video and recording only; no serial "
+              "keyboard, mouse or keep-alive.");
+          if (!retiring && (requested_video != video_source ||
+                            requested_control != control_target)) {
+            video_source = requested_video;
+            control_target = requested_control;
+            rebuild_local_session();
           }
-          if (remote) {
-            ImGui::InputText("IPv4 host", remote_host, sizeof(remote_host));
-            ImGui::InputInt("Control port", &control_port);
+          if (video_source == VideoSource::relay) {
+            ImGui::InputText("Video host", video_host, sizeof(video_host));
+            ImGui::InputInt("Video control port", &video_control_port);
             ImGui::InputInt("Video port", &video_port);
             if (ImGui::BeginCombo(
                     "Decode", decoder_backend_label(config.decoder_backend))) {
@@ -1472,67 +1602,45 @@ int main(int argc, char** argv) {
               }
               ImGui::EndCombo();
             }
+          }
+          if (control_target == ControlTarget::relay) {
+            ImGui::InputText("Control host", control_host,
+                             sizeof(control_host));
+            ImGui::InputInt("Control port", &control_relay_port);
+          }
+          if (video_source == VideoSource::relay ||
+              control_target == ControlTarget::relay) {
+            const bool video_ports_ok =
+                video_source != VideoSource::relay ||
+                (video_control_port > 0 && video_control_port <= 65535 &&
+                 video_port > 0 && video_port <= 65535);
+            const bool control_port_ok =
+                control_target != ControlTarget::relay ||
+                (control_relay_port > 0 && control_relay_port <= 65535);
             if (ImGui::Button("Connect relay") && retired_sessions.empty() &&
-                control_port > 0 && control_port <= 65535 && video_port > 0 &&
-                video_port <= 65535) {
-              relay::ClientOptions client_options{
-                  remote_host, static_cast<std::uint16_t>(control_port),
-                  static_cast<std::uint16_t>(video_port)};
-              client_options.decoder_backend = config.decoder_backend;
-              auto client = std::make_shared<relay::RelayClient>(
-                  std::move(client_options));
-              auto capture =
-                  std::make_unique<relay::NetworkCaptureSource>(client);
-              const auto remote_devices = capture->enumerate_devices();
-              if (remote_devices.empty()) {
-                media_message = "Relay returned no capture devices.";
-              } else {
-                const auto remote_device = remote_devices.front();
-                const auto remote_modes =
-                    capture->enumerate_modes(remote_device.stable_id);
-                if (remote_modes.empty()) {
-                  media_message = "Relay returned no capture modes.";
-                } else {
-                  const auto remote_mode = remote_modes.front();
-                  close_connections_when_ready = true;
-                  close_second();
-                  retire_session();
-                  devices_future = {};
-                  modes_future.reset();
-                  devices.clear();
-                  modes.clear();
-                  selected_device = selected_mode = -1;
-                  remote_client = client;
-                  diagnostics = std::make_shared<Diagnostics>();
-                  session = std::make_unique<KvmSession>(
-                      std::move(capture),
-                      std::make_unique<relay::NetworkControlSink>(client),
-                      diagnostics);
-                  session->set_host_key(config.host_scancode);
-                  (void)session->set_mouse_mode(config.mouse_mode);
-                  session->set_keep_alive(config.keep_alive);
-                  session->set_capture_only(capture_only);
-                  (void)session->select_capture(remote_device, remote_mode);
-                  current_frame.reset();
-                  renderer.destroy();
-                }
-              }
-            }
+                video_ports_ok && control_port_ok)
+              connect_relay();
             ImGui::SameLine();
-            if (ImGui::Button("Disconnect relay")) {
+            if (ImGui::Button("Disconnect relay") &&
+                (video_client || control_client)) {
               session->release_control();
-              (void)session->stop_capture();
-              (void)session->disconnect_control();
-              remote_client.reset();
-              traffic_baseline.reset();
-              video_bytes_per_second.reset();
-              control_bytes_per_second.reset();
-              current_frame.reset();
-              renderer.destroy();
+              if (video_client) {
+                (void)session->stop_capture();
+                video_rate.clear();
+                current_frame.reset();
+                renderer.destroy();
+              }
+              if (control_client) {
+                (void)session->disconnect_control();
+                control_rate.clear();
+              }
+              video_client.reset();
+              control_client.reset();
             }
           }
           ImGui::EndDisabled();
-          if (!remote) {
+          if (video_source == VideoSource::local ||
+              control_target == ControlTarget::local_serial) {
             if (ImGui::BeginTable("connections", 4,
                                   ImGuiTableFlags_SizingStretchProp)) {
               ImGui::TableSetupColumn("setting",
@@ -1544,68 +1652,77 @@ int main(int argc, char** argv) {
               ImGui::TableSetupColumn("choice2",
                                       ImGuiTableColumnFlags_WidthStretch, 1.F);
               ImGui::TableNextRow();
-              ImGui::TableSetColumnIndex(0);
-              ImGui::TextUnformatted("Capture device");
-              ImGui::TableSetColumnIndex(1);
-              if (ImGui::BeginCombo(
-                      "##capture_device",
-                      selected_device >= 0 &&
-                              selected_device < static_cast<int>(devices.size())
-                          ? devices[selected_device].display_name.c_str()
-                          : "Select device")) {
-                for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
-                  if (ImGui::Selectable(devices[i].display_name.c_str(),
-                                        i == selected_device)) {
-                    selected_device = i;
-                    modes.clear();
-                    selected_mode = -1;
-                    modes_future =
-                        session->enumerate_capture_modes(devices[i].stable_id);
+              if (video_source == VideoSource::local) {
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted("Capture device");
+                ImGui::TableSetColumnIndex(1);
+                if (ImGui::BeginCombo(
+                        "##capture_device",
+                        selected_device >= 0 &&
+                                selected_device <
+                                    static_cast<int>(devices.size())
+                            ? devices[selected_device].display_name.c_str()
+                            : "Select device")) {
+                  for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
+                    if (ImGui::Selectable(devices[i].display_name.c_str(),
+                                          i == selected_device)) {
+                      selected_device = i;
+                      modes.clear();
+                      selected_mode = -1;
+                      modes_future = session->enumerate_capture_modes(
+                          devices[i].stable_id);
+                    }
                   }
+                  ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
               }
-              ImGui::TableSetColumnIndex(2);
-              ImGui::TextUnformatted("Serial port");
-              ImGui::TableSetColumnIndex(3);
-              if (ImGui::BeginCombo(
-                      "##serial_port",
-                      selected_port >= 0 &&
-                              selected_port < static_cast<int>(ports.size())
-                          ? ports[selected_port].name.c_str()
-                          : "Select port")) {
-                for (int i = 0; i < static_cast<int>(ports.size()); ++i)
-                  if (ImGui::Selectable(ports[i].name.c_str(),
-                                        i == selected_port))
-                    selected_port = i;
-                ImGui::EndCombo();
+              if (control_target == ControlTarget::local_serial) {
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted("Serial port");
+                ImGui::TableSetColumnIndex(3);
+                if (ImGui::BeginCombo(
+                        "##serial_port",
+                        selected_port >= 0 &&
+                                selected_port < static_cast<int>(ports.size())
+                            ? ports[selected_port].name.c_str()
+                            : "Select port")) {
+                  for (int i = 0; i < static_cast<int>(ports.size()); ++i)
+                    if (ImGui::Selectable(ports[i].name.c_str(),
+                                          i == selected_port))
+                      selected_port = i;
+                  ImGui::EndCombo();
+                }
               }
               ImGui::TableNextRow();
-              ImGui::TableSetColumnIndex(0);
-              ImGui::TextUnformatted("Capture mode");
-              ImGui::TableSetColumnIndex(1);
-              if (ImGui::BeginCombo(
-                      "##capture_mode",
-                      selected_mode >= 0 &&
-                              selected_mode < static_cast<int>(modes.size())
-                          ? mode_text(modes[selected_mode]).c_str()
-                          : "Select mode")) {
-                for (int i = 0; i < static_cast<int>(modes.size()); ++i)
-                  if (ImGui::Selectable(mode_text(modes[i]).c_str(),
-                                        i == selected_mode))
-                    selected_mode = i;
-                ImGui::EndCombo();
+              if (video_source == VideoSource::local) {
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted("Capture mode");
+                ImGui::TableSetColumnIndex(1);
+                if (ImGui::BeginCombo(
+                        "##capture_mode",
+                        selected_mode >= 0 &&
+                                selected_mode < static_cast<int>(modes.size())
+                            ? mode_text(modes[selected_mode]).c_str()
+                            : "Select mode")) {
+                  for (int i = 0; i < static_cast<int>(modes.size()); ++i)
+                    if (ImGui::Selectable(mode_text(modes[i]).c_str(),
+                                          i == selected_mode))
+                      selected_mode = i;
+                  ImGui::EndCombo();
+                }
               }
-              ImGui::TableSetColumnIndex(2);
-              ImGui::TextUnformatted("Baud rate");
-              ImGui::TableSetColumnIndex(3);
-              ImGui::BeginDisabled(capture_only);
-              ImGui::InputInt("##baud", &config.serial_baud_rate);
-              config.serial_baud_rate = std::max(1200, config.serial_baud_rate);
-              ImGui::EndDisabled();
+              if (control_target == ControlTarget::local_serial) {
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted("Baud rate");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::InputInt("##baud", &config.serial_baud_rate);
+                config.serial_baud_rate =
+                    std::max(1200, config.serial_baud_rate);
+              }
               ImGui::EndTable();
             }
-            if (ImGui::Button("Start preview") && selected_device >= 0 &&
+            if (video_source == VideoSource::local &&
+                ImGui::Button("Start preview") && selected_device >= 0 &&
                 selected_mode >= 0) {
               if (window2 &&
                   devices[selected_device].stable_id == second_device_id) {
@@ -1619,86 +1736,88 @@ int main(int argc, char** argv) {
                 renderer.destroy();
               }
             }
-            ImGui::SameLine();
-            ImGui::BeginDisabled(capture_only);
-            bool connect_clicked = ImGui::Button("Connect");
-            ImGui::EndDisabled();
-            if (connect_clicked && selected_port >= 0) {
-              close_connections_when_ready = true;
-              (void)session->connect_control(ports[selected_port].name,
-                                             config.serial_baud_rate,
-                                             config.serial_address);
+            if (control_target == ControlTarget::local_serial) {
+              if (video_source == VideoSource::local) ImGui::SameLine();
+              if (ImGui::Button("Connect") && selected_port >= 0) {
+                close_connections_when_ready = true;
+                (void)session->connect_control(ports[selected_port].name,
+                                               config.serial_baud_rate,
+                                               config.serial_address);
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Disconnect"))
+                (void)session->disconnect_control();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Disconnect"))
-              (void)session->disconnect_control();
             // shortcut: screen 2 is not persisted and takes input in Relative
             // mode only; upgrade once absolute coordinates span both screens.
-            ImGui::SeparatorText("Second screen (Relative mouse only)");
-            if (!window2) {
-              if (ImGui::BeginCombo(
-                      "Screen 2 device",
-                      selected_device2 >= 0 &&
-                              selected_device2 <
-                                  static_cast<int>(devices.size())
-                          ? devices[selected_device2].display_name.c_str()
-                          : "Select device")) {
-                for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
-                  if (devices[i].stable_id == primary_device_id) continue;
-                  if (ImGui::Selectable(devices[i].display_name.c_str(),
-                                        i == selected_device2)) {
-                    selected_device2 = i;
-                    modes2.clear();
-                    selected_mode2 = -1;
-                    modes2_future =
-                        session->enumerate_capture_modes(devices[i].stable_id);
+            if (video_source == VideoSource::local) {
+              ImGui::SeparatorText("Second screen (Relative mouse only)");
+              if (!window2) {
+                if (ImGui::BeginCombo(
+                        "Screen 2 device",
+                        selected_device2 >= 0 &&
+                                selected_device2 <
+                                    static_cast<int>(devices.size())
+                            ? devices[selected_device2].display_name.c_str()
+                            : "Select device")) {
+                  for (int i = 0; i < static_cast<int>(devices.size()); ++i) {
+                    if (devices[i].stable_id == primary_device_id) continue;
+                    if (ImGui::Selectable(devices[i].display_name.c_str(),
+                                          i == selected_device2)) {
+                      selected_device2 = i;
+                      modes2.clear();
+                      selected_mode2 = -1;
+                      modes2_future = session->enumerate_capture_modes(
+                          devices[i].stable_id);
+                    }
                   }
+                  ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
-              }
-              if (ImGui::BeginCombo(
-                      "Screen 2 mode",
-                      selected_mode2 >= 0 &&
-                              selected_mode2 < static_cast<int>(modes2.size())
-                          ? mode_text(modes2[selected_mode2]).c_str()
-                          : "Select mode")) {
-                for (int i = 0; i < static_cast<int>(modes2.size()); ++i)
-                  if (ImGui::Selectable(mode_text(modes2[i]).c_str(),
-                                        i == selected_mode2))
-                    selected_mode2 = i;
-                ImGui::EndCombo();
-              }
-              ImGui::BeginDisabled(
-                  !retired_sessions.empty() || selected_device2 < 0 ||
-                  selected_device2 >= static_cast<int>(devices.size()) ||
-                  selected_mode2 < 0 ||
-                  selected_mode2 >= static_cast<int>(modes2.size()));
-              if (ImGui::Button("Open screen 2")) {
-                if (devices[selected_device2].stable_id == primary_device_id) {
-                  media_message =
-                      "Screen 2 must use a different capture device.";
-                } else {
-                  window2 = SDL_CreateWindow("KVMux - Screen 2", 960, 540,
-                                             SDL_WINDOW_OPENGL |
-                                                 SDL_WINDOW_RESIZABLE |
-                                                 SDL_WINDOW_HIGH_PIXEL_DENSITY);
-                  if (window2) {
-                    second_window_id = SDL_GetWindowID(window2);
-                    second_device_id = devices[selected_device2].stable_id;
-                    session2 = std::make_unique<KvmSession>();
-                    // Screen 2 never owns a control channel already; the
-                    // switch keeps its keep-alive path quiet too.
-                    session2->set_capture_only(true);
-                    (void)session2->select_capture(devices[selected_device2],
-                                                   modes2[selected_mode2]);
+                if (ImGui::BeginCombo(
+                        "Screen 2 mode",
+                        selected_mode2 >= 0 &&
+                                selected_mode2 < static_cast<int>(modes2.size())
+                            ? mode_text(modes2[selected_mode2]).c_str()
+                            : "Select mode")) {
+                  for (int i = 0; i < static_cast<int>(modes2.size()); ++i)
+                    if (ImGui::Selectable(mode_text(modes2[i]).c_str(),
+                                          i == selected_mode2))
+                      selected_mode2 = i;
+                  ImGui::EndCombo();
+                }
+                ImGui::BeginDisabled(
+                    !retired_sessions.empty() || selected_device2 < 0 ||
+                    selected_device2 >= static_cast<int>(devices.size()) ||
+                    selected_mode2 < 0 ||
+                    selected_mode2 >= static_cast<int>(modes2.size()));
+                if (ImGui::Button("Open screen 2")) {
+                  if (devices[selected_device2].stable_id ==
+                      primary_device_id) {
+                    media_message =
+                        "Screen 2 must use a different capture device.";
                   } else {
-                    media_message = "Could not open the second window.";
+                    window2 = SDL_CreateWindow(
+                        "KVMux - Screen 2", 960, 540,
+                        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
+                            SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                    if (window2) {
+                      second_window_id = SDL_GetWindowID(window2);
+                      second_device_id = devices[selected_device2].stable_id;
+                      session2 = std::make_unique<KvmSession>();
+                      // Screen 2 never owns a control channel already; the
+                      // switch keeps its keep-alive path quiet too.
+                      session2->set_capture_only(true);
+                      (void)session2->select_capture(devices[selected_device2],
+                                                     modes2[selected_mode2]);
+                    } else {
+                      media_message = "Could not open the second window.";
+                    }
                   }
                 }
+                ImGui::EndDisabled();
+              } else if (ImGui::Button("Close screen 2")) {
+                close_second();
               }
-              ImGui::EndDisabled();
-            } else if (ImGui::Button("Close screen 2")) {
-              close_second();
             }
           }
           if (ImGui::RadioButton("Absolute",
@@ -1830,12 +1949,15 @@ int main(int argc, char** argv) {
     ImGui::PopStyleVar();
     const auto d = diagnostics->snapshot();
     char rates[64];
-    if (video_bytes_per_second && control_bytes_per_second)
-      std::snprintf(rates, sizeof(rates), "V:%.2fM/s C:%.2fK/s",
-                    *video_bytes_per_second / (1024.0 * 1024.0),
-                    *control_bytes_per_second / 1024.0);
-    else
-      std::snprintf(rates, sizeof(rates), "V:-- C:--");
+    char video_text[32] = "V:--";
+    char control_text[32] = "C:--";
+    if (video_rate.bytes_per_second)
+      std::snprintf(video_text, sizeof(video_text), "V:%.2fM/s",
+                    *video_rate.bytes_per_second / (1024.0 * 1024.0));
+    if (control_rate.bytes_per_second)
+      std::snprintf(control_text, sizeof(control_text), "C:%.2fK/s",
+                    *control_rate.bytes_per_second / 1024.0);
+    std::snprintf(rates, sizeof(rates), "%s %s", video_text, control_text);
     // Layout may have cleared event-time diagnostics after the earlier
     // session snapshot.
     const auto pointer_snapshot = session->snapshot().pointer;
@@ -1860,10 +1982,17 @@ int main(int argc, char** argv) {
       std::snprintf(submitted, sizeof(submitted), "H:--");
     char line[320];
     const auto recording_status = recording.status();
+    const char* place = "Local";
+    if (video_source == VideoSource::relay &&
+        control_target == ControlTarget::relay)
+      place = "LAN";
+    else if (video_source == VideoSource::relay)
+      place = "LAN video";
+    else if (control_target == ControlTarget::relay)
+      place = "LAN control";
     std::snprintf(line, sizeof(line),
-                  "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s | Rec:%s",
-                  remote ? "LAN" : "Local", resolution.c_str(), d.decode_fps,
-                  d.unique_present_fps, rates,
+                  "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s | Rec:%s", place,
+                  resolution.c_str(), d.decode_fps, d.unique_present_fps, rates,
                   input_state(snapshot.input_state), pointer, submitted,
                   recording_state(recording_status.state));
     std::string status_line = line;
@@ -1929,8 +2058,8 @@ int main(int argc, char** argv) {
       ImGui::Begin("Diagnostics", &diagnostics_open);
       record_local_region();
       ImGui::Text("Decoded video resolution: %s", resolution.c_str());
-      if (remote_client) {
-        const auto video = remote_client->video_snapshot();
+      if (video_client) {
+        const auto video = video_client->video_snapshot();
         ImGui::TextUnformatted("Relay transport: UDP v3 / KCP control");
         ImGui::Text("Relay codec: %s", video.codec == VideoCodec::hevc ? "H.265"
                                        : video.codec == VideoCodec::h264
@@ -2002,7 +2131,7 @@ int main(int argc, char** argv) {
       latency_row("SDL stamp -> UI poll", d.sdl_event_wait);
       latency_row("UI receipt -> input handler done (incl. lock wait)",
                   d.input_processing);
-      if (remote) {
+      if (control_target == ControlTarget::relay) {
         // The serial worker runs on the relay server; its timings are not
         // carried by the relay protocol.
         ImGui::TextUnformatted(
@@ -2010,7 +2139,7 @@ int main(int argc, char** argv) {
             "timeouts: N/A (measured on the relay server's serial worker)");
         ImGui::Text("Ordinary pending: %s",
                     snapshot.control.ordinary_input_pending ? "yes" : "no");
-      } else {
+      } else if (control_target == ControlTarget::local_serial) {
         latency_row("UI receipt -> serial dequeue", d.sdl_to_control_dequeue);
         latency_row("Queue age (submit -> dequeue)", d.input_queue_age);
         latency_row("Ordinary ACK RTT (begin -> ACK, not target response)",

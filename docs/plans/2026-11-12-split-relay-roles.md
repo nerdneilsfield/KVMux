@@ -153,17 +153,24 @@ Evidence:
 
 ### T3：GUI 独立选择视频来源与键鼠去向
 
-Status: pending
+Status: done
 Depends on: T2
 Acceptance: A9
 Targets: `src/app/main.cpp`
 
-- [ ] 两个选择器替代 remote 布尔值与 capture-only 复选框；按规则构造 0–2 个客户端并组装 `KvmSession`，control 客户端显式 `start()`，本地/无键鼠时传 `Ch9329ControlSink`。
-- [ ] 流量基线、状态栏 `V:`/`C:`、串口与解码诊断按上文拆开。
-- [ ] `make`、`make lint`；手动走三种组合。
-- [ ] 提交 `feat(app): choose video source and control target independently`。
+- [x] 两个选择器替代 remote 布尔值与 capture-only 复选框；按规则构造 0–2 个客户端并组装 `KvmSession`，control 客户端显式 `start()`，本地/无键鼠时传 `Ch9329ControlSink`。
+- [x] 流量基线、状态栏 `V:`/`C:`、串口与解码诊断按上文拆开。
+- [x] `make`、`make lint`；三种组合待用户手动验证。
+- [x] 提交 `feat(app): choose video source and control target independently`。
 
 Evidence:
+
+- 未设置 `HEADLESS`。`make`（无目标）只打印帮助，退出码 0。`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr CPATH=/tmp/x11-dev/prefix/usr/include make test`：预设 `linux-debug`，26 项中 25 项通过，约 64.83 秒。失败项是 `relay_client`。
+- `relay_client` 仍是基线失败，没有新的失败模式。这次 `chunked_ascii_paste_loopback` 通过；`paste_keepalive_blackholed_status` 失败在 `tests/relay_integration_fakes.hpp:216` 的 `GuiFixture::activate()`，与干净的 `76eecbf` 相同。
+- `make format-check` 仍失败在 `tests/codec_startup_fallback_test.cpp:21`（基线，clang-format 23），`make lint` 因此停在 cppcheck 与 clang-tidy 之前。随后按 Makefile 配方、用这次 GUI 的 `build/linux-debug/compile_commands.json` 单独跑了这两步。`src/app/main.cpp` 的 `clang-format --dry-run --Werror` 通过。
+- cppcheck 退出码 1，唯一告警是既有的 `src/network/relay_server.cpp:566` `identicalConditionAfterEarlyExit`，不在 `src/app/main.cpp`。clang-tidy 退出码 0（59 个文件，约 181 秒）。`src/app/main.cpp` 上的告警（`bugprone-optional-value-conversion`、ImGui 标志的 `bugprone-signed-bitwise`、`bugprone-empty-catch`）在 `HEAD` 的同一段代码里已经存在，不是这次改动引入的。
+- `libxi-dev` 已安装，XINPUT 能找到。系统没有 `libxrandr-dev`、`libxss-dev`、`libxtst-dev`，本机不能用 sudo 安装。`/tmp/x11-dev/prefix` 是这三个开发包的本地解包；静态库已移开，未版本化的 `.so` 指向系统 SONAME。只设 `CMAKE_PREFIX_PATH` 时配置能找到库，但 SDL 的编译命令只加 `/usr/include`，所以另外设了 `CPATH`。FFmpeg 前缀与 T1/T2 相同：静态库已移开，链接的是系统共享库。
+- 三种 GUI 组合需要显示器，待用户手动验证。用转发的 `DISPLAY` 把 `build/linux-debug/kvmux` 限时 3 秒启动，进程在 GLX `X_GLXCreateContext` 上报 `BadValue` 后被超时终止（退出码 124）。这不能当作 GUI 已启动，也不能当作三种组合已验证。
 
 ### T4：文档
 
@@ -177,4 +184,4 @@ Targets: `docs/lan-relay.md`、`README*.md`（若有 relay 使用说明）
 
 ## 进度
 
-T2 已完成。下一个任务：T3。
+T3 已完成。下一个任务：T4。
