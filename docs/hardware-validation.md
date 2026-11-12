@@ -93,4 +93,197 @@ Before that run, the host has to meet one of these conditions:
 
 A later record should include the OS, libusb version, USB topology, the
 `ch341-usb:` port name, baud, which driver was bound before open, and whether
-CH9329 reached ready. A successful build is not that record.
+CH9329 reached ready. A successful build is not that record. The commands that
+collect it are in the next section. No macOS run of those commands is recorded
+here.
+
+## macOS CH341 与分离 relay 自检步骤
+
+本节是 Mac 上的操作步骤，用来检查 CH341 libusb 后端，以及分离后的 control relay 和 video relay。写本节时这台开发机没有 `1A86:5523`，这些命令也没有在 macOS 上运行过。跑完以后，把文末字段的实际输出补进本节。没有这条记录时，对应硬件项保持未验证。
+
+开始之前确认这四件事：
+
+- Mac 上已安装 `libusb` 和 `pkg-config`。安装命令是 `brew install libusb pkg-config`。不要安装 WCH `CH34xVCPDriver`。macOS 上 `KVMUX_CH341_USB` 默认为 `ON`，缺少 libusb 开发文件时配置会失败。
+- CH9329 使用它当前的波特率。出厂值是 9600。芯片被改过波特率时，用改后的值。改法见 [Configure CH9329 baud rate on Linux](ch9329-baud.md)。
+- 端口名以 `ch341-usb:` 开头时，后端只接受 1200、2400、4800、9600、14400、19200、38400、57600、115200。其他波特率会在 open 失败，原因是 `CH341 direct 不支持该波特率`。
+- Relay 使用未加密、未认证的 UDP。只在可信任的局域网上运行这些探针，不要把端口暴露到公网。
+
+**Caution:** `--keys` 会在 CH9329 所接的电脑上按下并松开左 Shift（HID usage `0xE1`）。`--mouse` 会让该电脑的指针相对向右移动 20，再向左移动 20。两步都要等到 CH9329 确认。目标电脑当时不能接受这些输入时，不要加这两个参数。不加它们时，探针不发送键鼠。
+
+下面的 `build/macos-debug-headless/kvmux-relay` 都从仓库根目录执行。如果构建的是 GUI 预设 `macos-debug`，把路径换成 `build/macos-debug/kvmux-relay`。
+
+### 1. 构建
+
+配置并构建 headless 预设。这个预设包含 `kvmux-relay`，不构建 GUI。
+
+```sh
+cmake --preset macos-debug-headless
+cmake --build --preset macos-debug-headless
+```
+
+配置输出包含 `KVMux CH341 direct backend: enabled`。可执行文件是 `build/macos-debug-headless/kvmux-relay`。
+
+### 2. 列出串口
+
+```sh
+build/macos-debug-headless/kvmux-relay --list-serial
+```
+
+第一行是 `PORT` 和 `DESCRIPTION`，中间是制表符。`1A86:5523` 在位时，有一行的端口名以 `ch341-usb:` 开头，描述是 `CH341 (USB direct)`。名字由 bus 和端口路径组成，例如 `ch341-usb:20-1`。把打印出来的整段名字记为 `PORT`，后面原样代入，保留 `ch341-usb:` 前缀。
+
+没有 `ch341-usb:` 行时，记下完整输出，并停在后面的本地 CH341 步骤。Relay 步骤仍可进行。一个端口都没有时，程序打印 `No serial ports found.`。
+
+### 3. 打开、握手并释放
+
+这一步不发送键鼠。本地 `--serial` 不会打印“无画面，CLI 自行声明新鲜，仅用于自检”。
+
+```sh
+build/macos-debug-headless/kvmux-relay --debug --probe-control --serial "PORT" --baud 9600
+```
+
+把 `PORT` 换成上一步的名字。`--baud` 只能和 `--serial` 一起使用。默认超时是 5000 ms。握手更慢时加上 `--timeout-ms`，取值 1 到 600000。
+
+CH9329 应答时，标准输出的形状如下。`0xNN` 和 `N` 是当次运行打印的值。名字不足 9 个字符时，程序用空格补到 9 个字符。
+
+```
+[PASS] open     backend=ch341-usb port=PORT baud=9600
+[PASS] ready    usb=ready version=0xNN
+[SKIP] keys     (pass --keys to send Left Shift)
+[SKIP] mouse    (pass --mouse to move the pointer)
+[PASS] release  confirmed in N ms
+如需测试拔出：重新运行并在 ready 后拔掉设备
+```
+
+五行状态都如上，并且进程退出码为 0，这一步才通过。
+
+`ready` 行的 `version=` 是 CH9329 `GET_INFO` 的芯片版本，两位十六进制。它不是 CH341 的版本字节。
+
+`--debug` 把控制台级别设为 debug，因此 info 日志会出现在标准错误。打开成功时有一行：
+
+```
+CH341 direct open: path=PORT baud=9600 version=0xNN
+```
+
+这一行的 `version=` 才是 CH341 版本字节。不加 `--debug` 时，控制台级别是 warn，这一行不出现。`--debug` 可以放在参数的任意位置。
+
+如果代入的是系统串口名，而不是 `ch341-usb:` 前缀，open 行写 `backend=system`。
+
+打开失败时，第一行是 `[FAIL] open` 加上当时的错误文本，进程以退出码 1 结束，并打印上面的拔出提示。设备不存在时，文本是 `设备不存在或已拔出`。接口被厂商驱动占用，或当前用户没有权限时，文本是 `设备被系统或厂商驱动（如 macOS 的 WCH CH34xVCPDriver）占用，或当前用户没有权限（Linux 提示 udev 规则）`。
+
+### 4. 左 Shift 和相对鼠标
+
+先确认目标电脑可以接受一次左 Shift，以及一次向右再向左的指针移动。
+
+```sh
+build/macos-debug-headless/kvmux-relay --probe-control --serial "PORT" --baud 9600 --keys --mouse
+```
+
+成功时，第 3 步里的两条 `[SKIP]` 换成下面两行，退出码为 0：
+
+```
+[PASS] keys     Left Shift acknowledged
+[PASS] mouse    relative +20,-20 acknowledged
+```
+
+任一步出现 `[FAIL]` 后，程序释放按键和鼠标，断开连接，打印拔出提示，以退出码 1 结束，不再打印后面的 `[PASS]`。
+
+### 5. 拔出
+
+再次运行第 3 步的命令，不要加 `--keys` 或 `--mouse`。标准输出出现 `[PASS] ready` 之后，拔掉这只 CH341。
+
+程序应以退出码 1 结束。失败行包含 `故障`、`state=`、`release_confirmed=`；快照里有错误文本时还包含 `error=`。把这一行原样记下来。设备在运行中消失时，设计上的 `release_confirmed` 是 `false`。记录以打印出来的值为准。
+
+### 6. Control relay
+
+`--probe-control --relay` 使用 control 角色，只和 `--serve --no-capture` 匹配。`--probe-video` 使用 video 角色，只和 `--serve --no-serial` 匹配。同时打开采集和串口的 `--serve` 会拒绝这两种角色。角色不一致时，输出包含 `角色不匹配`，退出码为 1。
+
+在接有 CH9329 的电脑上启动 control relay。那台电脑是这台 Mac 时，把下面的可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。Linux 上是：
+
+```sh
+build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
+```
+
+串口名和波特率换成那台电脑上的实际值。那台电脑使用 `ch341-usb:` 时，`--serial` 写成该名字。只放行控制端口的入站 UDP，默认端口是 17000。`--no-capture` 不打开采集卡，也不监听视频端口。
+
+在 Mac 上运行：
+
+```sh
+build/macos-debug-headless/kvmux-relay --probe-control --relay RELAY_HOST --control-port 17000 --keys --mouse
+```
+
+把 `RELAY_HOST` 换成 control relay 的地址。`--control-port` 只能和 `--relay` 一起使用。对 `--relay` 再写 `--baud` 时，程序打印 `--baud applies only to --serial`，退出码为 2。`--serial` 和 `--relay` 同时给出，或者两个都不给，程序打印 `--probe-control requires exactly one of --serial or --relay`，退出码为 2。
+
+成功时，`ready` 之前有这一句：
+
+```
+无画面，CLI 自行声明新鲜，仅用于自检
+```
+
+open 行是：
+
+```
+[PASS] open     backend=relay host=RELAY_HOST port=17000
+```
+
+`ready` 行的 `version=` 为 `0x00`。Relay 状态帧不携带 CH9329 的 `chip_version`。CH9329 版本在接串口的那一侧；那一侧以 `--debug` 启动时，写在它自己的日志里。这条探针在内部解析视频端口 17001，但不打开媒体。`--probe-control` 没有视频端口参数。
+
+不加 `--keys` 和 `--mouse` 时，键和鼠标两行是 `[SKIP]`，程序不发送输入。上面那句新鲜声明仍然会打印。退出码为 0，并且 open、ready、release 都是 `[PASS]`，这一步才通过。
+
+角色不一致时，open 行是 `[FAIL] open     角色不匹配`，退出码为 1。程序不会把 ready 打成 `[PASS]`。
+
+### 7. Video relay
+
+在接有采集卡的电脑上启动 video relay。那台电脑是这台 Mac 时，把下面的可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。Linux 上是：
+
+```sh
+build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0" --mode-index 0
+```
+
+设备 ID 和模式索引换成那台电脑上 `--list-devices` 与 `--list-modes` 给出的值。自动选择找到唯一采集设备和可用模式时，可以省略 `--device` 和 `--mode-index`。放行控制端口和视频端口，默认是 17000 和 17001。`--no-serial` 不打开串口。
+
+在 Mac 上运行：
+
+```sh
+build/macos-debug-headless/kvmux-relay --probe-video RELAY_HOST --control-port 17000 --video-port 17001 --seconds 11
+```
+
+主机名是第一个不以 `--` 开头的参数。`--seconds` 的范围是 1 到 86400，默认值是 5。这里用 11 秒，让运行跨过 10 秒，以便看到保活期间连接是否中断。
+
+标准输出的第一行是：
+
+```
+帧数与最长间隔只是接收计数，不是延迟或性能结论
+```
+
+握手完成时打印 `[PASS] handshake`。`handshake` 正好是 9 个字符，后面的内容紧挨着名字，中间没有额外空格：
+
+```
+[PASS] handshakecodec=MJPEG size=WxH
+```
+
+`MJPEG` 是采集快照里的格式名，实际输出可能是 `H.264` 或 `H.265`。间隔结束时，帧数大于 0 且采集没有进入 fault，进程退出码为 0，并打印：
+
+```
+[PASS] video    codec=CODEC size=WxH frames=N longest_gap_ms=M
+```
+
+`CODEC`、`W`、`H`、`N`、`M` 都来自当次输出。`frames` 和 `longest_gap_ms` 只是接收计数。采集在间隔中进入 fault 时，程序立刻打印 `[FAIL]`，以退出码 1 结束，不会等满 `--seconds`。
+
+把这条命令指到 `--serve --no-capture` 时，失败行是 `[FAIL] handshake角色不匹配`，退出码为 1，同样不会等满 11 秒。
+
+### 要记下的字段
+
+把下面各项的实际输出补进本节。写本节的 Linux 开发机没有这些结果。
+
+- 日期、macOS 版本、机型。
+- `pkg-config --modversion libusb-1.0` 的输出。
+- USB 拓扑，以及 WCH `CH34xVCPDriver` 是否已安装。
+- `--list-serial` 打印的 `ch341-usb:` 名字。
+- 使用的波特率。
+- `--debug` 标准错误里 `CH341 direct open` 的 `version=`。
+- `ready` 行的 `version=`。本地串口探针上，这一值是 CH9329 版本。Control relay 探针上，这一值是 `0x00`。
+- 每条探针的退出码和完整标准输出。
+- 使用 `--keys` 和 `--mouse` 时，目标电脑上是否出现左 Shift，以及指针是否向右再向左移动。
+- 拔出时的失败行，包括 `state=`、`release_confirmed=` 和 `error=`。
+- 每台 relay 的操作系统、启动命令、主机、端口、角色，以及 Mac 上对应探针的标准输出。
+- Video 探针的 `codec`、`size`、`frames` 和 `longest_gap_ms`。这些数字不是延迟或性能结论。
