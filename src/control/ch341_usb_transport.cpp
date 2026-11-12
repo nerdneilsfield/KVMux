@@ -87,8 +87,8 @@ class Ch341DirectTransport {
       close();
       return false;
     }
-    spdlog::debug("CH341 direct open: path={} baud={} version=0x{:02x}", name,
-                  baud, version_);
+    spdlog::info("CH341 direct open: path={} baud={} version=0x{:02x}", name,
+                 baud, version_);
     return true;
   }
 

@@ -165,7 +165,7 @@ if(KVMUX_ENABLE_SANITIZERS)
     target_link_options(kvmux_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
 endif()
 
-add_executable(kvmux-relay src/app/relay_main.cpp)
+add_executable(kvmux-relay src/app/relay_main.cpp src/app/probe.cpp)
 target_link_libraries(kvmux-relay PRIVATE kvmux::capture)
 
 if(KVMUX_BUILD_GUI)
@@ -310,6 +310,13 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
         "$<TARGET_FILE:kvmux-relay>")
     set_tests_properties(relay_role PROPERTIES TIMEOUT 60)
+
+    add_executable(kvmux_probe_cli_test tests/probe_cli_test.cpp)
+    target_link_libraries(kvmux_probe_cli_test PRIVATE kvmux::core)
+    add_test(NAME probe_cli COMMAND kvmux_probe_cli_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
+        "$<TARGET_FILE:kvmux-relay>")
+    set_tests_properties(probe_cli PROPERTIES TIMEOUT 90)
 
     add_executable(kvmux_relay_client_role_test
         tests/relay_client_role_test.cpp src/app/kvm_session.cpp)

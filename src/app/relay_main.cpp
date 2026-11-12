@@ -13,8 +13,10 @@
 #include <thread>
 #include <vector>
 
+#include "app/probe.hpp"
 #include "control/control_sink.hpp"
 #include "control/serial_worker.hpp"
+#include "network/relay_client.hpp"
 #include "network/relay_selection.hpp"
 #include "network/relay_server.hpp"
 #include "support/diagnostics.hpp"
@@ -30,8 +32,16 @@ void print_help(std::ostream& out) {
          "  --help                 Show this help\n"
          "  --list-devices         List capture device stable IDs and names\n"
          "  --list-modes DEVICE    List native modes for a capture stable ID\n"
-         "  --list-serial          List serial port names and descriptions\n\n"
+         "  --list-serial          List serial port names and descriptions\n"
+         "  --probe-control        Open CH9329, optionally send input, then "
+         "release\n"
+         "  --probe-video HOST     Count frames from a video relay\n\n"
          "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
+         "Probe control: --probe-control (--serial PORT [--baud 9600] |\n"
+         "       --relay HOST [--control-port 17000]) [--keys] [--mouse]\n"
+         "       [--timeout-ms 5000]\n"
+         "Probe video: --probe-video HOST [--control-port 17000]\n"
+         "       [--video-port 17001] [--seconds 5]\n"
          "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] "
          "[--baud 9600]\n"
          "       [--no-capture | --no-serial]\n"
@@ -289,9 +299,184 @@ int serve(int argc, char** argv) {
   if (sink) sink->disconnect();
   return 0;
 }
+
+bool parse_bounded_int(std::string_view text, int min, int max, int& output) {
+  int number = 0;
+  const auto* begin = text.data();
+  const auto* end = begin + text.size();
+  const auto result = std::from_chars(begin, end, number);
+  if (result.ec != std::errc{} || result.ptr != end || number < min ||
+      number > max)
+    return false;
+  output = number;
+  return true;
+}
+
+bool next_value(int argc, char** argv, int& index, std::string_view& value) {
+  if (index + 1 >= argc ||
+      std::string_view(argv[index + 1]).starts_with("--")) {
+    std::cerr << "Missing option value\n";
+    return false;
+  }
+  value = argv[++index];
+  return true;
+}
+
+int probe_control_command(int argc, char** argv) {
+  std::optional<std::string> serial;
+  std::optional<std::string> relay;
+  int baud = 9600;
+  int control_port = 17000;
+  int timeout_ms = 5000;
+  bool keys = false;
+  bool mouse = false;
+  bool baud_seen = false;
+  bool port_seen = false;
+  for (int i = 2; i < argc; ++i) {
+    const std::string_view key = argv[i];
+    if (key == "--keys") {
+      keys = true;
+      continue;
+    }
+    if (key == "--mouse") {
+      mouse = true;
+      continue;
+    }
+    std::string_view value;
+    if (!next_value(argc, argv, i, value)) return 2;
+    if (key == "--serial") {
+      if (serial) {
+        std::cerr << "Duplicate --serial\n";
+        return 2;
+      }
+      serial = std::string(value);
+    } else if (key == "--relay") {
+      if (relay) {
+        std::cerr << "Duplicate --relay\n";
+        return 2;
+      }
+      relay = std::string(value);
+    } else if (key == "--baud") {
+      baud_seen = true;
+      if (!parse_bounded_int(value, 1, 4000000, baud)) {
+        std::cerr << "Invalid --baud\n";
+        return 2;
+      }
+    } else if (key == "--control-port") {
+      port_seen = true;
+      if (!parse_bounded_int(value, 1, 65535, control_port)) {
+        std::cerr << "Invalid --control-port\n";
+        return 2;
+      }
+    } else if (key == "--timeout-ms") {
+      if (!parse_bounded_int(value, 1, 600000, timeout_ms)) {
+        std::cerr << "Invalid --timeout-ms\n";
+        return 2;
+      }
+    } else {
+      std::cerr << "Unknown probe-control option\n";
+      return 2;
+    }
+  }
+  if (serial.has_value() == relay.has_value()) {
+    std::cerr
+        << "--probe-control requires exactly one of --serial or --relay\n";
+    return 2;
+  }
+  if (relay && baud_seen) {
+    std::cerr << "--baud applies only to --serial\n";
+    return 2;
+  }
+  if (serial && port_seen) {
+    std::cerr << "--control-port applies only to --relay\n";
+    return 2;
+  }
+
+  kvmux::ProbeControlOptions options;
+  options.keys = keys;
+  options.mouse = mouse;
+  options.timeout_ms = timeout_ms;
+  options.baud = baud;
+  options.control_port = control_port;
+  if (serial) {
+    options.serial = true;
+    options.declare_freshness = false;
+    options.target = *serial;
+    kvmux::Ch9329ControlSink sink;
+    return kvmux::probe_control(std::cout, sink, options);
+  }
+  options.serial = false;
+  options.declare_freshness = true;
+  options.target = *relay;
+  kvmux::relay::ClientOptions client;
+  client.host = *relay;
+  client.control_port = static_cast<std::uint16_t>(control_port);
+  // Control role still resolves a video port and does not open media.
+  client.video_port = 17001;
+  client.role = kvmux::relay::wire::RelayRole::control;
+  auto shared = std::make_shared<kvmux::relay::RelayClient>(std::move(client));
+  kvmux::relay::NetworkControlSink sink(std::move(shared));
+  return kvmux::probe_control(std::cout, sink, options);
+}
+
+int probe_video_command(int argc, char** argv) {
+  std::optional<std::string> host;
+  int control_port = 17000;
+  int video_port = 17001;
+  int seconds = 5;
+  for (int i = 2; i < argc; ++i) {
+    const std::string_view key = argv[i];
+    if (!key.starts_with("--")) {
+      if (host) {
+        std::cerr << "Unexpected argument\n";
+        return 2;
+      }
+      host = std::string(key);
+      continue;
+    }
+    std::string_view value;
+    if (!next_value(argc, argv, i, value)) return 2;
+    if (key == "--control-port") {
+      if (!parse_bounded_int(value, 1, 65535, control_port)) {
+        std::cerr << "Invalid --control-port\n";
+        return 2;
+      }
+    } else if (key == "--video-port") {
+      if (!parse_bounded_int(value, 1, 65535, video_port)) {
+        std::cerr << "Invalid --video-port\n";
+        return 2;
+      }
+    } else if (key == "--seconds") {
+      if (!parse_bounded_int(value, 1, 86400, seconds)) {
+        std::cerr << "Invalid --seconds\n";
+        return 2;
+      }
+    } else {
+      std::cerr << "Unknown probe-video option\n";
+      return 2;
+    }
+  }
+  if (!host || host->empty()) {
+    std::cerr << "--probe-video requires a host\n";
+    return 2;
+  }
+  kvmux::relay::ClientOptions client;
+  client.host = *host;
+  client.control_port = static_cast<std::uint16_t>(control_port);
+  client.video_port = static_cast<std::uint16_t>(video_port);
+  client.role = kvmux::relay::wire::RelayRole::video;
+  auto shared = std::make_shared<kvmux::relay::RelayClient>(std::move(client));
+  kvmux::relay::NetworkCaptureSource source(std::move(shared));
+  return kvmux::probe_video(std::cout, source, seconds);
+}
+
 int run(int argc, char** argv) {
   if (argc >= 2 && std::string_view(argv[1]) == "--serve")
     return serve(argc, argv);
+  if (argc >= 2 && std::string_view(argv[1]) == "--probe-control")
+    return probe_control_command(argc, argv);
+  if (argc >= 2 && std::string_view(argv[1]) == "--probe-video")
+    return probe_video_command(argc, argv);
   if (argc == 2 && std::string_view(argv[1]) == "--help") {
     print_help(std::cout);
     return 0;
