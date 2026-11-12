@@ -5,21 +5,22 @@
 # KVMux
 
 通过 USB 采集卡查看另一台电脑的画面，并用 CH9329 控制它的键盘和鼠标。
-**Local** 模式直接使用本机连接的硬件；**Remote** 模式通过可信局域网连接硬件所在的中继电脑。
+采集卡和 CH9329 可以都接在运行 GUI 的电脑上，也可以由另一台电脑上的
+`kvmux-relay` 经可信局域网提供。二者还可以分开放在不同电脑上。
 被控电脑无需安装 KVMux。
 
 ## 准备硬件
 
 - USB 采集卡，连接被控电脑的视频输出。
 - CH9329 控制线或开发板。串口端连接运行 KVMux 或中继程序的电脑，USB HID 端连接被控电脑。
-- 运行桌面 GUI 的电脑。Remote 模式还需要一台连接硬件的中继电脑。
+- 运行桌面 GUI 的电脑。没有直接插在这台电脑上的硬件，需要一台处于可信局域网中的中继电脑。
 
 ```text
 被控电脑视频输出 ──> USB 采集卡 ──> KVMux 电脑
 被控电脑 USB HID <── CH9329     <── 串口适配器
 
-Local： KVMux 电脑运行桌面 GUI
-Remote：KVMux 电脑运行中继程序 <── 局域网 ──> 桌面 GUI
+同一台电脑：桌面 GUI 使用采集卡和 CH9329
+局域网：    硬件电脑运行 kvmux-relay <── 局域网 ──> 桌面 GUI
 ```
 
 KVMux 使用外接硬件，不是软件屏幕共享工具。可用的采集模式取决于采集卡。
@@ -49,10 +50,12 @@ macOS Developer ID 签名和公证尚未完成。Windows/Linux 硬件覆盖、�
 
 1. 将采集卡和 CH9329 串口适配器接到运行 GUI 的电脑。
    macOS 本地采集需要允许摄像头访问；Linux 用户需要有权打开视频设备和串口。
-2. 打开 **Connections**，选择 **Local**。设置 **Capture device**（采集设备）和
-   **Capture mode**（采集模式），然后选择 **Start preview**。
-3. 设置 **Serial port**（串口）和 **Baud rate**（波特率），然后选择 **Connect**。
-   默认波特率为 **9600**；如果 CH9329 已改过配置，请使用它的实际波特率。
+2. 打开 **Connections**。**Video source** 保持 **Local device**。设置
+   **Capture device**（采集设备）和 **Capture mode**（采集模式），然后选择
+   **Start preview**。
+3. **Control target** 保持 **Local serial**。设置 **Serial port**（串口）和
+   **Baud rate**（波特率），然后选择 **Connect**。默认波特率为 **9600**；
+   如果 CH9329 已改过配置，请使用它的实际波特率。
 4. 等待实时画面和控制连接就绪。两者就绪后，连接弹窗会自动关闭。
    单击视频区域即可接管键盘和鼠标；这次激活单击不会发送给被控电脑。
 
@@ -83,23 +86,56 @@ H.264 MP4 录制需要 FFmpeg 提供 H.264 支持；不可用时 KVMux 会显示
 
 ## 通过局域网连接
 
-**仅在可信局域网中使用。** Remote 没有身份认证或加密。
+**仅在可信局域网中使用。** 中继没有身份认证或加密。
 任何能访问中继端口的人都可能尝试控制被控电脑，不要将这些端口暴露到互联网。
 
+GUI 分别选择 **Video source** 和 **Control target**。Hello 的角色必须与
+`kvmux-relay` 进程完全一致。同时提供视频和键鼠的中继不接受只出视频或只做键鼠的客户端；
+单一角色的中继也不接受合并客户端。GUI 显示 `角色不匹配`。
+
 1. 在连接硬件的 Windows 或 Linux 电脑上，按[局域网快速入门](docs/lan-relay.md)构建并启动中继。
-   对于已构建的 Linux Debug 无界面版本，如果只有一张采集卡和一个可识别的串口适配器，可运行：
+   对于已构建的 Linux Debug 无界面版本，如果采集卡和可识别的串口适配器在同一台电脑上，可运行：
 
    ```sh
    build/linux-debug-headless/kvmux-relay --serve
    ```
 
    如果自动选择失败，按指南列出设备，再明确指定采集模式和串口。
-2. 在中继电脑的防火墙中允许 UDP **17000**（控制）和 **17001**（视频）入站，
-   并将访问范围限制在预期的局域网内。
-3. 在 GUI 中打开 **Connections**，选择 **Remote**，在 **IPv4 host** 中填写中继电脑的局域网地址。
-   如果没有修改中继端口，保持 **Control port** 为 `17000`、**Video port** 为 `17001`。
+2. 在这台中继电脑的防火墙中允许 UDP **17000**（控制）和 **17001**（视频）入站，
+   并将访问范围限制在预期的局域网内。只做键鼠的中继只监听控制端口。
+   只出视频的中继仍然同时监听控制端口和视频端口。
+3. 在 GUI 中打开 **Connections**。对于这台同时提供视频和键鼠的中继，把
+   **Video source** 和 **Control target** 都设为 **Relay**。在 **Video host**
+   和 **Control host** 中填写它的局域网地址。如果没有修改端口，**Video control
+   port** 和 **Control port** 保持 `17000`，**Video port** 保持 `17001`。
+   主机和控制端口相同的时候，GUI 使用一个合并客户端。
 4. 选择 **Connect relay**。等待实时画面和控制连接就绪，再单击视频区域接管输入。
    目前只支持一个控制端。
+
+采集卡和 CH9329 可以放在不同电脑上。下面三种 GUI 组合都没有硬件实测记录，
+也没有手动操作 GUI 的记录。`--no-capture` 和 `--no-serial` 不能同时使用。
+
+1. 本机采集，键鼠走另一台电脑。在串口电脑上：
+
+   ```sh
+   build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
+   ```
+
+   GUI：**Video source** 选 **Local device**，**Control target** 选 **Relay**。
+2. 一台中继只出视频，另一台只做键鼠。采集电脑使用 `--serve --no-serial`，
+   串口电脑使用上面的 `--no-capture` 命令。GUI 两个选择器都选 **Relay**，
+   主机不同，或者控制端口不同。
+
+   ```sh
+   build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0" --mode-index 0
+   ```
+
+3. 视频来自中继，CH9329 接在 GUI 电脑上。采集电脑使用上面的 `--no-serial`
+   命令。GUI：**Video source** 选 **Relay**，**Control target** 选 **Local serial**。
+
+只做键鼠的中继信任 GUI 对画面是否新鲜的声明，它自己看不到画面。
+只出视频的中继仍用控制端口完成握手。端口、角色匹配和未验证状态见
+[局域网配置](docs/lan-relay.md#put-the-capture-card-and-the-ch9329-on-different-computers)。
 
 网络视频默认使用 MJPEG。可选的 H.265 编码需要原始视频采集，不支持将 MJPEG 转码为 H.265。
 编码器要求和 GUI 的 **Decode** 设置见 [H.265 配置](docs/lan-relay.md#choose-h265-encoding)。

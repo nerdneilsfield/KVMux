@@ -214,16 +214,32 @@ the server's current cap or bitrate.
 
 ## Connect the GUI
 
-Build the desktop application with the existing `macos-debug` preset. In the GUI:
+Build the desktop application with the existing `macos-debug` preset. Open
+**Connections**. **Video source** is **Local device** or **Relay**. **Control
+target** is **Local serial**, **Relay**, or **None**. **None** is video and
+recording only: no serial keyboard, mouse, or keep-alive. Changing either
+selector releases input and rebuilds a local session. The addresses stay in
+the form. **Connect relay** opens the relay clients from the values typed at
+that moment.
 
-1. Select **Remote**.
-2. Enter the relay computer's IPv4 address, not the Mac's loopback address.
-3. Set the control and video ports to match the relay.
-4. Choose **Decode** for H.265: **Auto**, **VideoToolbox**, or **FFmpeg software**.
-   Auto tries hardware first, then falls back to CPU decoding if hardware
-   initialization fails. Diagnostics shows the actual backend and fallback reason.
-   An explicit backend reports an error if unavailable; it does not fall back.
-   This setting does not affect MJPEG.
+For one relay that has both the capture card and the CH9329 (`kvmux-relay
+--serve` with neither `--no-capture` nor `--no-serial`):
+
+1. Set **Video source** and **Control target** to **Relay**.
+2. Enter that computer's IPv4 address in both **Video host** and **Control
+   host**. Do not use the GUI computer's loopback address for another machine.
+3. Set **Video control port** and **Control port** to the relay's control port,
+   and **Video port** to its video port. The defaults are `17000` and `17001`.
+   The same host and the same control port make the GUI use one combined
+   client. The video port comes from the video fields. A different host or a
+   different control port sends a video-only Hello to the video fields and a
+   control-only Hello to the control fields. A combined relay accepts neither
+   role. The GUI shows `角色不匹配`.
+4. Choose **Decode** for H.264/H.265: **Auto**, **VideoToolbox**, or **FFmpeg
+   software**. Auto tries hardware first, then falls back to CPU decoding if
+   hardware initialization fails. Diagnostics shows the actual backend and
+   fallback reason. An explicit backend reports an error if unavailable; it
+   does not fall back. This setting does not affect MJPEG.
 5. Select **Connect relay**.
 6. Wait for a new video frame and ready/cleared serial status before clicking
    the video area to capture input. The Host key releases input locally.
@@ -241,11 +257,134 @@ network interruption keeps focused capture intent, but revokes input when its
 snapshot are required before input resumes. Completed clicks and stale relative
 motion are not replayed. An accepted remote ASCII paste becomes a transaction:
 its initial admission still requires that proof and snapshot, but it then renews
-a separate 500 ms reliable-control lease while it executes. This lets a long
-paste continue through video recovery without admitting ordinary input. If the
+a separate 500 ms reliable-control lease while it executes. On a combined relay
+this lets a long paste continue through video recovery without admitting
+ordinary input. A control-only relay does not keep that exemption: a proof with
+`video_fresh` false cancels the paste and releases input. If the
 client control heartbeat stops, or Host exit/focus loss cancels the intent, the
 server cancels the transaction and releases input. The session expires after 10
 seconds without peer liveness. Pairing is not authentication.
+
+## Put the capture card and the CH9329 on different computers
+
+One `kvmux-relay` process has one role, and the GUI Hello must use that same
+role. The server checks the role before it checks whether it is already
+controlled and before it checks the codec.
+
+| Relay command | Role | Accepts | Rejects |
+| --- | --- | --- | --- |
+| `--serve` | both | a combined client | video-only and control-only clients |
+| `--serve --no-serial` | video | a video-only client | combined and control-only clients |
+| `--serve --no-capture` | control | a control-only client | combined and video-only clients |
+
+A rejected Hello gets `role_unsupported`. The GUI shows `角色不匹配` and does
+not open the session. `--no-capture` and `--no-serial` cannot be combined. The
+process exits with `--no-capture and --no-serial cannot be combined` before it
+enumerates devices.
+
+`--no-serial` does not open a serial port. Capture selection is unchanged:
+omit `--device` only when exactly one capture device is present, or pass
+`--device`, `--mode-index`, `--codec`, and `--encoding` as for a combined
+relay. The process still listens on the control port and the video port. The
+control port carries the handshake. It does not open a serial device. This
+relay sends media and refuses keyboard, mouse, and paste.
+
+`--no-capture` does not open a capture device and does not listen on the video
+port. It listens on the control port only. Serial selection is unchanged,
+including `--serial`, `--baud`, and automatic selection of exactly one
+supported adapter. `--video-port` is accepted and then unused. This relay does
+not send media.
+
+On Windows, use `build/windows-debug-headless/kvmux-relay.exe` with the same
+flags. Allow inbound UDP only on the ports that process prints at startup. A
+control-only relay prints the control port and does not print a video port.
+
+If both GUI selectors are **Relay** and **Video host** equals **Control host**
+and **Video control port** equals **Control port**, the GUI sends one combined
+Hello. That matches a combined relay only. Do not aim both selectors at one
+`--no-serial` or `--no-capture` relay with that same host and control port.
+Use the selector that matches the relay, or point the two selectors at two
+relays whose host or control port differs.
+
+The three arrangements below are not verified. No capture card, CH9329,
+cross-machine run, or manual GUI session is recorded for them.
+
+### Local capture, remote CH9329
+
+On the computer with the serial adapter:
+
+```sh
+build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
+```
+
+Omit `--serial` only when exactly one supported adapter is present. Allow
+inbound UDP on the control port, default **17000**.
+
+In the GUI, set **Video source** to **Local device** and **Control target** to
+**Relay**. Choose **Capture device** and **Capture mode**, then **Start
+preview**, on the GUI computer. Enter the serial computer in **Control host**
+and its control port in **Control port**. Select **Connect relay**. The status
+bar shows `LAN control`. `V:` stays `--` because there is no video relay.
+`C:` is that relay's control rate after the first sample.
+
+### Video from one relay, keyboard and mouse through another
+
+On the capture computer:
+
+```sh
+build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0" --mode-index 0
+```
+
+Omit `--device` and `--mode-index` only when automatic selection finds one
+capture device and a usable mode. Allow inbound UDP on the control port and
+the video port, defaults **17000** and **17001**.
+
+On the serial computer, start the control-only command from the previous
+section. Allow inbound UDP on its control port only. The two control ports may
+both be 17000.
+
+In the GUI, set both selectors to **Relay**. Fill **Video host**, **Video
+control port**, and **Video port** from the capture relay. Fill **Control
+host** and **Control port** from the serial relay. Different hosts keep the
+two clients separate. Select **Connect relay**. Choose **Decode** on the video
+side when the capture relay uses H.264 or H.265. The status bar shows `LAN`
+because both selectors are Relay, even though the computers differ. `V:` and
+`C:` are sampled on their own clients.
+
+### Video from a relay, CH9329 on the GUI computer
+
+Start the video-only relay from the previous section and allow its control and
+video ports.
+
+In the GUI, set **Video source** to **Relay** and **Control target** to
+**Local serial**. Enter the capture relay in **Video host**, **Video control
+port**, and **Video port**, then select **Connect relay**. Choose **Serial
+port** and **Baud rate** on the GUI computer and select **Connect**. The
+status bar shows `LAN video`. `C:` stays `--` because control is local serial.
+Serial timing in Diagnostics is the local adapter, not the relay.
+
+**Disconnect relay** stops the relay sides that are connected. It does not
+disconnect a local capture card or a local serial port.
+
+### What the control relay trusts
+
+A combined relay compares the client's presented frame sequence with frames it
+sent, and only a recent match counts. A video-only relay runs the same
+comparison and still refuses keyboard, mouse, and paste. A control-only relay
+has no frames. It does not make that comparison. For a proof from the paired
+client it still requires `video_fresh`, and a presented sequence of zero does
+not count as fresh. The GUI sets the flag from the frame it has just submitted
+for display, after the renderer accepts the upload. That frame may come from
+the local capture card or from a video relay. The control client treats a new
+generation or sequence as a new presentation and keeps the claim for 500 ms.
+A stopped capture or a repeated presentation makes the claim stale. The
+control relay then stops admitting input. It cannot see the picture. It trusts
+this freshness claim. The claim is not authentication.
+
+The 250 ms input lease and the 10 second session limit still apply. On a
+control-only relay, a proof with `video_fresh` false also cancels an accepted
+paste and releases input. A combined relay still lets that paste continue
+through a video stall while its own keepalive lasts.
 
 ## Limits and verification
 
@@ -264,6 +403,11 @@ Local automated tests use real loopback UDP/KCP and fake capture/serial boundari
 They are not real capture-card or CH9329 hardware acceptance. Windows/Linux
 native relay operation and two-host hardware behavior still need measurements
 on those hosts. See `acceptance.md` for the existing local-KVM evidence.
+
+The three split arrangements, and choosing them in the GUI, are not verified.
+No capture-card, CH9329, cross-machine, or manual GUI run is recorded for a
+video-only relay, a control-only relay, or a GUI session that uses the two
+selectors independently. The loopback role tests are not that record.
 
 ## Troubleshooting: USB serial port is missing on Jetson/Ubuntu
 
@@ -480,7 +624,9 @@ cmake --build --preset macos-debug
 open build/macos-debug/kvmux.app
 ```
 
-Reconnect with **Remote** using the Jetson's LAN IPv4 address. Rebuilding does
+Reconnect from **Connections**. For a combined relay, set both selectors to
+**Relay** and enter the Jetson's LAN IPv4 address as **Video host** and
+**Control host**, with the same control port. Rebuilding does
 not replace a process already running from an older executable. If a failure
 remains, report the exact GUI error, relay output, selected capture mode and
 serial settings; a screenshot of the retained video alone is insufficient.
@@ -562,8 +708,10 @@ an MJPEG stream; the displayed resolution belongs to the decoded video.
 Bandwidth is sampled about once per second. It counts accepted UDP datagrams,
 including the 32-byte envelope, parity and control retransmissions, but excludes
 IP/UDP headers. These are client-lifetime totals; the sender's `paced-bytes`
-counts packets pulled from the pacer, not confirmed socket delivery. `--` means unavailable, including local capture or the first
-sampling interval. Reconnecting resets the displayed rate baseline.
+counts packets pulled from the pacer, not confirmed socket delivery. `V:--` means there is no video relay client, or the first video sample is not
+in yet. `C:--` means there is no control relay client, or the first control
+sample is not in yet. Local capture and local serial do not fill the other
+counter. Reconnecting resets the displayed rate baseline.
 
 Accepted coordinates are not device acknowledgements. Pointer values clear on
 release, stale video, a fault or a mouse-mode change. The displayed video position
@@ -606,10 +754,15 @@ input; a later reply alone cannot restore authority. Fresh video and exact
 current-state acknowledgement are also required. The old 350 ms TCP read
 deadline does not apply to UDP v3.
 
-The status bar uses one line. `LAN` identifies remote mode; the status dot is
-green when video is fresh and control is ready, and amber otherwise. Hover for
+The status bar uses one line. `Local` means neither selector is Relay. `LAN`
+means both selectors are Relay, including two different relays. `LAN video`
+means only the video source is Relay. `LAN control` means only the control
+target is Relay. The status dot is green when video is fresh and control is
+ready, and amber otherwise. Hover for
 separate video/control states. The FPS pair is decode/present. `V` and `C`
 are video receive in MiB/s (`M/s`) and control bidirectional in KiB/s (`K/s`).
+Each is sampled from its own relay client. A side with no relay client shows
+`--` and does not hide the other side.
 These are byte rates, not bit rates; 1 MiB/s is 1,048,576 bytes/s.
 `P` is video-local position, `H` is the accepted absolute HID coordinate, and
 `d` is accepted relative movement. Text scales to the available width without

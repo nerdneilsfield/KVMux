@@ -5,23 +5,25 @@
 # KVMux
 
 View and control another computer through a USB capture card and a CH9329
-keyboard/mouse controller. Use the hardware directly with **Local**, or attach
-it to a relay computer and connect over a trusted LAN with **Remote**. The
-target computer does not need KVMux installed.
+keyboard/mouse controller. Attach both to the GUI computer, or run
+`kvmux-relay` on another computer and connect over a trusted LAN. The capture
+card and the CH9329 can be on different computers. The target computer does
+not need KVMux installed.
 
 ## What you need
 
 - A USB capture card connected to the target's video output.
 - A CH9329 control cable or board, with its serial side connected to the
   computer running KVMux or the relay, and its USB HID side connected to the target.
-- A computer running the desktop GUI; Remote also needs a hardware-side relay computer.
+- A computer running the desktop GUI. Hardware that is not plugged into that
+  computer needs a relay computer on the trusted LAN.
 
 ```text
 Target video output ──> USB capture card ──> KVMux computer
 Target USB HID      <── CH9329           <── serial adapter
 
-Local:  KVMux computer runs the desktop GUI
-Remote: KVMux computer runs the relay <── LAN ──> desktop GUI
+On one computer: the desktop GUI owns the capture card and the CH9329
+Over LAN:        kvmux-relay on the hardware computer <── LAN ──> desktop GUI
 ```
 
 This is a hardware KVM, not software screen sharing. Capture modes depend on
@@ -68,10 +70,11 @@ see the [verification record](docs/acceptance.md) before choosing hardware.
 1. Connect the capture card and CH9329 serial adapter to the GUI computer.
    On macOS, allow camera access for local capture. On Linux, your user needs
    permission to open the video device and serial port.
-2. Open **Connections** and select **Local**. Choose **Capture device** and
-   **Capture mode**, then select **Start preview**.
-3. Choose **Serial port** and **Baud rate**, then select **Connect**. The default
-   is **9600**; use the actual rate configured on your CH9329.
+2. Open **Connections**. Leave **Video source** on **Local device**. Choose
+   **Capture device** and **Capture mode**, then select **Start preview**.
+3. Leave **Control target** on **Local serial**. Choose **Serial port** and
+   **Baud rate**, then select **Connect**. The default is **9600**; use the
+   actual rate configured on your CH9329.
 4. Wait for fresh video and ready control. The connection popup closes when
    both are ready. Click the video to capture keyboard and mouse input; this
    first click is not sent to the target.
@@ -120,13 +123,19 @@ with physical hardware.
 
 ## Connect over LAN
 
-**Use a trusted LAN only.** Remote has no authentication or encryption. Anyone
-who can reach the relay ports can attempt to control the target. Do not expose
-these ports to the Internet.
+**Use a trusted LAN only.** The relay has no authentication or encryption.
+Anyone who can reach the relay ports can attempt to control the target. Do not
+expose these ports to the Internet.
+
+The GUI chooses **Video source** and **Control target** separately. The Hello
+role must match the `kvmux-relay` process exactly. A combined relay does not
+accept a video-only or control-only client, and a single-role relay does not
+accept a combined client. The GUI shows `角色不匹配`.
 
 1. On the Windows or Linux computer attached to the hardware, build and start
    the relay using the [LAN quick start](docs/lan-relay.md). For a Linux Debug
-   headless build with one capture card and one recognized serial adapter:
+   headless build with one capture card and one recognized serial adapter on
+   the same computer:
 
    ```sh
    build/linux-debug-headless/kvmux-relay --serve
@@ -134,13 +143,46 @@ these ports to the Internet.
 
    If automatic selection fails, use the guide's device-list commands to select
    the capture mode and serial port explicitly.
-2. Allow inbound UDP **17000** (control) and **17001** (video) on the relay
-   computer, restricted to your intended LAN.
-3. In the GUI, open **Connections**, select **Remote**, and enter the relay's
-   LAN address in **IPv4 host**. Keep **Control port** and **Video port** at
-   `17000` and `17001` unless you changed them on the relay.
+2. Allow inbound UDP **17000** (control) and **17001** (video) on that relay,
+   restricted to your intended LAN. A control-only relay listens on the control
+   port only. A video-only relay still listens on both ports.
+3. In the GUI, open **Connections**. For this combined relay, set **Video
+   source** and **Control target** to **Relay**. Enter its LAN address in both
+   **Video host** and **Control host**. Keep **Video control port** and
+   **Control port** at `17000`, and **Video port** at `17001`, unless you
+   changed them. The same host and control port use one combined client.
 4. Select **Connect relay**. Wait for fresh video and ready control, then click
    the video to capture input. Only one controller is supported.
+
+The capture card and the CH9329 can be on different computers. These three
+GUI combinations have no recorded hardware run and no recorded manual GUI
+session. `--no-capture` and `--no-serial` cannot be combined.
+
+1. Local capture, remote CH9329. On the serial computer:
+
+   ```sh
+   build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
+   ```
+
+   GUI: **Video source** **Local device**, **Control target** **Relay**.
+2. Video from one relay and keyboard/mouse through another. On the capture
+   computer, `--serve --no-serial`; on the serial computer, the `--no-capture`
+   command above. GUI: both selectors **Relay**, with a different host or a
+   different control port.
+
+   ```sh
+   build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0" --mode-index 0
+   ```
+
+3. Video from a relay, CH9329 on the GUI computer. Use the `--no-serial`
+   command above on the capture computer. GUI: **Video source** **Relay**,
+   **Control target** **Local serial**.
+
+A control-only relay trusts the GUI's picture-freshness claim. It does not see
+the picture. A video-only relay still listens on the control port for the
+handshake. See
+[LAN relay setup](docs/lan-relay.md#put-the-capture-card-and-the-ch9329-on-different-computers)
+for ports, role matching, and the same unverified status.
 
 MJPEG pass-through is the default network video format. Raw capture supports four explicit profiles: `--encoding h264-quality|h264-size|h265-quality|h265-size`. See [LAN relay setup](docs/lan-relay.md#choose-h264h265-encoding)
 for encoder requirements and the GUI's **Decode** setting.

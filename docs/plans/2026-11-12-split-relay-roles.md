@@ -174,14 +174,23 @@ Evidence:
 
 ### T4：文档
 
-Status: pending
+Status: done
 Depends on: T3
 Targets: `docs/lan-relay.md`、`README*.md`（若有 relay 使用说明）
 
-- [ ] 三种拓扑的启动命令与 GUI 选择；说明分离模式下画面门槛在 GUI 端、relay 信任客户端声明。
-- [ ] 硬件组合标记为未验证。
-- [ ] 提交 `docs(relay): document split video and control topologies`。
+- [x] 三种拓扑的启动命令与 GUI 选择；说明分离模式下画面门槛在 GUI 端、relay 信任客户端声明。
+- [x] 硬件组合标记为未验证。
+- [x] 提交 `docs(relay): document split video and control topologies`。
+
+Evidence:
+
+- 对照 `src/app/relay_main.cpp`：`--no-capture` 不打开采集、`--no-serial` 不打开串口，二者同时使用在枚举前退出并打印 `--no-capture and --no-serial cannot be combined`。`RelayServer::start` 只在非 control 角色绑定视频端口。
+- 对照 `src/network/relay_session.cpp`：Hello 角色必须与服务端相等，不等则 `role_unsupported`，先于 busy 与 codec。both 不接受 video 或 control。客户端文案是 `角色不匹配`（`relay_client.cpp`）。
+- 对照 `src/network/relay_server.cpp` 与 `relay_client.cpp`：control 角色不把 proof 的展示序号和本机已发送帧比较；`video_fresh` 来自 GUI 在 `renderer.upload` 成功后调用的 `video_presented`。画面门槛在 GUI 端，control relay 信任该声明。
+- 对照 `src/app/main.cpp`：选择器为 Local device / Relay 与 Local serial / Relay / None。主机和控制端口都相同才合并为一个 both 客户端。状态栏为 `LAN`、`LAN video`、`LAN control`。
+- 写入 `docs/lan-relay.md`、`README.md`、`README.zh-CN.md`。三种分离拓扑和 GUI 三种组合标为未验证：没有硬件实测，也没有手动 GUI 记录。
+- 只改了 Markdown，没有重新跑 `make test` 或 `make lint`。
 
 ## 进度
 
-T3 已完成。下一个任务：T4。
+T4 已完成。
