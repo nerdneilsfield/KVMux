@@ -131,19 +131,25 @@ Evidence:
 
 ### T2：客户端按角色拆分
 
-Status: pending
+Status: done
 Depends on: T1
 Acceptance: A1 A4 A6 A7
 Targets: `src/network/relay_client.*`、`tests/relay_client_test.cpp`、`tests/kvm_session_input_test.cpp` 或新的 relay 集成测试
 
-- [ ] `ClientOptions.role`；video 角色客户端不发 Sync/输入，照常回 inactive proof 保活；control 角色客户端不建 receiver/decoder、丢弃 media，`video_fresh` 来自 `video_presented` 的本地不等即新去重，proof 填本地展示序号。
-- [ ] `control_snapshot`：challenge 超时或 stopped 时清零 `release_confirmed`（所有角色）。
-- [ ] `role_unsupported` 的客户端错误文案。
-- [ ] 包装器与角色错配为前置条件失败。
-- [ ] `make lint`、`make test`，A6、A7 通过，A4 回归通过。
-- [ ] 提交 `feat(relay): split relay client into video and control roles`。
+- [x] `ClientOptions.role`；video 角色客户端不发 Sync/输入，照常回 inactive proof 保活；control 角色客户端不建 receiver/decoder、丢弃 media，`video_fresh` 来自 `video_presented` 的本地不等即新去重，proof 填本地展示序号。
+- [x] `control_snapshot`：challenge 超时或 stopped 时清零 `release_confirmed`（所有角色）。
+- [x] `role_unsupported` 的客户端错误文案。
+- [x] 包装器与角色错配为前置条件失败。
+- [x] `make lint`、`make test`，A6、A7 通过，A4 回归通过。
+- [x] 提交 `feat(relay): split relay client into video and control roles`。
 
 Evidence:
+
+- `HEADLESS=1 CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr cmake --build --preset linux-debug-headless` 后，在 `build/linux-debug-headless` 跑 `ctest --output-on-failure`：24 项中 23 项通过，约 63 秒。失败项是 `relay_client`。`relay_client_role` 通过（16.25 秒）。`relay_wire`、`relay_session`、`relay_role`、`relay_server`、`relay_recovery`、`relay_client_status`、`kvm_session_input` 通过。
+- `relay_client` 仍是基线失败，没有新的失败模式。单独跑 `--case chunked_ascii_paste_loopback`：4 次里 3 次通过、1 次在 `tests/relay_client_test.cpp:291` 断言键盘报告少 1。`--case paste_keepalive_blackholed_status` 与这次全量 `ctest` 都失败在 `tests/relay_integration_fakes.hpp:216` 的 `GuiFixture::activate()`。这两处与干净的 `76eecbf` 相同。
+- `make format-check` 仍失败在 `tests/codec_startup_fallback_test.cpp:21`（基线，clang-format 23）。T2 改动过的 C/C++ 文件 `clang-format --dry-run --Werror` 通过。`make cppcheck` 因未安装 cppcheck 退出码 127，`make lint` 因此不能跑完。
+- 使用 `HEADLESS=1`：GUI 预设配置 SDL3 时缺少 XINPUT（`libxi-dev`），本机不能安装。`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr`：系统没有 FFmpeg 开发包；该前缀里的静态库已移开，链接的是系统共享库。
+- 验收测试：A1 客户端 `video_client_stays_up_without_sending_control`；A3 客户端 `role_mismatch_reports_unsupported`；A4 除基线 `relay_client` 外的 relay 测试通过；A6a `control_session_releases_when_capture_stops`；A6b `control_session_releases_when_presentation_repeats`；A6c `control_session_accepts_restarted_sequence`；A7 `release_confirmed_tracks_challenge_not_picture`。
 
 ### T3：GUI 独立选择视频来源与键鼠去向
 
@@ -171,4 +177,4 @@ Targets: `docs/lan-relay.md`、`README*.md`（若有 relay 使用说明）
 
 ## 进度
 
-T1 已完成。下一个任务：T2。
+T2 已完成。下一个任务：T3。

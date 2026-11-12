@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <random>
@@ -123,6 +124,12 @@ struct RelayClient::Impl {
   Clock::time_point progress{}, challenge_at{}, consumed{}, status_at{},
       sync_requested_at{};
   std::uint64_t presented_media{}, presented_capture{};
+  // Control role has no decoded media. A new local presentation is any
+  // (generation, sequence) pair that differs from the last one, including a
+  // generation change that restarts sequence at 1.
+  std::uint64_t local_generation{}, local_sequence{};
+  bool local_seen{};
+  Clock::time_point local_presented_at{};
   struct Presentation {
     std::uint64_t capture{}, media{}, generation{}, marker{};
     Clock::time_point arrival{};
@@ -141,10 +148,34 @@ struct RelayClient::Impl {
   std::optional<MediaReason> decode_recovery;
   bool decode_done{};
 
+  bool presented_recent(Clock::time_point now) const {
+    if (options.role == wire::RelayRole::control) {
+      return local_seen && local_sequence != 0 &&
+             now - local_presented_at < 500ms;
+    }
+    return consumed != Clock::time_point{} && now - consumed < 500ms;
+  }
   bool fresh(Clock::time_point now) const {
     return gui_seen && now - progress < 250ms &&
            challenge_at != Clock::time_point{} && now - challenge_at < 250ms &&
-           consumed != Clock::time_point{} && now - consumed < 500ms;
+           presented_recent(now);
+  }
+  void publish_intent(ClientSession& session, Clock::time_point now,
+                      bool strict) {
+    bool video_fresh;
+    if (options.role == wire::RelayRole::control)
+      video_fresh = presented_recent(now);
+    else if (strict)
+      video_fresh = fresh(now);
+    else
+      video_fresh = gui_seen && now - progress < 250ms &&
+                    consumed != Clock::time_point{} && now - consumed < 500ms;
+    const bool proof_active =
+        options.role == wire::RelayRole::video ? false : active;
+    const auto sequence = options.role == wire::RelayRole::control
+                              ? local_sequence
+                              : presented_media;
+    session.set_intent(intent, proof_active, video_fresh, sequence);
   }
   bool ready(Clock::time_point now) const {
     return !stopped && fresh(now) &&
@@ -361,7 +392,7 @@ struct RelayClient::Impl {
       fail(error);
       return;
     }
-    ClientSession session(*control_peer);
+    ClientSession session(*control_peer, 7, options.role);
     std::unique_ptr<KcpChannel> kcp;
     std::unique_ptr<MediaReceiver> receiver;
     std::optional<wire::RefreshRequest> refresh;
@@ -382,26 +413,31 @@ struct RelayClient::Impl {
             fail("UDP control send failed");
         } else if (action.kind == SessionAction::Kind::established) {
           kcp = std::make_unique<KcpChannel>(session.tuple().conversation);
-          receiver = std::make_unique<MediaReceiver>(
-              session.welcome().codec, session.welcome().generation);
-          {
-            std::lock_guard lock(mutex);
-            generation = session.welcome().generation;
-            video.codec = session.welcome().codec;
-            video.media = {};
-            video.last_recovery_reason = MediaReason::none;
+          if (options.role != wire::RelayRole::control) {
+            receiver = std::make_unique<MediaReceiver>(
+                session.welcome().codec, session.welcome().generation);
+            {
+              std::lock_guard lock(mutex);
+              generation = session.welcome().generation;
+              video.codec = session.welcome().codec;
+              video.media = {};
+              video.last_recovery_reason = MediaReason::none;
+            }
+            if (session.welcome().codec != VideoCodec::mjpeg)
+              decoder_worker = std::thread([this] { decoder_loop(); });
           }
-          if (session.welcome().codec != VideoCodec::mjpeg)
-            decoder_worker = std::thread([this] { decoder_loop(); });
         } else if (action.kind == SessionAction::Kind::expired) {
           if (closing)
             stopped = true;
           else if (!stopped)
             fail("UDP session expired");
         } else if (action.kind == SessionAction::Kind::rejected) {
-          fail(action.rejection == wire::BusyReason::no_common_codec
-                   ? "No common relay codec"
-                   : "Relay already controlled");
+          const char* message = "Relay already controlled";
+          if (action.rejection == wire::BusyReason::no_common_codec)
+            message = "No common relay codec";
+          else if (action.rejection == wire::BusyReason::role_unsupported)
+            message = "角色不匹配";
+          fail(message);
         }
       }
     };
@@ -522,7 +558,7 @@ struct RelayClient::Impl {
         cancel = std::exchange(release_pending, false);
         disconnect = std::exchange(disconnect_pending, false);
         if (disconnect && !intent) intent = 1;
-        session.set_intent(intent, active, fresh(now), presented_media);
+        publish_intent(session, now, true);
       }
       if (cancel || disconnect) {
         actions(session.cancel(disconnect ? wire::CancelReason::disconnect
@@ -546,7 +582,8 @@ struct RelayClient::Impl {
         if (!envelope) continue;
         now = Clock::now();
         if (envelope->kind == wire::EnvelopeKind::media) {
-          if (receiver && packet.datagram.source == *media_peer &&
+          if (options.role != wire::RelayRole::control && receiver &&
+              packet.datagram.source == *media_peer &&
               session.phase() == SessionPhase::established &&
               envelope->tuple == session.tuple()) {
             {
@@ -573,10 +610,7 @@ struct RelayClient::Impl {
         // video progress.
         {
           std::lock_guard lock(mutex);
-          const bool video_fresh = gui_seen && now - progress < 250ms &&
-                                   consumed != Clock::time_point{} &&
-                                   now - consumed < 500ms;
-          session.set_intent(intent, active, video_fresh, presented_media);
+          publish_intent(session, now, false);
         }
         actions(session.on_datagram(packet.datagram.source,
                                     packet.datagram.bytes, now));
@@ -794,6 +828,9 @@ struct RelayClient::Impl {
 };
 RelayClient::RelayClient(ClientOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
+wire::RelayRole RelayClient::role() const noexcept {
+  return impl_->options.role;
+}
 RelayClient::~RelayClient() {
   stop();
   if (impl_->worker.joinable()) impl_->worker.join();
@@ -827,7 +864,10 @@ void RelayClient::start() {
     p.presentations.clear();
     p.decode_recovery.reset();
     p.intent = p.wire_sequence = p.last_source_sequence = p.presented_media =
-        p.presented_capture = p.marker = p.generation = 0;
+        p.presented_capture = p.local_generation = p.local_sequence = p.marker =
+            p.generation = 0;
+    p.local_seen = false;
+    p.local_presented_at = {};
     p.active = p.barrier = p.release_pending = p.disconnect_pending =
         p.gui_seen = p.decode_done = p.intent_canceled = p.cancel_inflight =
             false;
@@ -888,6 +928,16 @@ void RelayClient::video_presented(std::uint64_t generation,
                                   std::uint64_t sequence) noexcept {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
+  if (p.options.role == wire::RelayRole::control) {
+    if (!p.local_seen || generation != p.local_generation ||
+        sequence != p.local_sequence) {
+      p.local_seen = true;
+      p.local_generation = generation;
+      p.local_sequence = sequence;
+      p.local_presented_at = Clock::now();
+    }
+    return;
+  }
   if (generation != p.capture.generation || sequence <= p.presented_capture)
     return;
   auto found = std::find_if(p.presentations.begin(), p.presentations.end(),
@@ -906,6 +956,8 @@ void RelayClient::video_presented(std::uint64_t generation,
 kvmux::SubmitResult RelayClient::synchronize(InputSync value) {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
+  if (p.options.role == wire::RelayRole::video)
+    return kvmux::SubmitResult::not_ready;
   if (p.cancel_inflight || !p.ready(Clock::now()) ||
       value.epoch != p.control.epoch || !value.intent_generation ||
       !value.revision || !wire::valid_state(value.state))
@@ -933,6 +985,8 @@ kvmux::SubmitResult RelayClient::synchronize(InputSync value) {
 kvmux::SubmitResult RelayClient::submit(ControlEvent event) {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
+  if (p.options.role == wire::RelayRole::video)
+    return kvmux::SubmitResult::not_ready;
   if (!p.ready(Clock::now()) || !p.barrier || !p.active ||
       event.epoch != p.control.epoch ||
       event.sequence <= p.last_source_sequence)
@@ -976,6 +1030,8 @@ kvmux::SubmitResult RelayClient::start_ascii_paste_text(
     std::vector<std::uint8_t> normalized) {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
+  if (p.options.role == wire::RelayRole::video)
+    return kvmux::SubmitResult::not_ready;
   if (normalized.empty() || normalized.size() > 65536 ||
       !accepted_us_ascii_bytes(normalized) || !p.ready(Clock::now()) ||
       !p.barrier || !p.active || (p.paste && !p.paste->snapshot.terminal()))
@@ -1035,12 +1091,16 @@ ControlSnapshot RelayClient::control_snapshot() const {
     result.release_confirmed = false;
     result.applied.known = false;
   }
+  const auto now = Clock::now();
+  if (p.stopped || p.challenge_at == Clock::time_point{} ||
+      now - p.challenge_at >= 250ms)
+    result.release_confirmed = false;
   const bool paste_running =
       p.paste && !p.paste->snapshot.terminal() &&
       (p.paste->execute_armed ||
        p.paste->snapshot.state == PasteUploadState::executing ||
        p.paste->snapshot.state == PasteUploadState::preparing);
-  if (result.state == ControlConnectionState::ready && !p.fresh(Clock::now()) &&
+  if (result.state == ControlConnectionState::ready && !p.fresh(now) &&
       !paste_running) {
     result.state = ControlConnectionState::stalled;
     result.applied.known = false;
@@ -1062,6 +1122,20 @@ TrafficSnapshot RelayClient::traffic_snapshot() const {
 std::optional<CaptureSample> RelayClient::take_sample() {
   std::lock_guard lock(impl_->mutex);
   return std::exchange(impl_->latest, std::nullopt);
+}
+NetworkCaptureSource::NetworkCaptureSource(std::shared_ptr<RelayClient> client)
+    : client_(std::move(client)) {
+  const auto role = client_ ? client_->role() : wire::RelayRole::control;
+  if (!client_ ||
+      (role != wire::RelayRole::video && role != wire::RelayRole::both))
+    std::abort();
+}
+NetworkControlSink::NetworkControlSink(std::shared_ptr<RelayClient> client)
+    : client_(std::move(client)) {
+  const auto role = client_ ? client_->role() : wire::RelayRole::video;
+  if (!client_ ||
+      (role != wire::RelayRole::control && role != wire::RelayRole::both))
+    std::abort();
 }
 std::vector<DeviceInfo> NetworkCaptureSource::enumerate_devices() {
   DeviceInfo device;

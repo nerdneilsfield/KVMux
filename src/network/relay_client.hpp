@@ -12,6 +12,7 @@ struct ClientOptions {
   std::string host{"127.0.0.1"};
   std::uint16_t control_port{17000}, video_port{17001};
   CodecBackend decoder_backend{CodecBackend::automatic};
+  wire::RelayRole role{wire::RelayRole::both};
 };
 struct ClientVideoSnapshot {
   VideoCodec codec{VideoCodec::mjpeg};
@@ -62,6 +63,7 @@ class RelayClient {
  public:
   explicit RelayClient(ClientOptions options);
   ~RelayClient();
+  [[nodiscard]] wire::RelayRole role() const noexcept;
   void start();
   void stop() noexcept;
   void release() noexcept;
@@ -90,8 +92,7 @@ class RelayClient {
 };
 class NetworkCaptureSource final : public CaptureSource {
  public:
-  explicit NetworkCaptureSource(std::shared_ptr<RelayClient> client)
-      : client_(std::move(client)) {}
+  explicit NetworkCaptureSource(std::shared_ptr<RelayClient> client);
   std::vector<DeviceInfo> enumerate_devices() override;
   std::vector<CaptureMode> enumerate_modes(const std::string&) override;
   void start(const CaptureMode&) override { client_->start(); }
@@ -108,8 +109,7 @@ class NetworkCaptureSource final : public CaptureSource {
 };
 class NetworkControlSink final : public ControlSink {
  public:
-  explicit NetworkControlSink(std::shared_ptr<RelayClient> client)
-      : client_(std::move(client)) {}
+  explicit NetworkControlSink(std::shared_ptr<RelayClient> client);
   void connect(std::string, int, std::uint8_t) override { client_->start(); }
   void disconnect() noexcept override { client_->stop(); }
   void set_mouse_mode(MouseMode mode) override { client_->mouse_mode(mode); }
