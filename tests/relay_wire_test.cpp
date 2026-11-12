@@ -47,9 +47,14 @@ void envelope_golden_offsets_and_1200_ceiling() {
   w::Tuple tuple{0x0102030405060708, 0x1112131415161718, 0x21222324};
   auto b = w::encode_envelope({w::EnvelopeKind::kcp, tuple, body});
   check(b && b->size() == 1200);
-  Bytes header{0x4b, 0x56, 0x4d, 0x58, 5,    6,    4,    0x90, 1,    2,    3,
-               4,    5,    6,    7,    8,    0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-               0x17, 0x18, 0x21, 0x22, 0x23, 0x24, 0,    0,    0,    0};
+  check(w::protocol_version == 6);
+  Bytes header{0x4b, 0x56, 0x4d, 0x58, w::protocol_version,
+               6,    4,    0x90, 1,    2,
+               3,    4,    5,    6,    7,
+               8,    0x11, 0x12, 0x13, 0x14,
+               0x15, 0x16, 0x17, 0x18, 0x21,
+               0x22, 0x23, 0x24, 0,    0,
+               0,    0};
   check(std::equal(header.begin(), header.end(), b->begin()));
   check(w::encode_envelope({w::EnvelopeKind::media, tuple, body}).has_value());
   body.push_back(0);
@@ -134,6 +139,26 @@ void control_golden_vectors_and_exact_lengths() {
     check(w::encode_envelope({kind, tuple, *b}).has_value());
   }
   check(*w::encode_raw(w::Hello{7}) == Bytes({7, 0, 0, 0}));
+  check(*w::encode_raw(w::Hello{7, w::RelayRole::video}) ==
+        Bytes({7, 1, 0, 0}));
+  check(*w::encode_raw(w::Hello{7, w::RelayRole::control}) ==
+        Bytes({7, 2, 0, 0}));
+  for (auto role :
+       {w::RelayRole::both, w::RelayRole::video, w::RelayRole::control}) {
+    auto hello = *w::encode_raw(w::Hello{7, role});
+    auto decoded =
+        std::get<w::Hello>(*w::decode_raw(w::EnvelopeKind::hello, hello));
+    check(decoded.codecs == 7 && decoded.role == role);
+  }
+  auto bad_role = *w::encode_raw(w::Hello{7, w::RelayRole::control});
+  bad_role[1] = 3;
+  check(!w::decode_raw(w::EnvelopeKind::hello, bad_role));
+  auto unsupported = *w::encode_raw(w::Busy{w::BusyReason::role_unsupported});
+  check(unsupported == Bytes({2}));
+  check(std::get<w::Busy>(*w::decode_raw(w::EnvelopeKind::busy, unsupported))
+            .reason == w::BusyReason::role_unsupported);
+  unsupported[0] = 3;
+  check(!w::decode_raw(w::EnvelopeKind::busy, unsupported));
   check(!w::encode_raw(w::Hello{0}));
   check(!w::encode_raw(w::Hello{8}));
   check(*w::encode_raw(w::Welcome{VideoCodec::mjpeg, 9}) ==

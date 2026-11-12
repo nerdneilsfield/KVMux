@@ -27,13 +27,15 @@ struct ServerSnapshot {
       pacer{};  // sent_bytes means paced bytes, not confirmed socket delivery.
   MediaReason last_reason{MediaReason::none};
 };
-// Caller starts native capture and connects the serial sink first.
-// stop() joins all workers; capture and sink must outlive the server.
+// Either side may be null. Role is video when only capture is set, control
+// when only the sink is set, and both when both are set. Both null fails
+// start(). The caller starts capture and connects the sink when that side is
+// present. stop() joins workers; non-null objects must outlive the server.
 class RelayServer {
  public:
   using EncoderFactory =
       std::function<std::unique_ptr<VideoEncoder>(CodecBackend, std::string&)>;
-  RelayServer(CaptureSource&, Ch9329ControlSink&,
+  RelayServer(CaptureSource*, Ch9329ControlSink*,
               EncoderFactory = create_video_encoder);
   ~RelayServer();
   bool start(const ServerOptions&, std::string& error);

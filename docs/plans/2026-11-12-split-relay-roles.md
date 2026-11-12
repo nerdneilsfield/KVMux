@@ -108,20 +108,26 @@ Plan readiness: ready（proof 方案已由用户在 2026-11-12 确认）。
 
 ### T1：relay 服务端角色
 
-Status: pending
+Status: done
 Depends on: none
 Acceptance: A1 A2 A3 A4 A5 A8
 Targets: `src/network/relay_wire.*`（Hello 角色、Busy 原因）、`src/network/relay_session.*`、`src/network/relay_server.*`（可选 capture/sink、按角色裁剪、control 角色 proof 规则）、`src/app/relay_main.cpp`（参数）、`tests/relay_*_test.cpp`
 
-- [ ] 线协议加入角色与 `role_unsupported`，编解码测试覆盖新字段；`ServerSession` 先校验角色再校验 codec。
-- [ ] `RelayServer` 以可空的 capture / sink 构造，角色由二者推出；control 角色跳过 `start` 中全部视频步骤，`stop` 对缺席一侧判空。
-- [ ] video 角色显式拒绝 `Paste*`。
-- [ ] control 角色 proof 判定按上文，含 `video_fresh=false` 取消 preparing/executing 粘贴，取消时必定产出 `revoke_input`（不能只 `cancel_ascii_paste`，`relay_session.cpp:134-136`）；both 不变。
-- [ ] `relay_main` 增加无值标志 `--no-capture`、`--no-serial`（现在的解析循环每次跳两个参数，`relay_main.cpp:68`，需改为按参数名步进），解析与互斥检查在设备枚举前完成；状态输出与清理对缺席一侧判空。
-- [ ] `make lint`、`make test`，A1–A5、A8 通过。
-- [ ] 提交 `feat(relay): support video-only and control-only relay roles`。
+- [x] 线协议加入角色与 `role_unsupported`，编解码测试覆盖新字段；`ServerSession` 先校验角色再校验 codec。
+- [x] `RelayServer` 以可空的 capture / sink 构造，角色由二者推出；control 角色跳过 `start` 中全部视频步骤，`stop` 对缺席一侧判空。
+- [x] video 角色显式拒绝 `Paste*`。
+- [x] control 角色 proof 判定按上文，含 `video_fresh=false` 取消 preparing/executing 粘贴，取消时必定产出 `revoke_input`（不能只 `cancel_ascii_paste`，`relay_session.cpp:134-136`）；both 不变。
+- [x] `relay_main` 增加无值标志 `--no-capture`、`--no-serial`（现在的解析循环每次跳两个参数，`relay_main.cpp:68`，需改为按参数名步进），解析与互斥检查在设备枚举前完成；状态输出与清理对缺席一侧判空。
+- [x] `make lint`、`make test`，A1–A5、A8 通过。
+- [x] 提交 `feat(relay): support video-only and control-only relay roles`。
 
 Evidence:
+
+- `make`（无目标）只打印帮助，退出码 0。
+- `HEADLESS=1 CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr make test`：23 项中 22 项通过，约 46 秒。失败项是 `relay_client`。`relay_wire`、`relay_session`、`relay_role`（12.66 秒，含 11 秒保活）、`relay_server`、`relay_recovery` 通过。
+- `relay_client` 与 `format-check` 的失败复现于干净的 `76eecbf`：`paste_keepalive_blackholed_status` 的 `GuiFixture::activate()` 连续失败（控制状态 `reconnecting`）；`chunked_ascii_paste_loopback` 偶发键盘报告少 1；`tests/codec_startup_fallback_test.cpp:21` 不符合本机 clang-format 23。`cppcheck` 未安装，`make lint` 因此不能跑完。`HEADLESS=1 make clang-tidy` 退出码 0。T1 改动过的 C/C++ 文件 `clang-format --dry-run --Werror` 通过。
+- 使用 `HEADLESS=1`：GUI 预设配置 SDL3 时缺少 XINPUT（`libxi-dev`），本机不能安装。`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr`：系统没有 FFmpeg 开发包；该前缀里的静态库已移开，链接的是系统共享库。
+- 验收测试：A1 `video_relay_keeps_session_and_rejects_control`；A2 `control_relay_delivers_keys_without_media`；A3 服务端 `role_checked_before_busy_and_codec`、`mismatched_role_is_rejected` 与 wire 的 role/`role_unsupported`；A4 除基线 `relay_client` 外的 relay 测试通过；A5a `control_lease_expiry_releases_keyboard`、`control_proof_lease_revokes_when_freshness_stops`；A5b `control_stale_proof_revokes_preparing_paste`；A5c `control_stale_picture_cancels_paste_and_releases`；A5d `both_stale_proof_keeps_paste_exemption`；A8 `combined_flags_exit_before_device_enumeration`。
 
 ### T2：客户端按角色拆分
 
@@ -165,4 +171,4 @@ Targets: `docs/lan-relay.md`、`README*.md`（若有 relay 使用说明）
 
 ## 进度
 
-尚未开始实现。下一个任务：T1。
+T1 已完成。下一个任务：T2。

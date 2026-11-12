@@ -29,7 +29,7 @@ struct RelayFixture {
   FakeSerial serial;
   FakeCapture capture;
   Ch9329ControlSink sink{serial.io()};
-  kvmux::relay::RelayServer server{capture, sink};
+  kvmux::relay::RelayServer server{&capture, &sink};
   explicit RelayFixture(const char* jpeg, std::uint64_t rate = 12000000) {
     capture.jpeg = fixture_bytes(jpeg);
     sink.connect("fake", 115200);

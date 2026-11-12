@@ -40,8 +40,9 @@ std::uint32_t milliseconds(Clock::time_point now) {
 }
 }  // namespace
 struct RelayServer::Impl {
-  CaptureSource& capture;
-  Ch9329ControlSink& sink;
+  CaptureSource* capture;
+  Ch9329ControlSink* sink;
+  wire::RelayRole role;
   EncoderFactory encoder_factory;
   ServerOptions options;
   std::optional<udp::Socket> control_socket, video_socket;
@@ -56,10 +57,16 @@ struct RelayServer::Impl {
   std::string media_error;
   ServerSnapshot snapshot;
 
-  Impl(CaptureSource& c, Ch9329ControlSink& s, EncoderFactory f)
-      : capture(c), sink(s), encoder_factory(std::move(f)) {}
+  Impl(CaptureSource* c, Ch9329ControlSink* s, EncoderFactory f)
+      : capture(c),
+        sink(s),
+        role(!c && s   ? wire::RelayRole::control
+             : c && !s ? wire::RelayRole::video
+                       : wire::RelayRole::both),
+        encoder_factory(std::move(f)) {}
 
   void media_loop() {
+    if (!capture) return;
     std::unique_ptr<VideoEncoder> codec;
     VideoProcessor processor;
     std::unique_ptr<SwsContext, decltype(&sws_freeContext)> scaler(
@@ -98,7 +105,7 @@ struct RelayServer::Impl {
             std::string error;
             codec = encoder_factory(options.encoder_backend, error);
             if (!codec) throw std::runtime_error("H.26x encoder: " + error);
-            const auto mode = capture.snapshot().actual_mode;
+            const auto mode = capture->snapshot().actual_mode;
             CodecConfig settings;
             settings.width = mode.width;
             settings.height = mode.height;
@@ -148,7 +155,7 @@ struct RelayServer::Impl {
         }
         // Drain delayed codec output above even when source admission is slow.
         if (Clock::now() < next_source) continue;
-        auto sample = capture.take_latest_sample();
+        auto sample = capture->take_latest_sample();
         if (!sample || Clock::now() - sample->arrival >= 250ms) {
           std::this_thread::sleep_for(2ms);
           continue;
@@ -227,7 +234,7 @@ struct RelayServer::Impl {
   }
 
   void run() {
-    ServerSession session(options.codec);
+    ServerSession session(options.codec, role);
     std::unique_ptr<KcpChannel> kcp;
     std::unique_ptr<MediaPacer> pacer;
     std::optional<SourceAdmission> admission;
@@ -263,9 +270,10 @@ struct RelayServer::Impl {
       media_wake.notify_one();
     };
     auto revoke = [&] {
-      sink.cancel_ascii_paste();
-      sink.set_control_active(false);
-      sink.release_all();
+      if (!sink) return;
+      sink->cancel_ascii_paste();
+      sink->set_control_active(false);
+      sink->release_all();
       ack.reset();
     };
     auto actions = [&](const SessionActions& batch) {
@@ -278,19 +286,6 @@ struct RelayServer::Impl {
             break;
           case SessionAction::Kind::established:
             kcp = std::make_unique<KcpChannel>(session.tuple().conversation);
-            pacer = std::make_unique<MediaPacer>(
-                options.codec, session.welcome().generation,
-                options.transport_bytes_per_second, Clock::now());
-            {
-              std::lock_guard lock(media_mutex);
-              const auto nominal = snapshot.nominal_interval;
-              snapshot = {};
-              snapshot.nominal_interval = snapshot.admission_interval = nominal;
-              snapshot.generation = session.welcome().generation;
-              snapshot.transport_bytes_per_second =
-                  options.transport_bytes_per_second;
-              admission.emplace(snapshot.generation, nominal);
-            }
             history.clear();
             sending.reset();
             pending.reset();
@@ -301,14 +296,27 @@ struct RelayServer::Impl {
             control_output.clear();
             control_index = 0;
             revoke();
-            {
-              std::lock_guard lock(media_mutex);
-              media_generation = session.welcome().generation;
-              offer.reset();
-              credit = true;
-              keyframe = true;
+            if (role != wire::RelayRole::control) {
+              pacer = std::make_unique<MediaPacer>(
+                  options.codec, session.welcome().generation,
+                  options.transport_bytes_per_second, Clock::now());
+              {
+                std::lock_guard lock(media_mutex);
+                const auto nominal = snapshot.nominal_interval;
+                snapshot = {};
+                snapshot.nominal_interval = snapshot.admission_interval =
+                    nominal;
+                snapshot.generation = session.welcome().generation;
+                snapshot.transport_bytes_per_second =
+                    options.transport_bytes_per_second;
+                admission.emplace(snapshot.generation, nominal);
+                media_generation = session.welcome().generation;
+                offer.reset();
+                credit = true;
+                keyframe = true;
+              }
+              media_wake.notify_one();
             }
-            media_wake.notify_one();
             break;
           case SessionAction::Kind::revoke_input:
             revoke();
@@ -324,7 +332,7 @@ struct RelayServer::Impl {
               const bool rejects_other =
                   live && live->state != wire::PasteState::finished &&
                   live->transaction_id != action.paste_status->transaction_id;
-              if (!rejects_other) sink.cancel_ascii_paste();
+              if (!rejects_other && sink) sink->cancel_ascii_paste();
             }
             break;
           case SessionAction::Kind::expired:
@@ -396,8 +404,11 @@ struct RelayServer::Impl {
             session.matches(packet.source, envelope->tuple)) {
           const auto proof = std::get<wire::Proof>(
               *wire::decode_raw(envelope->kind, envelope->body));
-          if (proof.active && proof.video_fresh && sending &&
-              sending->sequence == proof.presented_sequence) {
+          if (role == wire::RelayRole::control) {
+            // No sent frames. Session still requires video_fresh.
+            valid_video = true;
+          } else if (proof.active && proof.video_fresh && sending &&
+                     sending->sequence == proof.presented_sequence) {
             // Data can complete at the receiver before paced parity is
             // locally sent. Defer one proof, never authorize an unsent
             // frame; ServerSession still checks original issue time.
@@ -411,12 +422,13 @@ struct RelayServer::Impl {
             }
             if (newer) pending_proof = PendingProof{packet, now};
             continue;
+          } else {
+            valid_video = std::any_of(
+                history.begin(), history.end(), [&](const Sent& frame) {
+                  return frame.sequence == proof.presented_sequence &&
+                         now - frame.arrival < 500ms;
+                });
           }
-          valid_video = std::any_of(
-              history.begin(), history.end(), [&](const Sent& frame) {
-                return frame.sequence == proof.presented_sequence &&
-                       now - frame.arrival < 500ms;
-              });
         }
         SessionIds ids;
         if (envelope->kind == wire::EnvelopeKind::hello &&
@@ -456,11 +468,13 @@ struct RelayServer::Impl {
         }
       }
       const auto lease = session.control_deadline();
-      if (lease && now < *lease) {
-        sink.set_control_active(true);
-        sink.update_ui_heartbeat();
-      } else
-        sink.set_control_active(false);
+      if (sink) {
+        if (lease && now < *lease) {
+          sink->set_control_active(true);
+          sink->update_ui_heartbeat();
+        } else
+          sink->set_control_active(false);
+      }
       if (!kcp) continue;
       for (unsigned i = 0; i < 32; ++i) {
         auto bytes = kcp->receive();
@@ -472,50 +486,55 @@ struct RelayServer::Impl {
         if (auto value = std::get_if<wire::Cancel>(&*message))
           actions(session.cancel(*value, now));
         else if (auto value = std::get_if<wire::Sync>(&*message)) {
-          if (session.check_sync(*value, now) == InputGate::allowed)
+          if (role != wire::RelayRole::video && sink &&
+              session.check_sync(*value, now) == InputGate::allowed)
             actions(session.sync_submitted(
                 *value,
-                sink.synchronize({value->epoch, value->intent, value->revision,
-                                  value->state}),
+                sink->synchronize({value->epoch, value->intent, value->revision,
+                                   value->state}),
                 now));
         } else if (auto value = std::get_if<wire::Edge>(&*message)) {
-          auto gate = session.check_edge(*value, now);
-          if (gate == InputGate::allowed)
-            actions(session.edge_submitted(
-                *value,
-                sink.submit({value->epoch, value->source_sequence, now,
-                             value->payload}),
-                now));
-          else if (gate == InputGate::recovery_required)
-            actions(session.edge_submitted(
-                *value, kvmux::SubmitResult::not_ready, now));
+          if (role != wire::RelayRole::video && sink) {
+            auto gate = session.check_edge(*value, now);
+            if (gate == InputGate::allowed)
+              actions(session.edge_submitted(
+                  *value,
+                  sink->submit({value->epoch, value->source_sequence, now,
+                                value->payload}),
+                  now));
+            else if (gate == InputGate::recovery_required)
+              actions(session.edge_submitted(
+                  *value, kvmux::SubmitResult::not_ready, now));
+          }
         } else if (auto value = std::get_if<wire::PasteBegin>(&*message)) {
           actions(session.paste_begin(*value, now));
         } else if (auto value = std::get_if<wire::PasteChunk>(&*message)) {
           actions(session.paste_chunk(*value, now));
         } else if (auto value = std::get_if<wire::PasteExecute>(&*message)) {
           actions(session.paste_execute(*value, now));
-          if (auto bytes = session.pending_paste_bytes()) {
-            const auto mapped = map_us_ascii_text(std::string_view(
-                reinterpret_cast<const char*>(bytes->data()), bytes->size()));
-            if (!mapped) {
-              sink.cancel_ascii_paste();
-              actions(session.paste_start_failed(now));
-            } else {
-              AsciiPasteJob job;
-              job.gestures.reserve(mapped.gestures.size());
-              for (auto& gesture : mapped.gestures)
-                job.gestures.push_back(std::move(gesture.edges));
-              const auto owner = session.pending_paste_owner();
-              const auto job_id = next_paste_job_id++;
-              if (owner &&
-                  sink.prepare_ascii_paste(
-                      {job_id, owner->first, owner->second, std::move(job)}) ==
-                      kvmux::SubmitResult::accepted)
-                actions(session.paste_started(job_id, now));
-              else {
-                sink.cancel_ascii_paste();
+          if (sink && role != wire::RelayRole::video) {
+            if (auto bytes = session.pending_paste_bytes()) {
+              const auto mapped = map_us_ascii_text(std::string_view(
+                  reinterpret_cast<const char*>(bytes->data()), bytes->size()));
+              if (!mapped) {
+                sink->cancel_ascii_paste();
                 actions(session.paste_start_failed(now));
+              } else {
+                AsciiPasteJob job;
+                job.gestures.reserve(mapped.gestures.size());
+                for (auto& gesture : mapped.gestures)
+                  job.gestures.push_back(std::move(gesture.edges));
+                const auto owner = session.pending_paste_owner();
+                const auto job_id = next_paste_job_id++;
+                if (owner && sink->prepare_ascii_paste({job_id, owner->first,
+                                                        owner->second,
+                                                        std::move(job)}) ==
+                                 kvmux::SubmitResult::accepted)
+                  actions(session.paste_started(job_id, now));
+                else {
+                  sink->cancel_ascii_paste();
+                  actions(session.paste_start_failed(now));
+                }
               }
             }
           }
@@ -541,13 +560,14 @@ struct RelayServer::Impl {
       // at this instant. Status transmission may remain coalesced, but the
       // snapshot must be applied every loop before the deadline pass.
       // tick() can expire the session and destroy this channel.
-      actions(session.update_ascii_paste(sink.ascii_paste_snapshot(), now));
+      if (sink)
+        actions(session.update_ascii_paste(sink->ascii_paste_snapshot(), now));
       actions(session.tick(now));
       if (!kcp) continue;
-      actions(session.update_control_snapshot(sink.snapshot(), now));
+      if (sink) actions(session.update_control_snapshot(sink->snapshot(), now));
       // Serial progress status is coalesced after its state was sampled.
-      if (now - status_at >= 50ms) {
-        const auto value = sink.snapshot();
+      if (sink && now - status_at >= 50ms) {
+        const auto value = sink->snapshot();
         status = wire::Status{value.epoch,
                               value.state,
                               value.target_usb_ready,
@@ -704,7 +724,7 @@ struct RelayServer::Impl {
     media_wake.notify_one();
   }
 };
-RelayServer::RelayServer(CaptureSource& c, Ch9329ControlSink& s,
+RelayServer::RelayServer(CaptureSource* c, Ch9329ControlSink* s,
                          EncoderFactory f)
     : impl_(std::make_unique<Impl>(c, s, std::move(f))) {}
 RelayServer::~RelayServer() { stop(); }
@@ -715,28 +735,33 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
     return false;
   }
   error.clear();
-  if ((options.control_port && options.control_port == options.video_port) ||
-      !options.transport_bytes_per_second ||
-      options.transport_bytes_per_second > 1'000'000'000) {
+  if (!p.capture && !p.sink) {
+    error = "Relay requires capture, serial, or both";
+    return false;
+  }
+  if (!options.transport_bytes_per_second ||
+      options.transport_bytes_per_second > 1'000'000'000 ||
+      (p.role != wire::RelayRole::control && options.control_port &&
+       options.control_port == options.video_port)) {
     error =
         "UDP ports must differ and transport rate must be 1..1000000000 "
         "bytes/s";
     return false;
   }
-  const auto mode = p.capture.snapshot().actual_mode;
-  try {
-    select_mode(std::span<const CaptureMode>(&mode, 1), 0, options.codec);
-  } catch (const std::exception& e) {
-    error = e.what();
-    return false;
-  }
-  if (options.codec != VideoCodec::mjpeg &&
-      (!options.bitrate || options.bitrate > 100'000'000)) {
-    error = "H.26x bitrate must be 1..100000000 bits/s";
-    return false;
-  }
   p.options = options;
-  {
+  if (p.role != wire::RelayRole::control) {
+    const auto mode = p.capture->snapshot().actual_mode;
+    try {
+      select_mode(std::span<const CaptureMode>(&mode, 1), 0, options.codec);
+    } catch (const std::exception& e) {
+      error = e.what();
+      return false;
+    }
+    if (options.codec != VideoCodec::mjpeg &&
+        (!options.bitrate || options.bitrate > 100'000'000)) {
+      error = "H.26x bitrate must be 1..100000000 bits/s";
+      return false;
+    }
     std::lock_guard lock(p.media_mutex);
     p.snapshot = {};
     p.snapshot.transport_bytes_per_second = options.transport_bytes_per_second;
@@ -748,15 +773,18 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
   p.control_socket =
       udp::Socket::bind(options.bind_address, options.control_port, error);
   if (!p.control_socket) return false;
-  p.video_socket =
-      udp::Socket::bind(options.bind_address, options.video_port, error);
-  if (!p.video_socket) {
-    p.control_socket.reset();
-    return false;
+  if (p.role != wire::RelayRole::control) {
+    p.video_socket =
+        udp::Socket::bind(options.bind_address, options.video_port, error);
+    if (!p.video_socket) {
+      p.control_socket.reset();
+      return false;
+    }
   }
   p.stopping = false;
   p.media_error.clear();
-  p.media_worker = std::thread([&p] { p.media_loop(); });
+  if (p.role != wire::RelayRole::control)
+    p.media_worker = std::thread([&p] { p.media_loop(); });
   p.network_worker = std::thread([&p] { p.run(); });
   return true;
 }
@@ -766,8 +794,10 @@ void RelayServer::stop() noexcept {
   p.media_wake.notify_all();
   if (p.network_worker.joinable()) p.network_worker.join();
   if (p.media_worker.joinable()) p.media_worker.join();
-  p.sink.set_control_active(false);
-  p.sink.release_all();
+  if (p.sink) {
+    p.sink->set_control_active(false);
+    p.sink->release_all();
+  }
   p.control_socket.reset();
   p.video_socket.reset();
 }

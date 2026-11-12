@@ -236,9 +236,11 @@ std::optional<std::vector<std::uint8_t>> encode_raw(const RawBody& body) {
       [&](const auto& b) {
         using T = std::decay_t<decltype(b)>;
         if constexpr (std::is_same_v<T, Hello>) {
-          w.ok &= b.codecs > 0 && b.codecs <= 7;
+          const auto role = static_cast<std::uint8_t>(b.role);
+          w.ok &= b.codecs > 0 && b.codecs <= 7 && role <= 2;
           w.integer(b.codecs, 1);
-          w.zeros(3);
+          w.integer(role, 1);
+          w.zeros(2);
         } else if constexpr (std::is_same_v<T, Welcome>) {
           w.mapped(b.codec == VideoCodec::mjpeg  ? 0
                    : b.codec == VideoCodec::hevc ? 1
@@ -248,9 +250,10 @@ std::optional<std::vector<std::uint8_t>> encode_raw(const RawBody& body) {
           w.integer(b.generation, 8);
           w.ok &= b.generation != 0;
         } else if constexpr (std::is_same_v<T, Busy>)
-          w.mapped(b.reason == BusyReason::busy              ? 0
-                   : b.reason == BusyReason::no_common_codec ? 1
-                                                             : -1);
+          w.mapped(b.reason == BusyReason::busy               ? 0
+                   : b.reason == BusyReason::no_common_codec  ? 1
+                   : b.reason == BusyReason::role_unsupported ? 2
+                                                              : -1);
         else if constexpr (std::is_same_v<T, Challenge>) {
           w.integer(b.id, 8);
           w.ok &= b.id != 0;
@@ -275,9 +278,14 @@ std::optional<RawBody> decode_raw(EnvelopeKind kind,
   RawBody b;
   switch (kind) {
     case EnvelopeKind::hello: {
-      Hello h{r.u8()};
-      r.zeros(3);
-      r.ok &= h.codecs > 0 && h.codecs <= 7;
+      Hello h;
+      h.codecs = r.u8();
+      const auto role = r.u8();
+      r.zeros(2);
+      r.ok &= h.codecs > 0 && h.codecs <= 7 && role <= 2;
+      h.role = role == 0   ? RelayRole::both
+               : role == 1 ? RelayRole::video
+                           : RelayRole::control;
       b = h;
       break;
     }
@@ -296,8 +304,10 @@ std::optional<RawBody> decode_raw(EnvelopeKind kind,
     }
     case EnvelopeKind::busy: {
       auto v = r.u8();
-      r.ok &= v <= 1;
-      b = Busy{v == 0 ? BusyReason::busy : BusyReason::no_common_codec};
+      r.ok &= v <= 2;
+      b = Busy{v == 0   ? BusyReason::busy
+               : v == 1 ? BusyReason::no_common_codec
+                        : BusyReason::role_unsupported};
       break;
     }
     case EnvelopeKind::challenge: {
@@ -333,7 +343,7 @@ std::optional<RawBody> decode_raw(EnvelopeKind kind,
 std::optional<Envelope> decode_envelope(std::span<const std::uint8_t> bytes) {
   if (bytes.size() < 32 || bytes.size() > 1200) return {};
   Reader r{bytes.first(32)};
-  if (r.integer(4) != 0x4b564d58 || r.u8() != 5) return {};
+  if (r.integer(4) != 0x4b564d58 || r.u8() != protocol_version) return {};
   auto k = r.u8();
   if (k < 1 || k > 11) return {};
   auto n = r.u16();
@@ -363,7 +373,7 @@ std::optional<std::vector<std::uint8_t>> encode_envelope(const Envelope& e) {
   if (k < 0) return {};
   Writer w;
   w.integer(0x4b564d58, 4);
-  w.integer(5, 1);
+  w.integer(protocol_version, 1);
   w.integer(static_cast<unsigned>(k + 1), 1);
   w.integer(e.body.size(), 2);
   w.integer(e.tuple.session, 8);

@@ -22,7 +22,7 @@ int reconnect_test(GLuint ui_framebuffer, const char* jpeg_path) {
   FakeCapture capture;
   std::ifstream input(jpeg_path, std::ios::binary);
   capture.jpeg.assign(std::istreambuf_iterator<char>(input), {});
-  kvmux::relay::RelayServer server(capture, hardware);
+  kvmux::relay::RelayServer server(&capture, &hardware);
   std::string error;
   if (!server.start({"127.0.0.1", 0, 0}, error)) return 1;
   kvmux::VideoRenderer renderer;

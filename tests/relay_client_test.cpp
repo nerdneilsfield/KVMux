@@ -140,7 +140,7 @@ void hevc_test(const char* path) {
   sink.connect("fake", 115200);
   assert(until([&] { return sink.snapshot().release_confirmed; }));
   kvmux::relay::RelayServer server(
-      capture, sink, [units](CodecBackend, std::string&) {
+      &capture, &sink, [units](CodecBackend, std::string&) {
         return std::make_unique<FixtureEncoder>(units);
       });
   kvmux::relay::ServerOptions options;

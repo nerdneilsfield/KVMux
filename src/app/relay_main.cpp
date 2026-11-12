@@ -6,6 +6,8 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -32,6 +34,7 @@ void print_help(std::ostream& out) {
          "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
          "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] "
          "[--baud 9600]\n"
+         "       [--no-capture | --no-serial]\n"
          "       [--bind 0.0.0.0] [--control-port 17000] [--video-port 17001]\n"
          "       [--codec mjpeg | --encoding "
          "h264-quality|h264-size|h265-quality|h265-size]\n"
@@ -41,6 +44,9 @@ void print_help(std::ostream& out) {
          "Omitted device: require one capture device. Omitted serial: require "
          "one USB\n"
          "CH340/CH341/CH343 VID/PID match (not proof of CH9329 identity).\n"
+         "--no-capture does not open a capture device (control only). "
+         "--no-serial does not open a serial port (video only). "
+         "The two flags cannot be combined.\n"
          "Auto MJPEG: 1080p60, 720p60, 1080p30, 720p30 (including "
          "59.94/29.97),\n"
          "then descending pixel area, width, height and fps; ties use first "
@@ -64,10 +70,20 @@ int serve(int argc, char** argv) {
   std::optional<std::string> device_request, serial_request;
   std::optional<std::size_t> mode_request;
   bool codec_seen = false, encoding_seen = false;
+  bool no_capture = false, no_serial = false;
   int baud = 9600;
-  for (int i = 2; i < argc; i += 2) {
+  for (int i = 2; i < argc; ++i) {
+    const std::string_view key = argv[i];
+    if (key == "--no-capture") {
+      no_capture = true;
+      continue;
+    }
+    if (key == "--no-serial") {
+      no_serial = true;
+      continue;
+    }
     if (i + 1 >= argc) throw std::runtime_error("Missing option value");
-    const std::string_view key = argv[i], value = argv[i + 1];
+    const std::string_view value = argv[++i];
     if (key == "--device")
       device_request = value;
     else if (key == "--serial")
@@ -142,80 +158,110 @@ int serve(int argc, char** argv) {
         throw std::runtime_error("Unknown or invalid serve option");
     }
   }
-  auto capture = kvmux::create_platform_capture_source();
-  const auto device =
-      kvmux::relay::select_device(capture->enumerate_devices(), device_request);
-  const auto modes = capture->enumerate_modes(device);
-  const auto mode =
-      kvmux::relay::select_mode(modes, mode_request, options.codec);
-  const auto serial = kvmux::relay::select_serial(
-      serial_request ? std::vector<kvmux::SerialPortInfo>{}
-                     : kvmux::enumerate_serial_ports(),
-      serial_request);
-  const auto& selected = modes[mode];
-  std::cout << "Selected device=" << std::quoted(device)
-            << " mode-index=" << mode << " size=" << selected.width << 'x'
-            << selected.height << " fps=" << selected.frame_rate.numerator
-            << '/' << selected.frame_rate.denominator
-            << " native-format=" << selected.device_format_name
-            << " delivered-format="
-            << static_cast<int>(selected.delivered_format) << " codec="
-            << (options.codec == kvmux::VideoCodec::hevc   ? "h265"
-                : options.codec == kvmux::VideoCodec::h264 ? "h264"
-                                                           : "mjpeg")
-            << " priority="
-            << (options.codec == kvmux::VideoCodec::mjpeg ? "pass-through"
-                : options.priority == kvmux::EncodingPriority::quality
-                    ? "quality"
-                    : "size")
-            << " selected-bitrate=" << options.bitrate / 1'000'000.0
-            << " Mbit/s (" << options.bitrate / 8'000'000.0 << " MB/s)";
-  const auto effective_bitrate =
-      options.codec == kvmux::VideoCodec::mjpeg
-          ? 0U
-          : kvmux::encoding_profile(options.priority, options.bitrate).bitrate;
-  std::cout << " effective-bitrate=" << effective_bitrate / 1'000'000.0
-            << " Mbit/s (" << effective_bitrate / 8'000'000.0 << " MB/s)"
-            << " UDP-media-cap="
-            << options.transport_bytes_per_second / 1'000'000.0 << " MB/s"
-            << " serial=" << std::quoted(serial) << " baud=" << baud << '\n';
-  if (!serial_request)
+  if (no_capture && no_serial)
+    throw std::runtime_error("--no-capture and --no-serial cannot be combined");
+  std::unique_ptr<kvmux::CaptureSource> capture;
+  std::optional<kvmux::CaptureMode> selected;
+  std::size_t mode = 0;
+  std::string device;
+  if (!no_capture) {
+    capture = kvmux::create_platform_capture_source();
+    device = kvmux::relay::select_device(capture->enumerate_devices(),
+                                         device_request);
+    const auto modes = capture->enumerate_modes(device);
+    mode = kvmux::relay::select_mode(modes, mode_request, options.codec);
+    selected = modes[mode];
+  }
+  std::string serial;
+  if (!no_serial)
+    serial = kvmux::relay::select_serial(
+        serial_request ? std::vector<kvmux::SerialPortInfo>{}
+                       : kvmux::enumerate_serial_ports(),
+        serial_request);
+  if (selected) {
+    const auto& mode_info = *selected;
+    std::cout << "Selected device=" << std::quoted(device)
+              << " mode-index=" << mode << " size=" << mode_info.width << 'x'
+              << mode_info.height << " fps=" << mode_info.frame_rate.numerator
+              << '/' << mode_info.frame_rate.denominator
+              << " native-format=" << mode_info.device_format_name
+              << " delivered-format="
+              << static_cast<int>(mode_info.delivered_format) << " codec="
+              << (options.codec == kvmux::VideoCodec::hevc   ? "h265"
+                  : options.codec == kvmux::VideoCodec::h264 ? "h264"
+                                                             : "mjpeg")
+              << " priority="
+              << (options.codec == kvmux::VideoCodec::mjpeg ? "pass-through"
+                  : options.priority == kvmux::EncodingPriority::quality
+                      ? "quality"
+                      : "size")
+              << " selected-bitrate=" << options.bitrate / 1'000'000.0
+              << " Mbit/s (" << options.bitrate / 8'000'000.0 << " MB/s)";
+    const auto effective_bitrate =
+        options.codec == kvmux::VideoCodec::mjpeg
+            ? 0U
+            : kvmux::encoding_profile(options.priority, options.bitrate)
+                  .bitrate;
+    std::cout << " effective-bitrate=" << effective_bitrate / 1'000'000.0
+              << " Mbit/s (" << effective_bitrate / 8'000'000.0 << " MB/s)"
+              << " UDP-media-cap="
+              << options.transport_bytes_per_second / 1'000'000.0 << " MB/s";
+  }
+  if (!no_serial) {
+    std::cout << (selected ? " serial=" : "Selected serial=")
+              << std::quoted(serial) << " baud=" << baud;
+  }
+  std::cout << '\n';
+  if (!no_serial && !serial_request)
     std::cout << "USB adapter VID/PID match only; CH9329 handshake not yet "
                  "verified.\n";
   std::cout.flush();
-  capture->start(selected);
-  if (capture->snapshot().state == kvmux::CaptureState::fault)
-    throw std::runtime_error(capture->snapshot().error);
-  kvmux::Ch9329ControlSink sink;
-  sink.connect(serial, baud);
-  kvmux::relay::RelayServer server(*capture, sink);
+  if (capture) {
+    capture->start(*selected);
+    if (capture->snapshot().state == kvmux::CaptureState::fault)
+      throw std::runtime_error(capture->snapshot().error);
+  }
+  std::unique_ptr<kvmux::Ch9329ControlSink> sink;
+  if (!no_serial) {
+    sink = std::make_unique<kvmux::Ch9329ControlSink>();
+    sink->connect(serial, baud);
+  }
+  kvmux::relay::RelayServer server(capture.get(), sink.get());
   std::string error;
   if (!server.start(options, error)) throw std::runtime_error(error);
   std::signal(SIGINT, interrupt);
   std::signal(SIGTERM, interrupt);
   std::cout << "Listening on " << options.bind_address << ":"
-            << server.control_port() << " (control), " << server.video_port()
-            << " (video), UDP v3 / KCP. Cap includes envelope+payload+FEC, "
+            << server.control_port() << " (control)";
+  if (server.video_port())
+    std::cout << ", " << server.video_port() << " (video)";
+  std::cout << ", UDP v3 / KCP. Cap includes envelope+payload+FEC, "
                "excludes IP/UDP headers. Trusted LAN only.\n";
   std::string last_status;
   auto media_log_at = std::chrono::steady_clock::time_point{};
   while (!interrupted) {
     if (spdlog::should_log(spdlog::level::debug)) {
-      const auto capture_status = capture->snapshot();
-      const auto control_status = sink.snapshot();
-      const auto status =
-          "capture-state=" +
-          std::to_string(static_cast<int>(capture_status.state)) +
-          " error=" + capture_status.error + " control-state=" +
-          std::to_string(static_cast<int>(control_status.state)) +
-          " error=" + control_status.error;
+      std::string status;
+      if (capture) {
+        const auto capture_status = capture->snapshot();
+        status += "capture-state=" +
+                  std::to_string(static_cast<int>(capture_status.state)) +
+                  " error=" + capture_status.error;
+      }
+      if (sink) {
+        const auto control_status = sink->snapshot();
+        if (!status.empty()) status += ' ';
+        status += "control-state=" +
+                  std::to_string(static_cast<int>(control_status.state)) +
+                  " error=" + control_status.error;
+      }
       if (status != last_status) {
         spdlog::debug("Relay {}", status);
         last_status = status;
       }
     }
     const auto now = std::chrono::steady_clock::now();
-    if (now - media_log_at >= std::chrono::seconds(2)) {
+    if (capture && now - media_log_at >= std::chrono::seconds(2)) {
       const auto media = server.snapshot();
       spdlog::info(
           "UDP media cap={} bytes/s source-interval={} us feedback={} "
@@ -239,8 +285,8 @@ int serve(int argc, char** argv) {
   }
   spdlog::debug("Relay stopping: termination signal");
   server.stop();
-  capture->stop();
-  sink.disconnect();
+  if (capture) capture->stop();
+  if (sink) sink->disconnect();
   return 0;
 }
 int run(int argc, char** argv) {

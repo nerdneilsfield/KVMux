@@ -45,7 +45,7 @@ std::vector<std::uint8_t> raw(w::EnvelopeKind kind, w::Tuple tuple,
 }
 struct Fixture {
   udp::Endpoint client, server, foreign;
-  ServerSession s{VideoCodec::hevc};
+  ServerSession s;
   ClientSession c;
   ControlSnapshot snapshot;
   static udp::Endpoint endpoint(std::uint16_t port) {
@@ -54,11 +54,13 @@ struct Fixture {
     check(p.has_value());
     return *p;
   }
-  Fixture()
+  explicit Fixture(w::RelayRole role = w::RelayRole::both,
+                   VideoCodec codec = VideoCodec::hevc, std::uint8_t codecs = 7)
       : client(endpoint(23001)),
         server(endpoint(23002)),
         foreign(endpoint(23003)),
-        c(server) {
+        s(codec, role),
+        c(server, codecs, role) {
     snapshot.state = ControlConnectionState::ready;
     snapshot.epoch = 7;
     snapshot.target_usb_ready = true;
@@ -299,6 +301,120 @@ void execute_two_chunk_relay_transaction() {
         w::PasteOutcome::canceled);
 }
 
+void prepare_one_byte_paste(Fixture& f, std::uint64_t id) {
+  const std::vector<std::uint8_t> text = {'a'};
+  const auto crc = support::crc32_ieee(text);
+  f.proof(50, 51);
+  check(f.s.paste_begin({id, 1, crc}, at(52)).items[0].paste_status->state ==
+        w::PasteState::uploading);
+  check(f.s.paste_chunk({id, 0, text}, at(53)).items[0].paste_status->state ==
+        w::PasteState::uploaded);
+  check(f.s.paste_execute({id}, at(60)).items[0].paste_status->state ==
+        w::PasteState::preparing);
+}
+w::BusyReason busy_reason(const SessionActions& actions) {
+  auto bytes = packet(actions, w::EnvelopeKind::busy);
+  return std::get<w::Busy>(*w::decode_raw(w::EnvelopeKind::busy,
+                                          w::decode_envelope(bytes)->body))
+      .reason;
+}
+void role_checked_before_busy_and_codec() {
+  const auto client = Fixture::endpoint(23201),
+             server = Fixture::endpoint(23202);
+  ServerSession video{VideoCodec::hevc, w::RelayRole::video};
+  ClientSession control_client{server, 1, w::RelayRole::control};
+  auto mismatched = video.on_datagram(
+      client, packet(control_client.start(14, at(0)), w::EnvelopeKind::hello),
+      at(0), {25, 36, 47});
+  check(busy_reason(mismatched) == w::BusyReason::role_unsupported);
+  check(video.phase() == SessionPhase::idle);
+  ClientSession video_mjpeg{server, 1, w::RelayRole::video};
+  auto codec = video.on_datagram(
+      client, packet(video_mjpeg.start(15, at(1)), w::EnvelopeKind::hello),
+      at(1), {26, 37, 48});
+  check(busy_reason(codec) == w::BusyReason::no_common_codec);
+  check(video.phase() == SessionPhase::idle);
+
+  ServerSession both{VideoCodec::hevc};
+  ClientSession video_client{server, 7, w::RelayRole::video};
+  auto rejected = both.on_datagram(
+      client, packet(video_client.start(16, at(0)), w::EnvelopeKind::hello),
+      at(0), {27, 38, 49});
+  check(busy_reason(rejected) == w::BusyReason::role_unsupported);
+  check(both.phase() == SessionPhase::idle);
+
+  ServerSession control{VideoCodec::hevc, w::RelayRole::control};
+  ClientSession mjpeg_only{server, 1, w::RelayRole::control};
+  auto welcome = packet(
+      control.on_datagram(
+          client, packet(mjpeg_only.start(17, at(0)), w::EnvelopeKind::hello),
+          at(0), {28, 39, 50}),
+      w::EnvelopeKind::welcome);
+  check(std::get<w::Welcome>(*w::decode_raw(w::EnvelopeKind::welcome,
+                                            w::decode_envelope(welcome)->body))
+            .codec == VideoCodec::hevc);
+  check(count(mjpeg_only.on_datagram(server, welcome, at(0)), Kind::send_raw) ==
+        1);
+  check(control.phase() == SessionPhase::pending);
+
+  Fixture occupied;
+  occupied.establish();
+  ClientSession other{occupied.server, 7, w::RelayRole::video};
+  auto busy = occupied.s.on_datagram(
+      occupied.foreign, packet(other.start(18, at(20)), w::EnvelopeKind::hello),
+      at(20));
+  check(busy_reason(busy) == w::BusyReason::role_unsupported);
+  check(occupied.s.phase() == SessionPhase::established);
+}
+void control_proof_lease_revokes_when_freshness_stops() {
+  Fixture f(w::RelayRole::control);
+  f.establish();
+  f.proof(50, 51);
+  check(count(f.s.tick(at(299)), Kind::revoke_input) == 0);
+  check(f.s.execution_deadline().has_value());
+  check(count(f.s.tick(at(300)), Kind::revoke_input) == 1);
+  check(!f.s.execution_deadline());
+  check(f.s.phase() == SessionPhase::established);
+}
+void control_stale_proof_revokes_preparing_paste() {
+  Fixture f(w::RelayRole::control);
+  f.establish();
+  prepare_one_byte_paste(f, 31);
+  // Absence is not a stale picture. The paste keepalive lease outlives the
+  // 250 ms proof lease.
+  check(count(f.s.tick(at(260)), Kind::revoke_input) == 0);
+  check(f.s.paste_status()->state == w::PasteState::preparing);
+  check(count(f.s.tick(at(400)), Kind::revoke_input) == 0);
+  check(f.s.paste_status()->state == w::PasteState::preparing);
+  f.c.set_intent(1, true, false, 100);
+  auto stale = f.proof(450, 451);
+  check(f.s.paste_status()->state == w::PasteState::finished);
+  check(f.s.paste_status()->outcome == w::PasteOutcome::canceled);
+  check(count(stale, Kind::revoke_input) == 1);
+}
+void both_stale_proof_keeps_paste_exemption() {
+  Fixture f;
+  f.establish();
+  prepare_one_byte_paste(f, 32);
+  check(count(f.s.tick(at(400)), Kind::revoke_input) == 0);
+  f.c.set_intent(1, true, false, 100);
+  auto stale = f.proof(450, 451);
+  check(f.s.paste_status()->state == w::PasteState::preparing);
+  check(count(stale, Kind::revoke_input) == 0);
+}
+void video_role_refuses_paste_without_allocation() {
+  Fixture f(w::RelayRole::video);
+  f.establish();
+  const std::vector<std::uint8_t> text = {'a'};
+  const auto crc = support::crc32_ieee(text);
+  check(f.s.paste_begin({41, 1, crc}, at(1)).size == 0);
+  check(f.s.paste_chunk({41, 0, text}, at(2)).size == 0);
+  check(f.s.paste_execute({41}, at(3)).size == 0);
+  check(f.s.paste_cancel({41, w::PasteCancelReason::user}, at(4)).size == 0);
+  check(f.s.paste_keepalive({41}, at(5)).size == 0);
+  check(!f.s.paste_status());
+  check(!f.s.pending_paste_bytes());
+}
 void h264_negotiation_and_no_common_codec() {
   const auto client = Fixture::endpoint(23101),
              server = Fixture::endpoint(23102);
@@ -325,4 +441,9 @@ int main() {
   ownership_cancel_expiry_and_job_id();
   execute_two_chunk_relay_transaction();
   h264_negotiation_and_no_common_codec();
+  role_checked_before_busy_and_codec();
+  control_proof_lease_revokes_when_freshness_stops();
+  control_stale_proof_revokes_preparing_paste();
+  both_stale_proof_keeps_paste_exemption();
+  video_role_refuses_paste_without_allocation();
 }

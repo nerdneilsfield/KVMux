@@ -10,6 +10,9 @@
 
 namespace kvmux::relay::wire {
 inline constexpr std::size_t envelope_bytes = 32, max_datagram_bytes = 1200;
+inline constexpr std::uint8_t protocol_version = 6;
+// Wire values are stable: both=0, video=1, control=2.
+enum class RelayRole : std::uint8_t { both = 0, video = 1, control = 2 };
 enum class EnvelopeKind {
   hello,
   welcome,
@@ -35,13 +38,18 @@ struct Envelope {
 };
 struct Hello {
   std::uint8_t codecs{7};
+  RelayRole role{RelayRole::both};
 };
 struct Welcome {
   VideoCodec codec{VideoCodec::mjpeg};
   std::uint64_t generation{};
   bool operator==(const Welcome&) const = default;
 };
-enum class BusyReason { busy, no_common_codec };
+enum class BusyReason : std::uint8_t {
+  busy = 0,
+  no_common_codec = 1,
+  role_unsupported = 2
+};
 struct Busy {
   BusyReason reason{BusyReason::busy};
 };

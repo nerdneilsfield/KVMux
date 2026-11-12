@@ -43,6 +43,7 @@ bool same_sync(const wire::Sync& a, const wire::Sync& b) {
 }  // namespace
 struct ServerSession::Impl {
   VideoCodec codec;
+  wire::RelayRole role;
   SessionPhase phase{SessionPhase::idle};
   udp::Endpoint peer;
   wire::Tuple tuple;
@@ -80,10 +81,13 @@ struct ServerSession::Impl {
   ControlSnapshot snapshot;
   std::optional<wire::Sync> pending_sync, completed_sync;
   bool barrier{};
-  explicit Impl(VideoCodec c) : codec(c) {
+  explicit Impl(VideoCodec c, wire::RelayRole r) : codec(c), role(r) {
     if (c != VideoCodec::mjpeg && c != VideoCodec::hevc &&
         c != VideoCodec::h264)
       throw std::invalid_argument("session codec");
+    if (r != wire::RelayRole::both && r != wire::RelayRole::video &&
+        r != wire::RelayRole::control)
+      throw std::invalid_argument("session role");
   }
   wire::PasteStatus status(
       wire::PasteStatusReason reason = wire::PasteStatusReason::none) const {
@@ -223,13 +227,26 @@ struct ServerSession::Impl {
       return;
     }
     if (!p.video_fresh || !video_valid) {
-      // A frame stall withdraws admission for new input. A paste already
-      // accepted for serial execution keeps the lease renewed by keepalive.
+      // A frame stall withdraws admission for new input. On both, a paste
+      // already accepted for serial execution keeps the lease renewed by
+      // keepalive. Control has no frames: an explicit video_fresh=false proof
+      // cancels that paste and always revokes. A missing proof still waits
+      // out the keepalive lease.
       const bool paste_running =
           paste &&
           (paste->state == wire::PasteState::preparing ||
            paste->state == wire::PasteState::executing) &&
           paste->lease && now < *paste->lease;
+      if (role == wire::RelayRole::control && !p.video_fresh && paste_running) {
+        cancel_paste(out, wire::PasteStatusReason::canceled);
+        action(out, SessionAction::Kind::revoke_input);
+        execution.reset();
+        valid_proof.reset();
+        barrier = false;
+        pending_sync.reset();
+        completed_sync.reset();
+        return;
+      }
       if (!paste_running)
         revoke(out);
       else {
@@ -267,7 +284,8 @@ struct ServerSession::Impl {
       expire(out);
   }
 };
-ServerSession::ServerSession(VideoCodec c) : impl_(std::make_unique<Impl>(c)) {}
+ServerSession::ServerSession(VideoCodec c, wire::RelayRole role)
+    : impl_(std::make_unique<Impl>(c, role)) {}
 ServerSession::~ServerSession() = default;
 SessionActions ServerSession::on_datagram(
     const udp::Endpoint& peer, std::span<const std::uint8_t> bytes,
@@ -282,6 +300,11 @@ SessionActions ServerSession::on_datagram(
   if (!e) return out;
   if (e->kind == EnvelopeKind::hello) {
     auto hello = std::get<wire::Hello>(*wire::decode_raw(e->kind, e->body));
+    if (hello.role != s.role) {
+      send(out, peer, EnvelopeKind::busy, e->tuple,
+           wire::Busy{wire::BusyReason::role_unsupported});
+      return out;
+    }
     if (s.phase != SessionPhase::idle) {
       if (s.phase == SessionPhase::pending && peer == s.peer &&
           e->tuple.nonce == s.tuple.nonce)
@@ -293,7 +316,7 @@ SessionActions ServerSession::on_datagram(
     auto bit = s.codec == VideoCodec::mjpeg  ? 1
                : s.codec == VideoCodec::hevc ? 2
                                              : 4;
-    if (!(hello.codecs & bit)) {
+    if (s.role != wire::RelayRole::control && !(hello.codecs & bit)) {
       send(out, peer, EnvelopeKind::busy, e->tuple,
            wire::Busy{wire::BusyReason::no_common_codec});
       return out;
@@ -396,6 +419,7 @@ SessionActions ServerSession::paste_begin(const wire::PasteBegin& begin,
                                           SessionTime now) {
   auto& s = *impl_;
   SessionActions out;
+  if (s.role == wire::RelayRole::video) return out;
   s.deadlines(out, now);
   if (s.phase != SessionPhase::established || !begin.transaction_id ||
       begin.normalized_bytes == 0 || begin.normalized_bytes > 65536)
@@ -441,6 +465,7 @@ SessionActions ServerSession::paste_chunk(const wire::PasteChunk& chunk,
                                           SessionTime now) {
   auto& s = *impl_;
   SessionActions out;
+  if (s.role == wire::RelayRole::video) return out;
   s.deadlines(out, now);
   if (s.invalidate_paste(out)) return out;
   if (!s.paste && s.terminal_paste &&
@@ -502,6 +527,7 @@ SessionActions ServerSession::paste_execute(const wire::PasteExecute& execute,
                                             SessionTime now) {
   auto& s = *impl_;
   SessionActions out;
+  if (s.role == wire::RelayRole::video) return out;
   s.deadlines(out, now);
   if (s.invalidate_paste(out)) return out;
   if (!s.paste && s.terminal_paste &&
@@ -553,6 +579,7 @@ SessionActions ServerSession::paste_cancel(const wire::PasteCancel& cancel,
                                            SessionTime now) {
   auto& s = *impl_;
   SessionActions out;
+  if (s.role == wire::RelayRole::video) return out;
   s.deadlines(out, now);
   if (s.invalidate_paste(out)) return out;
   if (s.paste && s.paste->begin.transaction_id == cancel.transaction_id)
@@ -568,6 +595,7 @@ SessionActions ServerSession::paste_keepalive(
   // keepalive received in that pass renew an executing transaction at `now`.
   auto& s = *impl_;
   SessionActions out;
+  if (s.role == wire::RelayRole::video) return out;
   if (s.phase != SessionPhase::established || !s.paste ||
       (s.paste->state != wire::PasteState::executing &&
        s.paste->state != wire::PasteState::preparing) ||
@@ -751,6 +779,7 @@ std::size_t ServerSession::challenge_count() const { return impl_->count; }
 struct ClientSession::Impl {
   udp::Endpoint peer;
   std::uint8_t codecs;
+  wire::RelayRole role;
   SessionPhase phase{SessionPhase::idle};
   wire::Tuple tuple;
   wire::Welcome welcome;
@@ -760,8 +789,12 @@ struct ClientSession::Impl {
   bool active{}, video_fresh{};
   std::uint64_t presented{};
   std::optional<wire::Cancel> cancellation;
-  Impl(udp::Endpoint p, std::uint8_t c) : peer(std::move(p)), codecs(c) {
+  Impl(udp::Endpoint p, std::uint8_t c, wire::RelayRole r)
+      : peer(std::move(p)), codecs(c), role(r) {
     if (!c || c > 7) throw std::invalid_argument("supported codecs");
+    if (r != wire::RelayRole::both && r != wire::RelayRole::video &&
+        r != wire::RelayRole::control)
+      throw std::invalid_argument("session role");
   }
   void close(SessionActions& out) {
     phase = SessionPhase::idle;
@@ -783,11 +816,12 @@ struct ClientSession::Impl {
     if (tuple.session)
       send(out, peer, EnvelopeKind::confirm, tuple, welcome);
     else
-      send(out, peer, EnvelopeKind::hello, tuple, wire::Hello{codecs});
+      send(out, peer, EnvelopeKind::hello, tuple, wire::Hello{codecs, role});
   }
 };
-ClientSession::ClientSession(udp::Endpoint peer, std::uint8_t codecs)
-    : impl_(std::make_unique<Impl>(std::move(peer), codecs)) {}
+ClientSession::ClientSession(udp::Endpoint peer, std::uint8_t codecs,
+                             wire::RelayRole role)
+    : impl_(std::make_unique<Impl>(std::move(peer), codecs, role)) {}
 ClientSession::~ClientSession() = default;
 SessionActions ClientSession::start(std::uint64_t nonce, SessionTime now) {
   auto& s = *impl_;
@@ -832,7 +866,7 @@ SessionActions ClientSession::on_datagram(const udp::Endpoint& peer,
     auto bit = welcome.codec == VideoCodec::mjpeg  ? 1
                : welcome.codec == VideoCodec::hevc ? 2
                                                    : 4;
-    if (!(s.codecs & bit) ||
+    if ((s.role != wire::RelayRole::control && !(s.codecs & bit)) ||
         (s.tuple.session && (s.tuple != e->tuple || s.welcome != welcome)))
       return out;
     s.tuple = e->tuple;

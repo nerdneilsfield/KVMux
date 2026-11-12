@@ -287,6 +287,13 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_relay_session_test PRIVATE kvmux::core)
     add_test(NAME relay_session COMMAND kvmux_relay_session_test)
 
+    add_executable(kvmux_relay_role_test tests/relay_role_test.cpp)
+    target_link_libraries(kvmux_relay_role_test PRIVATE kvmux::core)
+    add_test(NAME relay_role COMMAND kvmux_relay_role_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
+        "$<TARGET_FILE:kvmux-relay>")
+    set_tests_properties(relay_role PROPERTIES TIMEOUT 60)
+
     add_executable(kvmux_udp_media_test tests/udp_media_test.cpp)
     target_link_libraries(kvmux_udp_media_test PRIVATE kvmux::core)
     add_test(NAME udp_media COMMAND kvmux_udp_media_test)

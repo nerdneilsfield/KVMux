@@ -42,13 +42,15 @@ struct SessionIds {
 enum class InputGate { allowed, duplicate, rejected, recovery_required };
 class ServerSession {
  public:
-  explicit ServerSession(VideoCodec);
+  explicit ServerSession(VideoCodec,
+                         wire::RelayRole role = wire::RelayRole::both);
   ~ServerSession();
   ServerSession(const ServerSession&) = delete;
   ServerSession& operator=(const ServerSession&) = delete;
   // Caller supplies newly random nonzero IDs when accepting a free hello.
-  // video_valid defaults false: caller must validate actual current-generation
-  // presentation against bounded sender history, not trust the sequence alone.
+  // video_valid defaults false. both and video callers must validate the
+  // presented sequence against bounded sender history. A control caller has no
+  // frames and passes video_valid when the client declares a fresh picture.
   // `now` is processing time.  A relay may defer a raw proof until its video
   // frame is fully sent; in that case it supplies the packet receipt time so
   // challenge freshness is checked at receipt without backdating leases.
@@ -115,7 +117,8 @@ class ServerSession {
 class ClientSession {
  public:
   explicit ClientSession(udp::Endpoint server,
-                         std::uint8_t supported_codecs = 7);
+                         std::uint8_t supported_codecs = 7,
+                         wire::RelayRole role = wire::RelayRole::both);
   ~ClientSession();
   ClientSession(const ClientSession&) = delete;
   ClientSession& operator=(const ClientSession&) = delete;
