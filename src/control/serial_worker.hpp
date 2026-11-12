@@ -18,7 +18,7 @@
 namespace kvmux {
 
 struct SerialIo {
-  std::function<bool(const std::string&, int)> open;
+  std::function<bool(const std::string&, int, std::string&)> open;
   std::function<void()> close;
   std::function<std::ptrdiff_t(std::span<const std::uint8_t>)> write;
   std::function<std::ptrdiff_t(std::span<std::uint8_t>)> read;

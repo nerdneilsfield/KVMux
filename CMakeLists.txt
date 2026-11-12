@@ -18,6 +18,7 @@ endif()
 include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CodecBackends)
+include(Ch341Usb)
 find_package(FFmpeg REQUIRED)
 option(KVMUX_BUILD_GUI "Build the desktop GUI and its display dependencies" ON)
 if(KVMUX_BUILD_GUI)
@@ -28,6 +29,7 @@ add_subdirectory(third_party)
 option(KVMUX_ENABLE_SANITIZERS "Enable the supported address and undefined behavior sanitizers" OFF)
 
 add_library(kvmux_core STATIC
+    src/control/ch341_usb.cpp
     src/control/ch9329_protocol.cpp
     src/control/control_queue.cpp
     src/control/hid_keyboard.cpp
@@ -97,6 +99,17 @@ endif()
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(kvmux_core PUBLIC FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale kvmux::libserialport nlohmann_json::nlohmann_json spdlog::spdlog_header_only)
+if(KVMUX_HAS_CH341_USB)
+    target_sources(kvmux_core PRIVATE src/control/ch341_usb_transport.cpp)
+    target_compile_definitions(kvmux_core PRIVATE KVMUX_HAS_CH341_USB=1)
+    if(WIN32)
+        target_link_libraries(kvmux_core PUBLIC kvmux_libusb)
+    else()
+        target_link_libraries(kvmux_core PUBLIC PkgConfig::KVMUX_LIBUSB)
+    endif()
+else()
+    target_compile_definitions(kvmux_core PRIVATE KVMUX_HAS_CH341_USB=0)
+endif()
 
 target_link_libraries(kvmux_core PRIVATE kvmux::kcp)
 
@@ -263,6 +276,10 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_serial_worker_test PRIVATE kvmux::core)
     add_test(NAME serial_worker COMMAND kvmux_serial_worker_test)
 
+    add_executable(kvmux_ch341_direct_test tests/ch341_direct_test.cpp)
+    target_link_libraries(kvmux_ch341_direct_test PRIVATE kvmux::core)
+    add_test(NAME ch341_direct COMMAND kvmux_ch341_direct_test)
+
     add_executable(kvmux_config_test tests/config_test.cpp)
     target_link_libraries(kvmux_config_test PRIVATE kvmux::core)
     add_test(NAME config COMMAND kvmux_config_test)
@@ -351,6 +368,12 @@ if(WIN32)
     set(kvmux_runtime_dlls ${kvmux_ffmpeg_dlls} "$<TARGET_FILE:kvmux_libserialport>")
     if(KVMUX_BUILD_GUI)
         list(APPEND kvmux_runtime_dlls "$<TARGET_FILE:SDL3::SDL3>")
+    endif()
+    if(KVMUX_LIBUSB_DLL)
+        list(APPEND kvmux_runtime_dlls "${KVMUX_LIBUSB_DLL}")
+    endif()
+    if(KVMUX_LIBUSB_LICENSE)
+        list(APPEND kvmux_runtime_dlls "${KVMUX_LIBUSB_LICENSE}")
     endif()
     # All executables, including CTest binaries, share this output directory.
     add_custom_target(kvmux_runtime ALL

@@ -12,6 +12,13 @@ std::string select_device(std::span<const DeviceInfo> devices,
 std::size_t select_mode(std::span<const CaptureMode> modes,
                         std::optional<std::size_t> requested = {},
                         VideoCodec codec = VideoCodec::mjpeg);
-std::string select_serial(std::span<const SerialPortInfo> ports,
-                          const std::optional<std::string>& requested = {});
+// system_driver ignores ch341-usb: names. direct_usb counts them.
+enum class SerialPortPreference { system_driver, direct_usb };
+
+[[nodiscard]] SerialPortPreference host_serial_port_preference();
+
+std::string select_serial(
+    std::span<const SerialPortInfo> ports,
+    const std::optional<std::string>& requested = {},
+    SerialPortPreference preference = host_serial_port_preference());
 }  // namespace kvmux::relay

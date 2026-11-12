@@ -82,4 +82,16 @@ int main() {
   ports.push_back({"COM4", "CH341", 0x1a86, 0x5523});
   fails([&] { select_serial(ports); }, "COM4 (CH341)");
   fails([] { select_serial({}); }, "No known");
+  ports.clear();
+  ports.push_back({"/dev/ttyUSB0", "CH341", 0x1a86, 0x5523});
+  ports.push_back({"ch341-usb:1-2.3", "CH341 (USB direct)", 0x1a86, 0x5523});
+  assert(select_serial(ports, {}, SerialPortPreference::system_driver) ==
+         "/dev/ttyUSB0");
+  assert(select_serial(ports, "ch341-usb:1-2.3",
+                       SerialPortPreference::system_driver) ==
+         "ch341-usb:1-2.3");
+  ports.clear();
+  ports.push_back({"ch341-usb:1-2.3", "CH341 (USB direct)", 0x1a86, 0x5523});
+  assert(select_serial(ports, {}, SerialPortPreference::direct_usb) ==
+         "ch341-usb:1-2.3");
 }

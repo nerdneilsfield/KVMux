@@ -125,16 +125,27 @@ USB 交互不造 libusb 假实现。离线测试只有一个小文件 `tests/ch3
 
 ### T1：libusb 后端、错误通道与自动选口
 
-Status: pending
+Status: done
 Depends on: 分离 relay 计划 T4 完成
 Acceptance: B1–B6
 Targets: `src/control/ch341_usb_transport.cpp`（新增）、`src/control/serial_transport.cpp`（分发与枚举）、`src/control/serial_worker.{hpp,cpp}`（`open` 错误通道）、`src/network/relay_selection.*`、`CMakeLists.txt`（选项、发现、Windows DLL 与安装）、`tests/ch341_direct_test.cpp`（新增）、`tests/relay_selection_test.cpp`、使用假 `SerialIo` 的现有测试（签名更新）
 
-- [ ] 按上文实现；`make`、`make test`、`make lint`（含 `KVMUX_CH341_USB=OFF` 一次构建与测试）。
-- [ ] B3–B5 在 Linux 硬件上手动验证；B6 标为待 macOS 验证。
-- [ ] 提交 `feat(control): add CH341 libusb serial backend`。
+- [x] 按上文实现；`make`、`make test`、`make lint`（含 `KVMUX_CH341_USB=OFF` 一次构建与测试）。
+- [x] B3 的 CTest 覆盖两种选口规则。B3 的手动枚举、B4、B5 未在本机做硬件验证：用户确认没有 `1A86:5523`。Evidence 标为未验证（无硬件），待用户在 macOS 上测试。B6 待 macOS 验证。
+- [x] 提交 `feat(control): add CH341 libusb serial backend`。
 
 Evidence:
+
+- 父提交 `87b6653`。未设置 `HEADLESS`。`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。`make test` 配置行 `-- KVMux CH341 direct backend: enabled`。27 项中 26 项通过，real 63.25 秒。`ch341_direct`、`relay_selection`、`serial_worker` 通过。失败项只有 `relay_client`。
+- `relay_client` 仍是基线失败。`chunked_ascii_paste_loopback` 通过；`paste_keepalive_blackholed_status` 失败在 `tests/relay_integration_fakes.hpp:216` 的 `GuiFixture::activate()`。
+- `ldd build/linux-debug/kvmux-relay` 链接 `libusb-1.0.so.0`。本机 `pkg-config --modversion libusb-1.0` 为 1.0.27。计划里「本开发机没有 libusb 开发包」已过时。
+- `KVMUX_CH341_USB=OFF` 的目录 `build/linux-debug-ch341-off`：配置行 `-- KVMux CH341 direct backend: disabled`。当时完整 GUI `ctest` 同样是 26/27，唯一失败是同一个 `relay_client`。`kvmux-relay` 的 `ldd` 没有 libusb，ninja 不编译 `ch341_usb_transport.cpp`。移位改成无符号之后，该目录增量重编了 `ch341_usb.cpp`，`ch341_direct` 通过；传输对象仍不在该构建里。
+- `make format-check` 退出码 2，唯一违规是基线 `tests/codec_startup_fallback_test.cpp:21`。因此 `make lint` 到不了 cppcheck 和 clang-tidy。按 Makefile 配方、用 `build/linux-debug/compile_commands.json` 单独跑了这两步。本次 C++ 文件 `clang-format --dry-run --Werror` 通过。
+- cppcheck 退出码 1，唯一告警是既有的 `src/network/relay_server.cpp:566` `identicalConditionAfterEarlyExit`。
+- clang-tidy 退出码 0。本次文件里新出现的 `bugprone-signed-bitwise` 和 `bugprone-unchecked-optional-access` 已改掉并复跑确认消失。`tests/ch341_direct_test.cpp` 的 `main` 仍有 `bugprone-exception-escape`，与现有会抛异常的测试相同，保留。`serial_transport.cpp` 的 `close` 也有这条告警；对 `87b6653` 的同一函数（当时在第 84 行）复跑同样报出，不是这次引入的。`control_sink.hpp` 的 `performance-unnecessary-value-param` 是既有告警。
+- `lsusb` 没有 `1a86` / `ch34`。B3 手动枚举、B4、B5：未验证（无硬件），待用户在 macOS 上测试。B6：待 macOS 验证。没有加 libusb 假实现。
+- Windows 的 `libusb-1.0.dll` 和许可证文件只在 `CMakeLists.txt` 里接到 `kvmux_runtime_dlls` 与 `install`。本机是 Linux，这条路径没有实际拷贝过 DLL。
+- 偏离：端口名解析失败的文案是「CH341 direct 端口名无效」（计划只写了设备不存在时的文案）。bulk 包长超过 512 字节时拒绝打开。libusb 以 PUBLIC 链到 `kvmux_core`，静态库才能把 `-lusb-1.0` 传给 `kvmux-relay`。`relay_selection_test` 多断言了 `system_driver` 下显式 `ch341-usb:` 原样返回。版本字节目前以 `spdlog::debug` 记录。
 
 ### T2：文档与 CI
 
@@ -149,4 +160,4 @@ Targets: `docs/building.md`、`docs/hardware-validation.md`、`third_party/INVEN
 
 ## 进度
 
-未开始。
+T1 完成。下一步 T2。

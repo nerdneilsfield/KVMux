@@ -15,7 +15,7 @@
 
 namespace kvmux {
 
-SerialIo make_libserialport_io();
+SerialIo make_serial_io();
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -556,13 +556,16 @@ struct Ch9329ControlSink::Impl {
       }
       spdlog::debug("CH9329 opening: path={} baud={} address=0x{:02x}",
                     selected_port, selected_baud, address);
-      if (!io.open(selected_port, selected_baud)) {
-        spdlog::debug("CH9329 open failed: path={} baud={}", selected_port,
-                      selected_baud);
+      std::string open_error;
+      if (!io.open(selected_port, selected_baud, open_error)) {
+        spdlog::debug("CH9329 open failed: path={} baud={} reason={}",
+                      selected_port, selected_baud, open_error);
         reconnect_at = now + kReconnectInterval;
-        update_snapshot([](auto& value) {
+        update_snapshot([&](auto& value) {
           value.state = ControlConnectionState::reconnecting;
-          value.error = "Could not open selected serial port";
+          value.error = open_error.empty()
+                            ? "Could not open selected serial port"
+                            : open_error;
         });
         return;
       }
@@ -821,10 +824,9 @@ struct Ch9329ControlSink::Impl {
   std::atomic_bool stopping{};
 };
 
-Ch9329ControlSink::Ch9329ControlSink()
-    : Ch9329ControlSink(make_libserialport_io()) {}
+Ch9329ControlSink::Ch9329ControlSink() : Ch9329ControlSink(make_serial_io()) {}
 Ch9329ControlSink::Ch9329ControlSink(std::shared_ptr<Diagnostics> diagnostics)
-    : Ch9329ControlSink(make_libserialport_io(), std::move(diagnostics)) {}
+    : Ch9329ControlSink(make_serial_io(), std::move(diagnostics)) {}
 Ch9329ControlSink::Ch9329ControlSink(SerialIo io,
                                      std::shared_ptr<Diagnostics> diagnostics)
     : impl_(std::make_unique<Impl>(std::move(io), std::move(diagnostics))) {}

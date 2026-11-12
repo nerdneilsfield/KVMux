@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "control/ch341_usb.hpp"
+
 namespace kvmux::relay {
 namespace {
 bool raw(PixelFormat format) {
@@ -98,8 +100,16 @@ std::size_t select_mode(std::span<const CaptureMode> modes,
                                    "found; raw modes are unsupported");
   return *best;
 }
+SerialPortPreference host_serial_port_preference() {
+#if defined(__APPLE__)
+  return SerialPortPreference::direct_usb;
+#else
+  return SerialPortPreference::system_driver;
+#endif
+}
 std::string select_serial(std::span<const SerialPortInfo> ports,
-                          const std::optional<std::string>& requested) {
+                          const std::optional<std::string>& requested,
+                          SerialPortPreference preference) {
   // Explicit names may not be enumerated by a driver; opening reports their
   // errors.
   if (requested) {
@@ -107,8 +117,13 @@ std::string select_serial(std::span<const SerialPortInfo> ports,
     return *requested;
   }
   std::vector<const SerialPortInfo*> candidates;
-  for (const auto& port : ports)
-    if (known_adapter(port)) candidates.push_back(&port);
+  for (const auto& port : ports) {
+    if (!known_adapter(port)) continue;
+    if (preference == SerialPortPreference::system_driver &&
+        port.name.starts_with(kCh341UsbPrefix))
+      continue;
+    candidates.push_back(&port);
+  }
   if (candidates.size() == 1) return candidates.front()->name;
   std::string error = candidates.empty()
                           ? "No known CH340/CH341/CH343 USB serial adapter "

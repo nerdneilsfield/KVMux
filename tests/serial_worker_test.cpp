@@ -39,7 +39,7 @@ struct FakeSerial {
 
   kvmux::SerialIo io() {
     return {
-        [this](const std::string&, int) {
+        [this](const std::string&, int, std::string&) {
           std::lock_guard lock(mutex);
           opened = true;
           return true;
