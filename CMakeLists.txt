@@ -278,6 +278,11 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_build_info_test PRIVATE kvmux::core)
     add_test(NAME build_info COMMAND kvmux_build_info_test)
 
+    add_executable(kvmux_capture_mode_query_test
+                   tests/capture_mode_query_test.cpp)
+    target_link_libraries(kvmux_capture_mode_query_test PRIVATE kvmux::core)
+    add_test(NAME capture_mode_query COMMAND kvmux_capture_mode_query_test)
+
     add_executable(kvmux_ch9329_control_test tests/ch9329_control_test.cpp)
     target_link_libraries(kvmux_ch9329_control_test PRIVATE kvmux::core)
     add_test(NAME ch9329_control COMMAND kvmux_ch9329_control_test)

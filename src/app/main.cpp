@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/capture_mode_query.hpp"
 #include "app/event_router.hpp"
 #include "app/kvm_session.hpp"
 #include "app/recording.hpp"
@@ -318,6 +319,7 @@ int main(int argc, char** argv) {
   std::future<std::vector<DeviceInfo>> devices_future =
       session->enumerate_capture_devices();
   std::optional<std::future<std::vector<CaptureMode>>> modes_future;
+  std::string primary_modes_queried;
   std::optional<VideoFrame> current_frame;
   std::optional<std::pair<std::uint64_t, std::uint64_t>> recorded_frame;
   const auto rebuild_local_session = [&] {
@@ -337,6 +339,7 @@ int main(int argc, char** argv) {
     ui.connection.modes.clear();
     ui.connection.selected_device = ui.connection.selected_mode = -1;
     modes_future.reset();
+    primary_modes_queried.clear();
     devices_future = session->enumerate_capture_devices();
     current_frame.reset();
     drop_primary_texture();
@@ -413,6 +416,7 @@ int main(int argc, char** argv) {
                   std::make_unique<Ch9329ControlSink>(diagnostics));
     devices_future = {};
     modes_future.reset();
+    primary_modes_queried.clear();
     form.devices.clear();
     form.modes.clear();
     form.selected_device = form.selected_mode = -1;
@@ -502,6 +506,7 @@ int main(int argc, char** argv) {
           disconnect_relay();
           break;
         case UiActionKind::enumerate_modes:
+          primary_modes_queried = item.text;
           request_capture_modes(modes_future, *session, ui.connection,
                                 item.text, "primary");
           break;
@@ -604,10 +609,6 @@ int main(int argc, char** argv) {
       }
       if (matched_device >= 0) {
         form.selected_device = matched_device;
-        request_capture_modes(
-            modes_future, *session, form,
-            form.devices[static_cast<std::size_t>(matched_device)].stable_id,
-            "primary");
         restore_mode = true;
       } else if (restoring_device) {
         form.open_connections = true;
@@ -616,12 +617,6 @@ int main(int argc, char** argv) {
                  form.selected_device >=
                      static_cast<int>(form.devices.size())) {
         form.selected_device = form.devices.empty() ? -1 : 0;
-        if (form.selected_device >= 0 && form.modes.empty() && !modes_future)
-          request_capture_modes(
-              modes_future, *session, form,
-              form.devices[static_cast<std::size_t>(form.selected_device)]
-                  .stable_id,
-              "primary");
       }
       spdlog::debug("Capture devices applied: count={} selected={}",
                     form.devices.size(), form.selected_device);
@@ -670,6 +665,24 @@ int main(int argc, char** argv) {
       spdlog::debug(
           "Capture modes applied: count={} selected={} screen=primary",
           form.modes.size(), form.selected_mode);
+    }
+    if (form.video_source == VideoSource::local) {
+      const bool have_device =
+          form.selected_device >= 0 &&
+          form.selected_device < static_cast<int>(form.devices.size());
+      const std::string_view device_id =
+          have_device ? std::string_view{form.devices[static_cast<std::size_t>(
+                                                          form.selected_device)]
+                                             .stable_id}
+                      : std::string_view{};
+      if (should_query_capture_modes(
+              form.selected_device, static_cast<int>(form.devices.size()),
+              form.modes.empty(), modes_future.has_value(),
+              primary_modes_queried, device_id)) {
+        primary_modes_queried = std::string{device_id};
+        request_capture_modes(modes_future, *session, form,
+                              std::string{device_id}, "primary");
+      }
     }
     if (form.control_target == ControlTarget::local_serial &&
         form.open_connections &&
