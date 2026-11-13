@@ -10,6 +10,7 @@
 
 #include "control/ch341_usb.hpp"
 #include "control/control_sink.hpp"
+#include "control/serial_trace.hpp"
 #include "control/serial_worker.hpp"
 
 #ifndef KVMUX_HAS_CH341_USB
@@ -117,6 +118,9 @@ class LibserialportTransport {
     }
     const auto result =
         sp_nonblocking_write(port_.get(), bytes.data(), bytes.size());
+    if (result > 0 && static_cast<std::size_t>(result) <= bytes.size()) {
+      log_serial_out("serial", bytes.first(static_cast<std::size_t>(result)));
+    }
     (void)serial_result("write", result, nullptr);
     return result;
   }
@@ -127,6 +131,9 @@ class LibserialportTransport {
     }
     const auto result =
         sp_nonblocking_read(port_.get(), bytes.data(), bytes.size());
+    if (result > 0 && static_cast<std::size_t>(result) <= bytes.size()) {
+      log_serial_in("serial", bytes.first(static_cast<std::size_t>(result)));
+    }
     (void)serial_result("read", result, nullptr);
     return result;
   }

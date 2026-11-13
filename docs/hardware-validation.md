@@ -112,6 +112,8 @@ here.
 
 下面的 `build/macos-debug-headless/kvmux-relay` 都从仓库根目录执行。如果构建的是 GUI 预设 `macos-debug`，把路径换成 `build/macos-debug/kvmux-relay`。
 
+自检命令加上 `--debug --log-file kvmux-probe.log`。程序把同一份日志追加写入当前目录的 `kvmux-probe.log`，并写到标准错误。单个文件超过 10 MiB 后轮转，保留 3 个旧文件。请发回这个 `kvmux-probe.log`，以及标准输出里的 `[PASS]` / `[FAIL]` 汇总。CH341 或采集卡在另一台电脑上时，连同那台电脑工作目录里的 `kvmux-probe.log` 一起发回。日志文件打不开时，进程以退出码 2 结束，原因写在标准错误。带 `--debug` 时，文件开头的 info 行记录程序名、版本 `0.1.0`、操作系统，以及参数里的串口名和波特率。仓库没有嵌入提交号。
+
 ### 1. 构建
 
 配置并构建 headless 预设。这个预设包含 `kvmux-relay`，不构建 GUI。
@@ -138,7 +140,7 @@ build/macos-debug-headless/kvmux-relay --list-serial
 这一步不发送键鼠。本地 `--serial` 不会打印“无画面，CLI 自行声明新鲜，仅用于自检”。
 
 ```sh
-build/macos-debug-headless/kvmux-relay --debug --probe-control --serial "PORT" --baud 9600
+build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --serial "PORT" --baud 9600
 ```
 
 把 `PORT` 换成上一步的名字。`--baud` 只能和 `--serial` 一起使用。默认超时是 5000 ms。握手更慢时加上 `--timeout-ms`，取值 1 到 600000。
@@ -158,13 +160,13 @@ CH9329 应答时，标准输出的形状如下。`0xNN` 和 `N` 是当次运行�
 
 `ready` 行的 `version=` 是 CH9329 `GET_INFO` 的芯片版本，两位十六进制。它不是 CH341 的版本字节。
 
-`--debug` 把控制台级别设为 debug，因此 info 日志会出现在标准错误。打开成功时有一行：
+`--debug` 把日志级别设为 debug。打开成功时，标准错误和 `kvmux-probe.log` 里都有一行：
 
 ```
 CH341 direct open: path=PORT baud=9600 version=0xNN
 ```
 
-这一行的 `version=` 才是 CH341 版本字节。不加 `--debug` 时，控制台级别是 warn，这一行不出现。`--debug` 可以放在参数的任意位置。
+这一行的 `version=` 才是 CH341 版本字节。不加 `--debug` 时，级别是 warn，这一行不出现。`--debug` 和 `--log-file` 可以放在参数的任意位置。
 
 如果代入的是系统串口名，而不是 `ch341-usb:` 前缀，open 行写 `backend=system`。
 
@@ -175,7 +177,7 @@ CH341 direct open: path=PORT baud=9600 version=0xNN
 先确认目标电脑可以接受一次左 Shift，以及一次向右再向左的指针移动。
 
 ```sh
-build/macos-debug-headless/kvmux-relay --probe-control --serial "PORT" --baud 9600 --keys --mouse
+build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --serial "PORT" --baud 9600 --keys --mouse
 ```
 
 成功时，第 3 步里的两条 `[SKIP]` 换成下面两行，退出码为 0：
@@ -200,7 +202,7 @@ build/macos-debug-headless/kvmux-relay --probe-control --serial "PORT" --baud 96
 在接有 CH9329 的电脑上启动 control relay。那台电脑是这台 Mac 时，把下面的可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。Linux 上是：
 
 ```sh
-build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
+build/linux-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --serve --no-capture --serial "/dev/ttyUSB0" --baud 9600
 ```
 
 串口名和波特率换成那台电脑上的实际值。那台电脑使用 `ch341-usb:` 时，`--serial` 写成该名字。只放行控制端口的入站 UDP，默认端口是 17000。`--no-capture` 不打开采集卡，也不监听视频端口。
@@ -208,7 +210,7 @@ build/linux-debug-headless/kvmux-relay --serve --no-capture --serial "/dev/ttyUS
 在 Mac 上运行：
 
 ```sh
-build/macos-debug-headless/kvmux-relay --probe-control --relay RELAY_HOST --control-port 17000 --keys --mouse
+build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --relay RELAY_HOST --control-port 17000 --keys --mouse
 ```
 
 把 `RELAY_HOST` 换成 control relay 的地址。`--control-port` 只能和 `--relay` 一起使用。对 `--relay` 再写 `--baud` 时，程序打印 `--baud applies only to --serial`，退出码为 2。`--serial` 和 `--relay` 同时给出，或者两个都不给，程序打印 `--probe-control requires exactly one of --serial or --relay`，退出码为 2。
@@ -225,7 +227,7 @@ open 行是：
 [PASS] open     backend=relay host=RELAY_HOST port=17000
 ```
 
-`ready` 行的 `version=` 为 `0x00`。Relay 状态帧不携带 CH9329 的 `chip_version`。CH9329 版本在接串口的那一侧；那一侧以 `--debug` 启动时，写在它自己的日志里。这条探针在内部解析视频端口 17001，但不打开媒体。`--probe-control` 没有视频端口参数。
+`ready` 行的 `version=` 为 `0x00`。Relay 状态帧不携带 CH9329 的 `chip_version`。CH9329 版本在接串口的那一侧；那一侧以 `--debug --log-file kvmux-probe.log` 启动时，打开记录写在那台电脑的 `kvmux-probe.log` 里。这条探针在内部解析视频端口 17001，但不打开媒体。`--probe-control` 没有视频端口参数。
 
 不加 `--keys` 和 `--mouse` 时，键和鼠标两行是 `[SKIP]`，程序不发送输入。上面那句新鲜声明仍然会打印。退出码为 0，并且 open、ready、release 都是 `[PASS]`，这一步才通过。
 
@@ -236,7 +238,7 @@ open 行是：
 在接有采集卡的电脑上启动 video relay。那台电脑是这台 Mac 时，把下面的可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。Linux 上是：
 
 ```sh
-build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0" --mode-index 0
+build/linux-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --serve --no-serial --device "/dev/video0" --mode-index 0
 ```
 
 设备 ID 和模式索引换成那台电脑上 `--list-devices` 与 `--list-modes` 给出的值。自动选择找到唯一采集设备和可用模式时，可以省略 `--device` 和 `--mode-index`。放行控制端口和视频端口，默认是 17000 和 17001。`--no-serial` 不打开串口。
@@ -244,7 +246,7 @@ build/linux-debug-headless/kvmux-relay --serve --no-serial --device "/dev/video0
 在 Mac 上运行：
 
 ```sh
-build/macos-debug-headless/kvmux-relay --probe-video RELAY_HOST --control-port 17000 --video-port 17001 --seconds 11
+build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-video RELAY_HOST --control-port 17000 --video-port 17001 --seconds 11
 ```
 
 主机名是第一个不以 `--` 开头的参数。`--seconds` 的范围是 1 到 86400，默认值是 5。这里用 11 秒，让运行跨过 10 秒，以便看到保活期间连接是否中断。
@@ -280,7 +282,7 @@ build/macos-debug-headless/kvmux-relay --probe-video RELAY_HOST --control-port 1
 - USB 拓扑，以及 WCH `CH34xVCPDriver` 是否已安装。
 - `--list-serial` 打印的 `ch341-usb:` 名字。
 - 使用的波特率。
-- `--debug` 标准错误里 `CH341 direct open` 的 `version=`。
+- `kvmux-probe.log` 里 `CH341 direct open` 的 `version=`。标准错误是同一份日志。
 - `ready` 行的 `version=`。本地串口探针上，这一值是 CH9329 版本。Control relay 探针上，这一值是 `0x00`。
 - 每条探针的退出码和完整标准输出。
 - 使用 `--keys` 和 `--mouse` 时，目标电脑上是否出现左 Shift，以及指针是否向右再向左移动。

@@ -8,10 +8,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
+
+#include "support/build_info.hpp"
+
+#if !defined(_WIN32)
+#include <sys/utsname.h>
+#endif
 
 namespace kvmux {
 namespace {
@@ -80,6 +87,21 @@ LatencySnapshot latency_snapshot(const DurationWindow& window) {
 
 Diagnostics::Duration nonnegative(Diagnostics::Duration duration) noexcept {
   return std::max(duration, Diagnostics::Duration::zero());
+}
+
+std::string operating_system_name() {
+#if defined(_WIN32)
+  return "Windows";
+#else
+  utsname info{};
+  if (uname(&info) != 0) {
+    return "unknown";
+  }
+  std::string text = info.sysname;
+  text.push_back(' ');
+  text += info.release;
+  return text;
+#endif
 }
 
 }  // namespace
@@ -234,25 +256,35 @@ DiagnosticsSnapshot Diagnostics::snapshot() const {
   return result;
 }
 
-void configure_console_logging(bool debug) {
-  auto sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
-  auto logger = std::make_shared<spdlog::logger>("kvmux", std::move(sink));
+bool configure_console_logging(const bool debug,
+                               const std::string_view log_file,
+                               const std::string_view program,
+                               const std::string_view serial_port,
+                               const std::string_view baud) {
+  std::vector<spdlog::sink_ptr> sinks;
+  sinks.push_back(std::make_shared<spdlog::sinks::stderr_sink_mt>());
+  if (!log_file.empty()) {
+    try {
+      sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+          std::string(log_file), kLogFileBytes, kRotatedLogFiles));
+    } catch (const spdlog::spdlog_ex& error) {
+      std::cerr << "cannot open log file " << log_file << ": " << error.what()
+                << '\n';
+      return false;
+    }
+  }
+  auto logger =
+      std::make_shared<spdlog::logger>("kvmux", sinks.begin(), sinks.end());
   logger->set_level(debug ? spdlog::level::debug : spdlog::level::warn);
   logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [thread %t] [%l] %v");
   logger->flush_on(spdlog::level::debug);
   spdlog::set_default_logger(std::move(logger));
-}
-
-std::shared_ptr<spdlog::logger> initialize_logging(
-    const std::string& log_file) {
-  auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-      log_file, kLogFileBytes, kRotatedLogFiles);
-  auto logger = std::make_shared<spdlog::logger>("kvmux", std::move(sink));
-  logger->set_level(spdlog::level::info);
-  logger->flush_on(spdlog::level::warn);
-  logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [%l] %v");
-  spdlog::set_default_logger(logger);
-  return logger;
+  spdlog::info("start program={} version={} os={} serial={} baud={}",
+               program.empty() ? std::string_view("kvmux") : program,
+               application_version(), operating_system_name(),
+               serial_port.empty() ? std::string_view("-") : serial_port,
+               baud.empty() ? std::string_view("-") : baud);
+  return true;
 }
 
 }  // namespace kvmux

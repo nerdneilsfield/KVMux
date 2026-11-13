@@ -7,10 +7,6 @@
 #include <string>
 #include <string_view>
 
-namespace spdlog {
-class logger;
-}
-
 namespace kvmux {
 
 // A compact description of one fixed-capacity latency window.
@@ -100,13 +96,15 @@ class Diagnostics {
   std::unique_ptr<Impl> impl_;
 };
 
-// Configures stderr logging before worker threads start. Debug is opt-in.
-void configure_console_logging(bool debug);
-
-// Initializes the process default logger for low-frequency state changes and
-// aggregate diagnostics. The active log and rotated files are capped at
-// 10 MiB each, with three rotated files retained. Metric hot paths do not log.
-[[nodiscard]] std::shared_ptr<spdlog::logger> initialize_logging(
-    const std::string& log_file);
+// Stderr, and when `log_file` is set the same logger also appends to a
+// rotating file (10 MiB, three retained files). Both sinks use one level and
+// one pattern. Debug is opt-in. Returns false when the file cannot be opened;
+// the process then exits 2. `serial_port` and `baud` are argument text, or
+// empty when those arguments are absent. An info line records version, OS,
+// and those arguments. The repository does not embed a commit id.
+bool configure_console_logging(bool debug, std::string_view log_file = {},
+                               std::string_view program = {},
+                               std::string_view serial_port = {},
+                               std::string_view baud = {});
 
 }  // namespace kvmux

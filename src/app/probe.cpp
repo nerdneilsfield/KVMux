@@ -1,5 +1,7 @@
 #include "app/probe.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
@@ -111,6 +113,54 @@ std::string failure_text(const ControlSnapshot& snap, bool timed_out) {
   return text;
 }
 
+struct SnapshotTrace {
+  bool have{false};
+  ControlConnectionState state{ControlConnectionState::disconnected};
+  bool usb_ready{false};
+  bool release_confirmed{false};
+  std::uint64_t epoch{0};
+  std::string error;
+
+  void observe(const ControlSnapshot& snap) {
+    if (!spdlog::should_log(spdlog::level::debug)) return;
+    if (have && state == snap.state && usb_ready == snap.target_usb_ready &&
+        release_confirmed == snap.release_confirmed && epoch == snap.epoch &&
+        error == snap.error) {
+      return;
+    }
+    have = true;
+    state = snap.state;
+    usb_ready = snap.target_usb_ready;
+    release_confirmed = snap.release_confirmed;
+    epoch = snap.epoch;
+    error = snap.error;
+    spdlog::debug(
+        "probe control state={} usb_ready={} release_confirmed={} epoch={} "
+        "error={}",
+        state_name(state), usb_ready ? "true" : "false",
+        release_confirmed ? "true" : "false", epoch,
+        error.empty() ? "-" : error);
+  }
+};
+
+const char* capture_state_name(CaptureState state) {
+  switch (state) {
+    case CaptureState::stopped:
+      return "stopped";
+    case CaptureState::starting:
+      return "starting";
+    case CaptureState::streaming:
+      return "streaming";
+    case CaptureState::stopping:
+      return "stopping";
+    case CaptureState::permission_denied:
+      return "permission_denied";
+    case CaptureState::fault:
+      return "fault";
+  }
+  return "unknown";
+}
+
 struct Pulse {
   ControlSink& sink;
   bool declare_freshness{false};
@@ -133,12 +183,13 @@ struct PollResult {
 };
 
 template <typename Done>
-PollResult poll_until(ControlSink& sink, Pulse& pulse, int timeout_ms,
-                      Done done) {
+PollResult poll_until(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
+                      int timeout_ms, Done done) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   for (;;) {
     pulse();
     auto snap = sink.snapshot();
+    trace.observe(snap);
     if (session_broken(snap)) return {Poll::fault, std::move(snap)};
     if (done(snap)) return {Poll::ok, std::move(snap)};
     if (Clock::now() >= deadline) return {Poll::timeout, std::move(snap)};
@@ -146,11 +197,13 @@ PollResult poll_until(ControlSink& sink, Pulse& pulse, int timeout_ms,
   }
 }
 
-PollResult poll_open(ControlSink& sink, Pulse& pulse, int timeout_ms) {
+PollResult poll_open(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
+                     int timeout_ms) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   for (;;) {
     pulse();
     auto snap = sink.snapshot();
+    trace.observe(snap);
     if (open_failed(snap)) return {Poll::fault, std::move(snap)};
     if (open_succeeded(snap)) return {Poll::ok, std::move(snap)};
     if (Clock::now() >= deadline) return {Poll::timeout, std::move(snap)};
@@ -190,7 +243,8 @@ bool sync_matches(const ControlSnapshot& snap) {
          snap.release_confirmed;
 }
 
-PollResult synchronize_idle(ControlSink& sink, Pulse& pulse, int timeout_ms) {
+PollResult synchronize_idle(ControlSink& sink, Pulse& pulse,
+                            SnapshotTrace& trace, int timeout_ms) {
   sink.set_control_active(true);
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   bool in_flight = false;
@@ -198,6 +252,7 @@ PollResult synchronize_idle(ControlSink& sink, Pulse& pulse, int timeout_ms) {
   for (;;) {
     pulse();
     auto snap = sink.snapshot();
+    trace.observe(snap);
     if (session_broken(snap)) return {Poll::fault, std::move(snap)};
     if (sync_matches(snap)) return {Poll::ok, std::move(snap)};
     const bool epoch_changed = in_flight && snap.epoch != sent_epoch;
@@ -228,14 +283,16 @@ bool input_acknowledged(const ControlSnapshot& snap, std::uint64_t sequence) {
          !session_broken(snap);
 }
 
-PollResult send_and_wait(ControlSink& sink, Pulse& pulse, int timeout_ms,
-                         ControlPayload payload, std::uint64_t& sequence) {
+PollResult send_and_wait(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
+                         int timeout_ms, ControlPayload payload,
+                         std::uint64_t& sequence) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   std::uint64_t sent = 0;
   bool accepted = false;
   for (;;) {
     pulse();
     auto snap = sink.snapshot();
+    trace.observe(snap);
     if (session_broken(snap)) return {Poll::fault, std::move(snap)};
     if (accepted && input_acknowledged(snap, sent))
       return {Poll::ok, std::move(snap)};
@@ -268,8 +325,9 @@ std::string step_failure(const PollResult& result) {
 int probe_control(std::ostream& out, ControlSink& sink,
                   const ProbeControlOptions& options) {
   Pulse pulse{sink, options.declare_freshness, 0};
+  SnapshotTrace trace;
   sink.connect(options.target, options.baud);
-  const auto opened = poll_open(sink, pulse, options.timeout_ms);
+  const auto opened = poll_open(sink, pulse, trace, options.timeout_ms);
   if (opened.status != Poll::ok) {
     const std::string detail = !opened.snap.error.empty()
                                    ? opened.snap.error
@@ -283,7 +341,7 @@ int probe_control(std::ostream& out, ControlSink& sink,
     out.flush();
   }
   const auto ready =
-      poll_until(sink, pulse, options.timeout_ms, [](const auto& snap) {
+      poll_until(sink, pulse, trace, options.timeout_ms, [](const auto& snap) {
         return snap.state == ControlConnectionState::ready &&
                snap.target_usb_ready;
       });
@@ -295,7 +353,8 @@ int probe_control(std::ostream& out, ControlSink& sink,
   bool synced = false;
   auto require_sync = [&](std::string_view step) -> int {
     if (synced) return 0;
-    const auto result = synchronize_idle(sink, pulse, options.timeout_ms);
+    const auto result =
+        synchronize_idle(sink, pulse, trace, options.timeout_ms);
     if (result.status != Poll::ok)
       return fail_step(out, sink, step, step_failure(result));
     synced = true;
@@ -307,11 +366,11 @@ int probe_control(std::ostream& out, ControlSink& sink,
     step_line(out, "SKIP", "keys", "(pass --keys to send Left Shift)");
   } else {
     if (const int failed = require_sync("keys")) return failed;
-    const auto pressed = send_and_wait(sink, pulse, options.timeout_ms,
+    const auto pressed = send_and_wait(sink, pulse, trace, options.timeout_ms,
                                        KeyEdge{kLeftShift, true}, sequence);
     if (pressed.status != Poll::ok)
       return fail_step(out, sink, "keys", step_failure(pressed));
-    const auto released = send_and_wait(sink, pulse, options.timeout_ms,
+    const auto released = send_and_wait(sink, pulse, trace, options.timeout_ms,
                                         KeyEdge{kLeftShift, false}, sequence);
     if (released.status != Poll::ok)
       return fail_step(out, sink, "keys", step_failure(released));
@@ -322,11 +381,11 @@ int probe_control(std::ostream& out, ControlSink& sink,
     step_line(out, "SKIP", "mouse", "(pass --mouse to move the pointer)");
   } else {
     if (const int failed = require_sync("mouse")) return failed;
-    const auto right = send_and_wait(sink, pulse, options.timeout_ms,
+    const auto right = send_and_wait(sink, pulse, trace, options.timeout_ms,
                                      RelativeMotion{20, 0}, sequence);
     if (right.status != Poll::ok)
       return fail_step(out, sink, "mouse", step_failure(right));
-    const auto left = send_and_wait(sink, pulse, options.timeout_ms,
+    const auto left = send_and_wait(sink, pulse, trace, options.timeout_ms,
                                     RelativeMotion{-20, 0}, sequence);
     if (left.status != Poll::ok)
       return fail_step(out, sink, "mouse", step_failure(left));
@@ -336,7 +395,7 @@ int probe_control(std::ostream& out, ControlSink& sink,
   const auto started = Clock::now();
   sink.release_all();
   const auto released =
-      poll_until(sink, pulse, options.timeout_ms, [](const auto& snap) {
+      poll_until(sink, pulse, trace, options.timeout_ms, [](const auto& snap) {
         return snap.release_confirmed &&
                snap.state != ControlConnectionState::clearing;
       });
@@ -357,6 +416,7 @@ int probe_video(std::ostream& out, CaptureSource& source, int seconds) {
   out.flush();
   source.start({});
   const auto deadline = Clock::now() + std::chrono::seconds(seconds);
+  auto next_stats = Clock::now() + std::chrono::seconds(1);
   std::uint64_t observed = 0;
   std::string codec;
   std::uint32_t width = 0;
@@ -365,10 +425,25 @@ int probe_video(std::ostream& out, CaptureSource& source, int seconds) {
   Clock::time_point previous{};
   bool have_previous = false;
   auto longest = std::chrono::milliseconds::zero();
+  const auto log_stats = [&](const CaptureSnapshot& snap) {
+    spdlog::debug(
+        "probe video state={} observed={} received={} codec={} size={}x{} "
+        "longest_gap_ms={} error={}",
+        capture_state_name(snap.state), observed, snap.received_samples,
+        codec.empty() ? std::string_view("-") : std::string_view(codec), width,
+        height, longest.count(),
+        snap.error.empty() ? std::string_view("-")
+                           : std::string_view(snap.error));
+  };
   while (Clock::now() < deadline) {
     const auto snap = source.snapshot();
+    if (Clock::now() >= next_stats) {
+      log_stats(snap);
+      next_stats += std::chrono::seconds(1);
+    }
     if (snap.state == CaptureState::fault ||
         snap.state == CaptureState::permission_denied) {
+      log_stats(snap);
       const std::string detail =
           snap.error.empty() ? std::string("capture fault") : snap.error;
       step_line(out, "FAIL", announced ? "video" : "handshake", detail);

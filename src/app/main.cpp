@@ -438,24 +438,41 @@ InputEvent to_input(const SDL_Event& event) {
 
 int main(int argc, char** argv) {
   bool debug = false, help = false;
+  std::string log_file;
   for (int i = 1; i < argc; ++i) {
     const std::string_view argument = argv[i];
     if (argument == "--debug")
       debug = true;
     else if (argument == "--help")
       help = true;
-    else {
+    else if (argument == "--log-file") {
+      if (i + 1 >= argc || std::string_view(argv[i + 1]).starts_with("--")) {
+        std::cerr << "kvmux: --log-file requires a path\n";
+        return 2;
+      }
+      if (!log_file.empty()) {
+        std::cerr << "kvmux: Duplicate --log-file\n";
+        return 2;
+      }
+      log_file = argv[++i];
+      if (log_file.empty()) {
+        std::cerr << "kvmux: --log-file requires a path\n";
+        return 2;
+      }
+    } else {
       std::cerr << "kvmux: Unknown argument: " << argument
-                << "\nUsage: kvmux [--debug] [--help]\n";
+                << "\nUsage: kvmux [--debug] [--log-file PATH] [--help]\n";
       return 2;
     }
   }
-  configure_console_logging(debug);
+  if (!configure_console_logging(debug, log_file, "kvmux")) return 2;
   if (help) {
     std::cout
-        << "Usage: kvmux [--debug] [--help]\n"
-           "  --debug  Write diagnostic logs to stderr (time, thread, level)\n"
-           "  --help   Show this help without starting the GUI\n";
+        << "Usage: kvmux [--debug] [--log-file PATH] [--help]\n"
+           "  --debug     Write diagnostic logs to stderr (time, thread, "
+           "level)\n"
+           "  --log-file  Append the same log to PATH (10 MiB, 3 rotations)\n"
+           "  --help      Show this help without starting the GUI\n";
     return 0;
   }
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {

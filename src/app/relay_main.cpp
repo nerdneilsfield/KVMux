@@ -26,9 +26,11 @@ namespace {
 
 void print_help(std::ostream& out) {
   out << "KVMux headless relay device tools\n"
-         "Usage: kvmux-relay [--debug] COMMAND\n\n"
+         "Usage: kvmux-relay [--debug] [--log-file PATH] COMMAND\n\n"
          "  --debug                Write diagnostic logs to stderr (time, "
          "thread, level)\n"
+         "  --log-file PATH        Append the same log to PATH (10 MiB, 3 "
+         "rotations)\n"
          "  --help                 Show this help\n"
          "  --list-devices         List capture device stable IDs and names\n"
          "  --list-modes DEVICE    List native modes for a capture stable ID\n"
@@ -541,14 +543,45 @@ int run(int argc, char** argv) {
 int main(int argc, char** argv) {
   try {
     bool debug = false;
+    std::string log_file;
+    std::string serial_port;
+    std::string baud;
     std::vector<char*> arguments{argv[0]};
     for (int i = 1; i < argc; ++i) {
-      if (std::string_view(argv[i]) == "--debug")
+      const std::string_view key = argv[i];
+      if (key == "--debug") {
         debug = true;
-      else
-        arguments.push_back(argv[i]);
+        continue;
+      }
+      if (key == "--log-file") {
+        if (i + 1 >= argc || std::string_view(argv[i + 1]).starts_with("--")) {
+          std::cerr << "--log-file requires a path\n";
+          return 2;
+        }
+        if (!log_file.empty()) {
+          std::cerr << "Duplicate --log-file\n";
+          return 2;
+        }
+        log_file = argv[++i];
+        if (log_file.empty()) {
+          std::cerr << "--log-file requires a path\n";
+          return 2;
+        }
+        continue;
+      }
+      if (key == "--serial" && i + 1 < argc &&
+          !std::string_view(argv[i + 1]).starts_with("--")) {
+        serial_port = argv[i + 1];
+      } else if (key == "--baud" && i + 1 < argc &&
+                 !std::string_view(argv[i + 1]).starts_with("--")) {
+        baud = argv[i + 1];
+      }
+      arguments.push_back(argv[i]);
     }
-    kvmux::configure_console_logging(debug);
+    if (!kvmux::configure_console_logging(debug, log_file, "kvmux-relay",
+                                          serial_port, baud)) {
+      return 2;
+    }
     return run(static_cast<int>(arguments.size()), arguments.data());
   } catch (const std::exception& error) {
     std::cerr << "kvmux-relay: " << error.what() << '\n';
