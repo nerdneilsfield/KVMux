@@ -109,6 +109,85 @@ int main() {
                   std::filesystem::exists(path.string() + ".broken"),
               "invalid decoder follows existing broken config policy");
     }
+    config = Config{};
+    config.serial_port = "test-port";
+    config.serial_baud_rate = 115200;
+    config.host_scancode = 231;
+    config.capture_stable_id = "cam-1";
+    config.capture_mode.device_id = "cam-1";
+    config.capture_mode.width = 1920;
+    config.capture_mode.height = 1080;
+    config.capture_mode.frame_rate = {30, 1};
+    config.capture_mode.device_format = PixelFormat::yuy2;
+    config.capture_mode.delivered_format = PixelFormat::bgra;
+    config.capture_mode.device_format_name = "YUY2";
+    config.video_source = VideoSource::relay;
+    config.control_target = ControlTarget::none;
+    config.video_host = "10.0.0.8";
+    config.control_host = "10.0.0.9";
+    config.video_control_port = 18000;
+    config.video_port = 18001;
+    config.control_relay_port = 18002;
+    config.auto_connect_serial = true;
+    save_config(path, config);
+    loaded = load_config(path);
+    require(loaded.video_source == VideoSource::relay &&
+                loaded.control_target == ControlTarget::none &&
+                loaded.video_host == "10.0.0.8" &&
+                loaded.control_host == "10.0.0.9" &&
+                loaded.video_control_port == 18000 &&
+                loaded.video_port == 18001 &&
+                loaded.control_relay_port == 18002 &&
+                loaded.auto_connect_serial && loaded.host_scancode == 231 &&
+                loaded.capture_stable_id == "cam-1" &&
+                loaded.capture_mode.device_id == "cam-1" &&
+                loaded.capture_mode.width == 1920 &&
+                loaded.capture_mode.height == 1080 &&
+                loaded.capture_mode.frame_rate.numerator == 30 &&
+                loaded.capture_mode.device_format == PixelFormat::yuy2 &&
+                loaded.capture_mode.delivered_format == PixelFormat::bgra &&
+                loaded.serial_port == "test-port" &&
+                loaded.serial_baud_rate == 115200,
+            "connection settings round trip preserves config");
+    {
+      std::ifstream input(path);
+      input >> root;
+    }
+    root.erase("connection");
+    {
+      std::ofstream output(path);
+      output << root;
+    }
+    loaded = load_config(path);
+    require(
+        loaded.video_source == VideoSource::local &&
+            loaded.control_target == ControlTarget::local_serial &&
+            loaded.video_host == "127.0.0.1" &&
+            loaded.control_host == "127.0.0.1" &&
+            loaded.video_control_port == 17000 && loaded.video_port == 17001 &&
+            loaded.control_relay_port == 17000 && !loaded.auto_connect_serial &&
+            loaded.serial_port == "test-port" && loaded.host_scancode == 231,
+        "missing connection object keeps settings and uses defaults");
+    root["connection"] = nlohmann::json::object();
+    {
+      std::ofstream output(path);
+      output << root;
+    }
+    loaded = load_config(path);
+    require(loaded.video_source == VideoSource::local &&
+                loaded.control_target == ControlTarget::local_serial &&
+                !loaded.auto_connect_serial &&
+                loaded.serial_port == "test-port",
+            "empty connection object uses defaults and keeps settings");
+    root["connection"] = {{"video_source", "satellite"}};
+    {
+      std::ofstream output(path);
+      output << root;
+    }
+    loaded = load_config(path);
+    require(loaded.serial_port.empty() &&
+                std::filesystem::exists(path.string() + ".broken"),
+            "invalid video source follows existing broken config policy");
     root["schema_version"] = kConfigSchemaVersion + 1;
     {
       std::ofstream output(path);

@@ -22,9 +22,6 @@
 
 namespace kvmux {
 
-enum class VideoSource { local, relay };
-enum class ControlTarget { local_serial, relay, none };
-
 // One link's display text. `ready` is the predicate the status dot and the
 // connections auto-close already shared: video uses video_fresh, control
 // uses ControlConnectionState::ready. `hint` stays empty until a caller has

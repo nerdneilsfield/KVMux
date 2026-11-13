@@ -438,6 +438,7 @@ void append_connections(UiState& ui, const SessionView& view,
       ImGui::SameLine();
       if (ImGui::Button("Disconnect"))
         actions.add(action(UiActionKind::disconnect_serial));
+      ImGui::Checkbox("Connect serial on startup", &config.auto_connect_serial);
     }
     if (form.video_source == VideoSource::local) {
       ImGui::SeparatorText("Second screen (Relative mouse only)");

@@ -143,6 +143,41 @@ CodecBackend parse_decoder_backend(const std::string& value) {
   throw std::runtime_error("invalid decoder backend");
 }
 
+std::string_view video_source_name(VideoSource source) {
+  return source == VideoSource::relay ? "relay" : "local";
+}
+
+VideoSource parse_video_source(const std::string& value) {
+  if (value == "local") return VideoSource::local;
+  if (value == "relay") return VideoSource::relay;
+  throw std::runtime_error("invalid video source");
+}
+
+std::string_view control_target_name(ControlTarget target) {
+  switch (target) {
+    case ControlTarget::local_serial:
+      return "local_serial";
+    case ControlTarget::relay:
+      return "relay";
+    case ControlTarget::none:
+      return "none";
+  }
+  return "local_serial";
+}
+
+ControlTarget parse_control_target(const std::string& value) {
+  if (value == "local_serial") return ControlTarget::local_serial;
+  if (value == "relay") return ControlTarget::relay;
+  if (value == "none") return ControlTarget::none;
+  throw std::runtime_error("invalid control target");
+}
+
+void require_host(const std::string& host) {
+  if (host.empty() || host.size() >= 64) {
+    throw std::runtime_error("invalid relay host");
+  }
+}
+
 void replace_file(const std::filesystem::path& temporary,
                   const std::filesystem::path& destination) {
   std::error_code error;
@@ -213,6 +248,24 @@ Config parse_config(const json& root) {
   result.decoder_backend = parse_decoder_backend(
       root.value("decoder_backend", std::string("automatic")));
 
+  if (root.contains("connection")) {
+    const auto& connection = root.at("connection");
+    result.video_source = parse_video_source(
+        connection.value("video_source", std::string("local")));
+    result.control_target = parse_control_target(
+        connection.value("control_target", std::string("local_serial")));
+    result.video_host =
+        connection.value("video_host", std::string("127.0.0.1"));
+    result.control_host =
+        connection.value("control_host", std::string("127.0.0.1"));
+    result.video_control_port = connection.value("video_control_port", 17000);
+    result.video_port = connection.value("video_port", 17001);
+    result.control_relay_port = connection.value("control_relay_port", 17000);
+    result.auto_connect_serial = connection.value("auto_connect_serial", false);
+    require_host(result.video_host);
+    require_host(result.control_host);
+  }
+
   result.window.x = window.at("x").get<int>();
   result.window.y = window.at("y").get<int>();
   result.window.width = window.at("width").get<int>();
@@ -232,6 +285,17 @@ json serialize_config(const Config& config) {
   return {
       {"schema_version", kConfigSchemaVersion},
       {"decoder_backend", decoder_backend_name(config.decoder_backend)},
+      {"connection",
+       {
+           {"video_source", video_source_name(config.video_source)},
+           {"control_target", control_target_name(config.control_target)},
+           {"video_host", config.video_host},
+           {"control_host", config.control_host},
+           {"video_control_port", config.video_control_port},
+           {"video_port", config.video_port},
+           {"control_relay_port", config.control_relay_port},
+           {"auto_connect_serial", config.auto_connect_serial},
+       }},
       {"capture",
        {
            {"stable_id", config.capture_stable_id},

@@ -156,6 +156,58 @@ std::optional<std::filesystem::path> preference_file() {
   return result / "config.json";
 }
 
+void copy_host(char* dest, std::size_t size, const std::string& value) {
+  if (size == 0) return;
+  const auto count = std::min(size - 1, value.size());
+  std::memcpy(dest, value.data(), count);
+  dest[count] = '\0';
+}
+
+bool same_saved_mode(const CaptureMode& saved, const CaptureMode& listed) {
+  return saved.width == listed.width && saved.height == listed.height &&
+         saved.frame_rate == listed.frame_rate &&
+         saved.device_format == listed.device_format &&
+         saved.delivered_format == listed.delivered_format;
+}
+
+void store_connection(Config& config, const ConnectionForm& form) {
+  config.video_source = form.video_source;
+  config.control_target = form.control_target;
+  config.video_host = form.video_host;
+  config.control_host = form.control_host;
+  config.video_control_port = form.video_control_port;
+  config.video_port = form.video_port;
+  config.control_relay_port = form.control_relay_port;
+  if (form.selected_device >= 0 &&
+      form.selected_device < static_cast<int>(form.devices.size())) {
+    const auto& device =
+        form.devices[static_cast<std::size_t>(form.selected_device)];
+    config.capture_stable_id = device.stable_id;
+    if (form.selected_mode >= 0 &&
+        form.selected_mode < static_cast<int>(form.modes.size())) {
+      config.capture_mode =
+          form.modes[static_cast<std::size_t>(form.selected_mode)];
+    }
+    config.capture_mode.device_id = config.capture_stable_id;
+  }
+  if (form.selected_port >= 0 &&
+      form.selected_port < static_cast<int>(form.ports.size())) {
+    config.serial_port =
+        form.ports[static_cast<std::size_t>(form.selected_port)].name;
+  }
+}
+
+void load_connection(ConnectionForm& form, const Config& config) {
+  form.video_source = config.video_source;
+  form.control_target = config.control_target;
+  copy_host(form.video_host, sizeof(form.video_host), config.video_host);
+  copy_host(form.control_host, sizeof(form.control_host), config.control_host);
+  form.video_control_port = config.video_control_port;
+  form.video_port = config.video_port;
+  form.control_relay_port = config.control_relay_port;
+  form.capture_only = config.control_target == ControlTarget::none;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -462,6 +514,24 @@ int main(int argc, char** argv) {
     (void)session2->select_capture(form.devices[device_index],
                                    form.modes2[mode_index]);
   };
+  load_connection(ui.connection, config);
+  session->set_capture_only(ui.connection.capture_only);
+  bool restore_capture = config.video_source == VideoSource::local &&
+                         !config.capture_stable_id.empty() &&
+                         config.capture_mode.width > 0;
+  bool restore_mode = false;
+  if (config.video_source == VideoSource::relay ||
+      config.control_target == ControlTarget::relay) {
+    connect_relay();
+    if (ui.connection.video_source != VideoSource::local)
+      restore_capture = false;
+  }
+  if (config.auto_connect_serial &&
+      config.control_target == ControlTarget::local_serial &&
+      !config.serial_port.empty()) {
+    (void)session->connect_control(config.serial_port, config.serial_baud_rate,
+                                   config.serial_address);
+  }
   const auto apply = [&](const UiActions& actions) {
     for (const auto& item : actions.items) {
       switch (item.kind) {
@@ -564,15 +634,63 @@ int main(int argc, char** argv) {
     if (devices_future.valid() && devices_future.wait_for(std::chrono::seconds(
                                       0)) == std::future_status::ready) {
       form.devices = devices_future.get();
-      if (form.selected_device < 0 ||
-          form.selected_device >= static_cast<int>(form.devices.size()))
+      int matched_device = -1;
+      const bool restoring_device = restore_capture;
+      if (restore_capture) {
+        restore_capture = false;
+        for (int i = 0; i < static_cast<int>(form.devices.size()); ++i) {
+          if (form.devices[static_cast<std::size_t>(i)].stable_id ==
+              config.capture_stable_id) {
+            matched_device = i;
+            break;
+          }
+        }
+      }
+      if (matched_device >= 0) {
+        form.selected_device = matched_device;
+        modes_future = session->enumerate_capture_modes(
+            form.devices[static_cast<std::size_t>(matched_device)].stable_id);
+        restore_mode = true;
+      } else if (!restoring_device &&
+                 (form.selected_device < 0 ||
+                  form.selected_device >=
+                      static_cast<int>(form.devices.size()))) {
         form.selected_device = form.devices.empty() ? -1 : 0;
+      }
     }
     if (modes_future && modes_future->wait_for(std::chrono::seconds(0)) ==
                             std::future_status::ready) {
       form.modes = modes_future->get();
-      form.selected_mode = form.modes.empty() ? -1 : 0;
       modes_future.reset();
+      int matched_mode = -1;
+      const bool restoring_mode =
+          restore_mode && form.selected_device >= 0 &&
+          form.selected_device < static_cast<int>(form.devices.size()) &&
+          form.devices[static_cast<std::size_t>(form.selected_device)]
+                  .stable_id == config.capture_stable_id;
+      restore_mode = false;
+      if (restoring_mode) {
+        for (int i = 0; i < static_cast<int>(form.modes.size()); ++i) {
+          if (same_saved_mode(config.capture_mode,
+                              form.modes[static_cast<std::size_t>(i)])) {
+            matched_mode = i;
+            break;
+          }
+        }
+      }
+      if (matched_mode >= 0) {
+        form.selected_mode = matched_mode;
+        const auto device_index =
+            static_cast<std::size_t>(form.selected_device);
+        form.primary_device_id = form.devices[device_index].stable_id;
+        (void)session->select_capture(
+            form.devices[device_index],
+            form.modes[static_cast<std::size_t>(matched_mode)]);
+        current_frame.reset();
+        drop_primary_texture();
+      } else if (!restoring_mode) {
+        form.selected_mode = form.modes.empty() ? -1 : 0;
+      }
     }
     if (form.control_target == ControlTarget::local_serial &&
         form.open_connections &&
@@ -865,6 +983,7 @@ int main(int argc, char** argv) {
     SDL_GetWindowSize(window, &w, &h);
     config.window.width = w;
     config.window.height = h;
+    store_connection(config, ui.connection);
     try {
       save_config(*pref, config);
     } catch (...) {

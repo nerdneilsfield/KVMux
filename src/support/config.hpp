@@ -22,6 +22,9 @@ struct WindowConfig {
   bool maximized{};
 };
 
+enum class VideoSource { local, relay };
+enum class ControlTarget { local_serial, relay, none };
+
 struct Config {
   std::string capture_stable_id;
   CaptureMode capture_mode;
@@ -30,6 +33,14 @@ struct Config {
   std::uint8_t serial_address{};
   MouseMode mouse_mode{MouseMode::absolute};
   TargetAspect target_aspect{TargetAspect::full_frame};
+  VideoSource video_source{VideoSource::local};
+  ControlTarget control_target{ControlTarget::local_serial};
+  std::string video_host{"127.0.0.1"};
+  std::string control_host{"127.0.0.1"};
+  int video_control_port{17000};
+  int video_port{17001};
+  int control_relay_port{17000};
+  bool auto_connect_serial{false};
 #if defined(__APPLE__)
   std::uint16_t host_scancode{231};  // SDL_SCANCODE_RGUI
 #else
