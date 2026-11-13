@@ -228,8 +228,9 @@ inline LinkStatus make_control_link(const KvmSessionSnapshot& snapshot) {
   link.ready = snapshot.control.state == ControlConnectionState::ready;
   return link;
 }
-inline bool links_ready(const LinkStatus& video, const LinkStatus& control) {
-  return video.ready && control.ready;
+inline bool links_ready(const LinkStatus& video, const LinkStatus& control,
+                        bool require_control) {
+  return video.ready && (!require_control || control.ready);
 }
 
 // Fixed-icon pointer gestures, owned before ImGui and remote routing.
@@ -295,6 +296,8 @@ struct FloatingMenuIcon {
 struct ConnectionForm {
   VideoSource video_source{VideoSource::local};
   ControlTarget control_target{ControlTarget::local_serial};
+  VideoSource draft_video{VideoSource::local};
+  ControlTarget draft_control{ControlTarget::local_serial};
   char video_host[64]{"127.0.0.1"};
   char control_host[64]{"127.0.0.1"};
   int video_control_port{17000};

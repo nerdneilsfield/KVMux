@@ -44,6 +44,51 @@ void format_pointer(const InputPointerSnapshot& pointer, char* local,
     std::snprintf(submitted, submitted_n, "H:--");
 }
 
+bool relay_port_ok(int port) { return port > 0 && port <= 65535; }
+
+bool action_button(const char* label, bool enabled, const char* reason) {
+  ImGui::BeginDisabled(!enabled);
+  const bool pressed = ImGui::Button(label);
+  ImGui::EndDisabled();
+  if (!enabled && reason != nullptr &&
+      ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("%s", reason);
+  }
+  return enabled && pressed;
+}
+
+void show_port_error(int port, const char* label) {
+  if (!relay_port_ok(port)) ImGui::Text("%s must be from 1 to 65535.", label);
+}
+
+void baud_combo(int& baud) {
+  // Datasheet rates. docs/ch9329-baud.md. A saved custom rate stays visible
+  // until the user picks one of these.
+  constexpr int kRates[] = {1200,  2400,  4800,  9600,  14400,
+                            19200, 38400, 57600, 115200};
+  char preview[16];
+  std::snprintf(preview, sizeof(preview), "%d", baud);
+  if (!ImGui::BeginCombo("##baud", preview)) return;
+  for (const int rate : kRates) {
+    char item[16];
+    std::snprintf(item, sizeof(item), "%d", rate);
+    if (ImGui::Selectable(item, baud == rate)) baud = rate;
+  }
+  ImGui::EndCombo();
+}
+
+std::string link_status_text(const LinkStatus& link) {
+  if (link.ready) return "Ready";
+  if (!link.error.empty()) return "Failed: " + link.error;
+  if (link.state == "Fault" || link.state == "Permission denied" ||
+      link.state == "Stalled") {
+    return "Failed: " + link.state;
+  }
+  if (link.state == "Stopped" || link.state == "Disconnected")
+    return link.state;
+  return "Connecting";
+}
+
 void note_rebuild_ui(ConnectionForm& form) {
   form.capture_only = form.control_target == ControlTarget::none;
   form.screen2_open = false;
@@ -241,52 +286,61 @@ void append_connections(UiState& ui, const SessionView& view,
                          ImGuiWindowFlags_AlwaysAutoResize)))
     return;
   record_local_region(ui);
+  const bool require_control = form.control_target != ControlTarget::none;
   if (form.close_connections_when_ready &&
-      links_ready(view.video, view.control)) {
+      links_ready(view.video, view.control, require_control)) {
     form.open_connections = false;
     form.close_connections_when_ready = false;
   }
+  ImGui::Text("Video: %s", link_status_text(view.video).c_str());
+  if (require_control)
+    ImGui::Text("Control: %s", link_status_text(view.control).c_str());
+  ImGui::Separator();
+  const bool source_pending = form.draft_video != form.video_source ||
+                              form.draft_control != form.control_target;
+  const VideoSource shown_video = form.draft_video;
+  const ControlTarget shown_control = form.draft_control;
   const bool controls_enabled = !view.captured;
   ImGui::BeginDisabled(!controls_enabled);
   if (view.retiring) ImGui::TextUnformatted("Stopping previous session...");
   ImGui::BeginDisabled(view.retiring);
-  auto requested_video = form.video_source;
-  auto requested_control = form.control_target;
   ImGui::TextUnformatted("Video source");
   ImGui::SameLine();
-  if (ImGui::RadioButton("Local device",
-                         form.video_source == VideoSource::local))
-    requested_video = VideoSource::local;
+  if (ImGui::RadioButton("Local device", shown_video == VideoSource::local))
+    form.draft_video = VideoSource::local;
   ImGui::SameLine();
-  if (ImGui::RadioButton("Relay##video",
-                         form.video_source == VideoSource::relay))
-    requested_video = VideoSource::relay;
+  if (ImGui::RadioButton("Relay##video", shown_video == VideoSource::relay))
+    form.draft_video = VideoSource::relay;
   ImGui::TextUnformatted("Control target");
   ImGui::SameLine();
   if (ImGui::RadioButton("Local serial",
-                         form.control_target == ControlTarget::local_serial))
-    requested_control = ControlTarget::local_serial;
+                         shown_control == ControlTarget::local_serial))
+    form.draft_control = ControlTarget::local_serial;
   ImGui::SameLine();
   if (ImGui::RadioButton("Relay##control",
-                         form.control_target == ControlTarget::relay))
-    requested_control = ControlTarget::relay;
+                         shown_control == ControlTarget::relay))
+    form.draft_control = ControlTarget::relay;
   ImGui::SameLine();
-  if (ImGui::RadioButton("None", form.control_target == ControlTarget::none))
-    requested_control = ControlTarget::none;
+  if (ImGui::RadioButton("None", shown_control == ControlTarget::none))
+    form.draft_control = ControlTarget::none;
   ImGui::SetItemTooltip(
       "Video and recording only; no serial "
       "keyboard, mouse or keep-alive.");
-  if (!view.retiring && (requested_video != form.video_source ||
-                         requested_control != form.control_target)) {
-    form.video_source = requested_video;
-    form.control_target = requested_control;
+  const char* apply_reason =
+      view.retiring ? "Stopping previous session..."
+                    : "Video source and control target are already applied.";
+  if (action_button("Apply", source_pending && !view.retiring, apply_reason)) {
+    form.video_source = form.draft_video;
+    form.control_target = form.draft_control;
     note_rebuild_ui(form);
     actions.add(action(UiActionKind::rebuild_local));
   }
-  if (form.video_source == VideoSource::relay) {
+  if (shown_video == VideoSource::relay) {
     ImGui::InputText("Video host", form.video_host, sizeof(form.video_host));
     ImGui::InputInt("Video control port", &form.video_control_port);
+    show_port_error(form.video_control_port, "Video control port");
     ImGui::InputInt("Video port", &form.video_port);
+    show_port_error(form.video_port, "Video port");
     if (ImGui::BeginCombo("Decode",
                           decoder_backend_label(config.decoder_backend))) {
       for (const auto backend :
@@ -299,31 +353,38 @@ void append_connections(UiState& ui, const SessionView& view,
       ImGui::EndCombo();
     }
   }
-  if (form.control_target == ControlTarget::relay) {
+  if (shown_control == ControlTarget::relay) {
     ImGui::InputText("Control host", form.control_host,
                      sizeof(form.control_host));
     ImGui::InputInt("Control port", &form.control_relay_port);
+    show_port_error(form.control_relay_port, "Control port");
   }
-  if (form.video_source == VideoSource::relay ||
-      form.control_target == ControlTarget::relay) {
-    const bool video_ports_ok =
-        form.video_source != VideoSource::relay ||
-        (form.video_control_port > 0 && form.video_control_port <= 65535 &&
-         form.video_port > 0 && form.video_port <= 65535);
-    const bool control_port_ok =
-        form.control_target != ControlTarget::relay ||
-        (form.control_relay_port > 0 && form.control_relay_port <= 65535);
-    if (ImGui::Button("Connect relay") && !view.retiring && video_ports_ok &&
-        control_port_ok)
+  if (shown_video == VideoSource::relay ||
+      shown_control == ControlTarget::relay) {
+    const bool video_ports_ok = shown_video != VideoSource::relay ||
+                                (relay_port_ok(form.video_control_port) &&
+                                 relay_port_ok(form.video_port));
+    const bool control_port_ok = shown_control != ControlTarget::relay ||
+                                 relay_port_ok(form.control_relay_port);
+    const char* relay_reason =
+        source_pending  ? "Apply the video source and control target first."
+        : view.retiring ? "Stopping previous session..."
+        : !video_ports_ok || !control_port_ok ? "Enter a port from 1 to 65535."
+                                              : nullptr;
+    if (action_button(
+            "Connect relay",
+            relay_reason == nullptr && !view.retiring && !source_pending,
+            relay_reason))
       actions.add(action(UiActionKind::connect_relay));
     ImGui::SameLine();
-    if (ImGui::Button("Disconnect relay") &&
-        (view.relay_video_open || view.relay_control_open))
+    const bool relay_open = view.relay_video_open || view.relay_control_open;
+    if (action_button("Disconnect relay", relay_open,
+                      "Relay is not connected."))
       actions.add(action(UiActionKind::disconnect_relay));
   }
   ImGui::EndDisabled();
-  if (form.video_source == VideoSource::local ||
-      form.control_target == ControlTarget::local_serial) {
+  if (shown_video == VideoSource::local ||
+      shown_control == ControlTarget::local_serial) {
     if (ImGui::BeginTable("connections", 4,
                           ImGuiTableFlags_SizingStretchProp)) {
       ImGui::TableSetupColumn("setting", ImGuiTableColumnFlags_WidthFixed,
@@ -335,7 +396,7 @@ void append_connections(UiState& ui, const SessionView& view,
       ImGui::TableSetupColumn("choice2", ImGuiTableColumnFlags_WidthStretch,
                               1.F);
       ImGui::TableNextRow();
-      if (form.video_source == VideoSource::local) {
+      if (shown_video == VideoSource::local) {
         ImGui::TableSetColumnIndex(0);
         ImGui::TextUnformatted("Capture device");
         ImGui::TableSetColumnIndex(1);
@@ -363,7 +424,7 @@ void append_connections(UiState& ui, const SessionView& view,
           ImGui::EndCombo();
         }
       }
-      if (form.control_target == ControlTarget::local_serial) {
+      if (shown_control == ControlTarget::local_serial) {
         ImGui::TableSetColumnIndex(2);
         ImGui::TextUnformatted("Serial port");
         ImGui::TableSetColumnIndex(3);
@@ -387,7 +448,7 @@ void append_connections(UiState& ui, const SessionView& view,
         }
       }
       ImGui::TableNextRow();
-      if (form.video_source == VideoSource::local) {
+      if (shown_video == VideoSource::local) {
         ImGui::TableSetColumnIndex(0);
         ImGui::TextUnformatted("Capture mode");
         ImGui::TableSetColumnIndex(1);
@@ -407,18 +468,25 @@ void append_connections(UiState& ui, const SessionView& view,
           ImGui::EndCombo();
         }
       }
-      if (form.control_target == ControlTarget::local_serial) {
+      if (shown_control == ControlTarget::local_serial) {
         ImGui::TableSetColumnIndex(2);
         ImGui::TextUnformatted("Baud rate");
         ImGui::TableSetColumnIndex(3);
-        ImGui::InputInt("##baud", &config.serial_baud_rate);
-        config.serial_baud_rate = std::max(1200, config.serial_baud_rate);
+        baud_combo(config.serial_baud_rate);
       }
       ImGui::EndTable();
     }
-    if (form.video_source == VideoSource::local &&
-        ImGui::Button("Start preview") && form.selected_device >= 0 &&
-        form.selected_mode >= 0) {
+    const bool preview_ready =
+        !source_pending && !view.retiring && form.selected_device >= 0 &&
+        form.selected_device < static_cast<int>(form.devices.size()) &&
+        form.selected_mode >= 0 &&
+        form.selected_mode < static_cast<int>(form.modes.size());
+    const char* preview_reason =
+        source_pending  ? "Apply the video source and control target first."
+        : view.retiring ? "Stopping previous session..."
+                        : "Select a capture device and mode.";
+    if (shown_video == VideoSource::local &&
+        action_button("Start preview", preview_ready, preview_reason)) {
       const auto& device =
           form.devices[static_cast<std::size_t>(form.selected_device)];
       if (form.screen2_open && device.stable_id == form.second_device_id) {
@@ -429,9 +497,15 @@ void append_connections(UiState& ui, const SessionView& view,
         actions.add(action(UiActionKind::start_preview));
       }
     }
-    if (form.control_target == ControlTarget::local_serial) {
-      if (form.video_source == VideoSource::local) ImGui::SameLine();
-      if (ImGui::Button("Connect") && form.selected_port >= 0) {
+    if (shown_control == ControlTarget::local_serial) {
+      if (shown_video == VideoSource::local) ImGui::SameLine();
+      const bool port_ready =
+          !source_pending && form.selected_port >= 0 &&
+          form.selected_port < static_cast<int>(form.ports.size());
+      const char* serial_reason =
+          source_pending ? "Apply the video source and control target first."
+                         : "Select a serial port.";
+      if (action_button("Connect", port_ready, serial_reason)) {
         form.close_connections_when_ready = true;
         actions.add(action(UiActionKind::connect_serial));
       }
@@ -440,7 +514,7 @@ void append_connections(UiState& ui, const SessionView& view,
         actions.add(action(UiActionKind::disconnect_serial));
       ImGui::Checkbox("Connect serial on startup", &config.auto_connect_serial);
     }
-    if (form.video_source == VideoSource::local) {
+    if (shown_video == VideoSource::local) {
       ImGui::SeparatorText("Second screen (Relative mouse only)");
       if (!form.screen2_open) {
         if (ImGui::BeginCombo("Screen 2 device",
@@ -485,12 +559,16 @@ void append_connections(UiState& ui, const SessionView& view,
               form.selected_mode2 = i;
           ImGui::EndCombo();
         }
-        ImGui::BeginDisabled(
-            view.retiring || form.selected_device2 < 0 ||
-            form.selected_device2 >= static_cast<int>(form.devices.size()) ||
-            form.selected_mode2 < 0 ||
-            form.selected_mode2 >= static_cast<int>(form.modes2.size()));
-        if (ImGui::Button("Open screen 2")) {
+        const bool screen2_ready =
+            !source_pending && !view.retiring && form.selected_device2 >= 0 &&
+            form.selected_device2 < static_cast<int>(form.devices.size()) &&
+            form.selected_mode2 >= 0 &&
+            form.selected_mode2 < static_cast<int>(form.modes2.size());
+        const char* screen2_reason =
+            source_pending  ? "Apply the video source and control target first."
+            : view.retiring ? "Stopping previous session..."
+                            : "Select a screen 2 device and mode.";
+        if (action_button("Open screen 2", screen2_ready, screen2_reason)) {
           if (form.devices[static_cast<std::size_t>(form.selected_device2)]
                   .stable_id == form.primary_device_id) {
             ui.media.media_message =
@@ -499,7 +577,6 @@ void append_connections(UiState& ui, const SessionView& view,
             actions.add(action(UiActionKind::open_screen2));
           }
         }
-        ImGui::EndDisabled();
       } else if (ImGui::Button("Close screen 2")) {
         actions.add(action(UiActionKind::close_screen2));
       }
@@ -917,9 +994,11 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
     ImGui::TextWrapped("%s", view.control.hint.c_str());
   const auto origin = ImGui::GetCursorScreenPos();
   const float line_height = ImGui::GetTextLineHeight();
-  const ImU32 state_color = links_ready(view.video, view.control)
-                                ? IM_COL32(80, 210, 120, 255)
-                                : IM_COL32(230, 155, 70, 255);
+  const ImU32 state_color =
+      links_ready(view.video, view.control,
+                  ui.connection.control_target != ControlTarget::none)
+          ? IM_COL32(80, 210, 120, 255)
+          : IM_COL32(230, 155, 70, 255);
   auto* draw = ImGui::GetWindowDrawList();
   draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F,
                         state_color);

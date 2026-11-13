@@ -200,6 +200,8 @@ void store_connection(Config& config, const ConnectionForm& form) {
 void load_connection(ConnectionForm& form, const Config& config) {
   form.video_source = config.video_source;
   form.control_target = config.control_target;
+  form.draft_video = config.video_source;
+  form.draft_control = config.control_target;
   copy_host(form.video_host, sizeof(form.video_host), config.video_host);
   copy_host(form.control_host, sizeof(form.control_host), config.control_host);
   form.video_control_port = config.video_control_port;
@@ -443,7 +445,7 @@ int main(int argc, char** argv) {
       }
       relay_mode = relay_modes.front();
     }
-    if (want_control) form.close_connections_when_ready = true;
+    form.close_connections_when_ready = true;
     close_second();
     retire_session();
     video_client = std::move(new_video);
