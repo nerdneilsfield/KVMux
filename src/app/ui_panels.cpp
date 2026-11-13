@@ -623,23 +623,6 @@ void append_connections(UiState& ui, const SessionView& view,
     special.special = SpecialKeys::alt_tab;
     actions.add(std::move(special));
   }
-  ImGui::BeginDisabled(view.snapshot.input_state != InputState::preview);
-  ImGui::SetNextItemWidth(150.F);
-  const char* aspect_names[] = {"Full frame", "16:9", "16:10", "4:3"};
-  int aspect = static_cast<int>(config.target_aspect);
-  if (ImGui::Combo("Target aspect", &aspect, aspect_names, 4))
-    config.target_aspect = static_cast<TargetAspect>(aspect);
-  ImGui::EndDisabled();
-  ImGui::Checkbox("VSync", &config.vsync);
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(180.F);
-  const char* color_names[] = {"Color: automatic", "Color: BT.601 limited",
-                               "Color: BT.601 full", "Color: BT.709 limited",
-                               "Color: BT.709 full"};
-  int color = static_cast<int>(config.color_override);
-  if (ImGui::Combo("##color", &color, color_names, 5))
-    config.color_override = static_cast<ColorOverride>(color);
-  ImGui::SameLine();
   ImGui::SetNextItemWidth(190.F);
 #if defined(__APPLE__)
   const char* host_names[] = {"Host: Right Command", "Host: Right Control"};
@@ -657,6 +640,92 @@ void append_connections(UiState& ui, const SessionView& view,
   actions.add(std::move(host_key));
   ImGui::EndDisabled();
   ImGui::End();
+}
+
+const char* host_key_name(std::uint16_t code) {
+#if defined(__APPLE__)
+  if (code == 231) return "Right Command";
+  if (code == 228) return "Right Control";
+#else
+  if (code == 228) return "Right Control";
+  if (code == 231) return "Right GUI";
+#endif
+  return "Host";
+}
+
+void queue_special(UiActions& actions, SpecialKeys keys) {
+  auto special = action(UiActionKind::send_special);
+  special.special = keys;
+  actions.add(std::move(special));
+}
+
+void append_command_menus(UiState& ui, const SessionView& view,
+                          UiActions& actions) {
+  auto& config = *ui.config;
+  if (ImGui::BeginMenu("连接")) {
+    if (ImGui::MenuItem("Connections")) ui.connection.open_connections = true;
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("显示")) {
+    ImGui::MenuItem("VSync", nullptr, &config.vsync);
+    if (ImGui::BeginMenu("Color")) {
+      const std::pair<const char*, ColorOverride> colors[] = {
+          {"Automatic", ColorOverride::automatic},
+          {"BT.601 limited", ColorOverride::bt601_limited},
+          {"BT.601 full", ColorOverride::bt601_full},
+          {"BT.709 limited", ColorOverride::bt709_limited},
+          {"BT.709 full", ColorOverride::bt709_full},
+      };
+      for (const auto& [label, value] : colors) {
+        if (ImGui::MenuItem(label, nullptr, config.color_override == value))
+          config.color_override = value;
+      }
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Target aspect")) {
+      ImGui::BeginDisabled(view.snapshot.input_state != InputState::preview);
+      const std::pair<const char*, TargetAspect> aspects[] = {
+          {"Full frame", TargetAspect::full_frame},
+          {"16:9", TargetAspect::ratio_16_9},
+          {"16:10", TargetAspect::ratio_16_10},
+          {"4:3", TargetAspect::ratio_4_3},
+      };
+      for (const auto& [label, value] : aspects) {
+        if (ImGui::MenuItem(label, nullptr, config.target_aspect == value))
+          config.target_aspect = value;
+      }
+      ImGui::EndDisabled();
+      ImGui::EndMenu();
+    }
+    if (ImGui::MenuItem(ui.overlay.fullscreen ? "Exit fullscreen"
+                                              : "Fullscreen")) {
+      ui.overlay.fullscreen = !ui.overlay.fullscreen;
+      SDL_SetWindowFullscreen(ui.window, ui.overlay.fullscreen);
+    }
+    ImGui::MenuItem("Status overlay", nullptr, &ui.overlay.show_status);
+    if (ImGui::MenuItem("Diagnostics", nullptr, ui.overlay.diagnostics_open))
+      ui.overlay.diagnostics_open = !ui.overlay.diagnostics_open;
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("输入")) {
+    if (ImGui::MenuItem("Type ASCII", nullptr, false,
+                        !ui.connection.capture_only))
+      ui.paste.open = true;
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("动作")) {
+    append_media_menu(ui, view, actions);
+    ImGui::Separator();
+    const bool control = !ui.connection.capture_only;
+    if (ImGui::MenuItem("Send Ctrl+Alt+Del", nullptr, false, control))
+      queue_special(actions, SpecialKeys::control_alt_delete);
+    if (ImGui::MenuItem("Send Alt+Tab", nullptr, false, control))
+      queue_special(actions, SpecialKeys::alt_tab);
+    if (control &&
+        ImGui::MenuItem("Keep target awake", nullptr, &config.keep_alive))
+      actions.add(action(UiActionKind::set_keep_alive));
+    ImGui::EndMenu();
+  }
 }
 
 }  // namespace
@@ -793,48 +862,16 @@ UiActions draw_chrome(UiState& ui, const SessionView& view) {
         ImGui::OpenPopup("Floating menu");
         ui.overlay.open_floating_menu = false;
       }
-      if (ImGui::MenuItem("Connections")) ui.connection.open_connections = true;
-      if (ImGui::BeginMenu("Media")) {
-        append_media_menu(ui, view, actions);
-        ImGui::EndMenu();
-      }
-      if (!ui.connection.capture_only && ImGui::MenuItem("Type ASCII"))
-        ui.paste.open = true;
+      append_command_menus(ui, view, actions);
       ImGui::SetNextWindowPos({viewport->Pos.x + ui.overlay.menu_icon.pos.x,
                                viewport->Pos.y + ui.overlay.menu_icon.pos.y +
                                    FloatingMenuIcon::size},
                               ImGuiCond_Appearing);
       if (ImGui::BeginPopup("Floating menu")) {
         record_local_region(ui);
-        if (ImGui::MenuItem("Connections / settings"))
-          ui.connection.open_connections = true;
-        ImGui::Separator();
-        append_media_menu(ui, view, actions);
-        ImGui::Separator();
-        if (!ui.connection.capture_only && ImGui::MenuItem("Type ASCII"))
-          ui.paste.open = true;
-        ImGui::MenuItem("Status overlay", nullptr, &ui.overlay.show_status);
-        if (!ui.connection.capture_only &&
-            ImGui::MenuItem("Keep target awake", nullptr,
-                            &ui.config->keep_alive))
-          actions.add(action(UiActionKind::set_keep_alive));
-        if (ImGui::MenuItem(ui.overlay.fullscreen ? "Exit fullscreen"
-                                                  : "Fullscreen")) {
-          ui.overlay.fullscreen = !ui.overlay.fullscreen;
-          SDL_SetWindowFullscreen(ui.window, ui.overlay.fullscreen);
-        }
-        if (ImGui::MenuItem("Diagnostics"))
-          ui.overlay.diagnostics_open = !ui.overlay.diagnostics_open;
+        append_command_menus(ui, view, actions);
         ImGui::EndPopup();
       }
-      if (ImGui::MenuItem(ui.overlay.fullscreen ? "Exit fullscreen"
-                                                : "Fullscreen")) {
-        ui.overlay.fullscreen = !ui.overlay.fullscreen;
-        SDL_SetWindowFullscreen(ui.window, ui.overlay.fullscreen);
-      }
-      if (ImGui::MenuItem("Diagnostics"))
-        ui.overlay.diagnostics_open = !ui.overlay.diagnostics_open;
-      ImGui::MenuItem("Status overlay", nullptr, &ui.overlay.show_status);
       if (ui.paste.open) {
         ImGui::OpenPopup("Type ASCII");
         ui.paste.open = false;
@@ -933,6 +970,18 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
                         4.F);
     draw->AddText(pos, IM_COL32(243, 241, 235, static_cast<int>(255.F * alpha)),
                   hint);
+  } else if (view.snapshot.input_state == InputState::preview &&
+             view.has_texture) {
+    char hint[128];
+    std::snprintf(hint, sizeof(hint), "点击画面开始控制，Host 键：%s",
+                  host_key_name(ui.config->host_scancode));
+    const auto size = ImGui::CalcTextSize(hint);
+    const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F},
+                        {pos.x + size.x + 8.F, pos.y + size.y + 4.F},
+                        ImGui::GetColorU32(ImGuiCol_WindowBg), 4.F);
+    draw->AddText(pos, ImGui::GetColorU32(ImGuiCol_Text), hint);
   }
   ImGui::End();
   ImGui::PopStyleVar();
@@ -943,20 +992,7 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
   UiActions actions;
   const auto* viewport = ImGui::GetMainViewport();
   const auto& d = view.diagnostics;
-  char rates[64];
-  char video_text[32] = "V:--";
-  char control_text[32] = "C:--";
-  if (view.video_bytes_per_second)
-    std::snprintf(video_text, sizeof(video_text), "V:%.2fM/s",
-                  *view.video_bytes_per_second / (1024.0 * 1024.0));
-  if (view.control_bytes_per_second)
-    std::snprintf(control_text, sizeof(control_text), "C:%.2fK/s",
-                  *view.control_bytes_per_second / 1024.0);
-  std::snprintf(rates, sizeof(rates), "%s %s", video_text, control_text);
-  char pointer[96];
-  char submitted[64];
-  format_pointer(view.pointer, pointer, sizeof(pointer), submitted,
-                 sizeof(submitted));
+  const auto recording_state = ui.recording->status().state;
   const char* place = "Local";
   if (ui.connection.video_source == VideoSource::relay &&
       ui.connection.control_target == ControlTarget::relay)
@@ -965,18 +1001,27 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
     place = "LAN video";
   else if (ui.connection.control_target == ControlTarget::relay)
     place = "LAN control";
-  char line[320];
-  std::snprintf(line, sizeof(line),
-                "%s | %s | %.1f/%.1f fps | %s | %s | %s > %s | Rec:%s", place,
-                view.resolution.c_str(), d.decode_fps, d.unique_present_fps,
-                rates, input_state_label(view.snapshot.input_state), pointer,
-                submitted, recording_state_label(ui.recording->status().state));
+  char left[160];
+  if (recording_state == RecordingState::idle) {
+    std::snprintf(left, sizeof(left), "%s · %s", place,
+                  input_state_label(view.snapshot.input_state));
+  } else {
+    std::snprintf(left, sizeof(left), "%s · %s · Rec:%s", place,
+                  input_state_label(view.snapshot.input_state),
+                  recording_state_label(recording_state));
+  }
+  char right[80];
+  std::snprintf(right, sizeof(right), "%s  %.1f/%.1f fps",
+                view.resolution.c_str(), d.decode_fps, d.unique_present_fps);
+  const bool pasting = view.snapshot.text_paste_active;
   if (!ui.overlay.show_status) return actions;
   const auto overlay_flags =
       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
       ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
       ImGuiWindowFlags_NoSavedSettings;
-  const float status_height = ImGui::GetTextLineHeight() + 8.F;
+  const float text_height = ImGui::GetTextLineHeight();
+  float status_height = text_height + 8.F;
+  if (pasting) status_height += ImGui::GetFrameHeightWithSpacing();
   ImGui::SetNextWindowPos(
       {viewport->Pos.x, viewport->Pos.y + viewport->Size.y - status_height});
   ImGui::SetNextWindowSize({viewport->Size.x, status_height});
@@ -1000,14 +1045,30 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
   auto* draw = ImGui::GetWindowDrawList();
   draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F,
                         state_color);
-  const float text_width = ImGui::CalcTextSize(line).x;
-  const float room = std::max(1.F, ImGui::GetContentRegionAvail().x - 14.F);
-  const float font_size =
-      ImGui::GetFontSize() * std::min(1.F, room / std::max(1.F, text_width));
+  const float right_width = ImGui::CalcTextSize(right).x;
+  const float left_room =
+      std::max(1.F, ImGui::GetContentRegionAvail().x - right_width - 22.F);
+  const float left_width = ImGui::CalcTextSize(left).x;
+  const float font_size = ImGui::GetFontSize() *
+                          std::min(1.F, left_room / std::max(1.F, left_width));
   draw->AddText(ImGui::GetFont(), font_size,
                 {origin.x + 14.F, origin.y + (line_height - font_size) * .5F},
-                ImGui::GetColorU32(ImGuiCol_Text), line);
+                ImGui::GetColorU32(ImGuiCol_Text), left);
+  draw->AddText(
+      {origin.x + ImGui::GetContentRegionAvail().x - right_width, origin.y},
+      ImGui::GetColorU32(ImGuiCol_Text), right);
   ImGui::Dummy({ImGui::GetContentRegionAvail().x, line_height});
+  if (pasting) {
+    ImGui::Text("Typing ASCII: %zu/%zu scheduled",
+                view.paste.scheduled_gestures, view.paste.planned_gestures);
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel typing")) {
+      ui.paste.cancelled = true;
+      ui.paste.buffer.fill('\0');
+      ui.paste.removed = 0;
+      actions.add(action(UiActionKind::cancel_text_paste));
+    }
+  }
   ImGui::End();
   ImGui::PopStyleVar();
   return actions;
@@ -1138,6 +1199,16 @@ UiActions draw_diagnostics(UiState& ui, const SessionView& view) {
   char submitted[64];
   format_pointer(view.pointer, pointer, sizeof(pointer), submitted,
                  sizeof(submitted));
+  char video_rate[32] = "V:--";
+  char control_rate[32] = "C:--";
+  if (view.video_bytes_per_second)
+    std::snprintf(video_rate, sizeof(video_rate), "V:%.2fM/s",
+                  *view.video_bytes_per_second / (1024.0 * 1024.0));
+  if (view.control_bytes_per_second)
+    std::snprintf(control_rate, sizeof(control_rate), "C:%.2fK/s",
+                  *view.control_bytes_per_second / 1024.0);
+  ImGui::Text("Pointer: %s", pointer);
+  ImGui::Text("Rates: %s %s", video_rate, control_rate);
   if (view.pointer.video_rect && view.pointer.video_local) {
     const auto& rect = *view.pointer.video_rect;
     const auto [x, y] = *view.pointer.video_local;
