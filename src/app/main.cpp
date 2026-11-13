@@ -23,6 +23,7 @@
 #include "app/kvm_session.hpp"
 #include "app/recording.hpp"
 #include "network/relay_client.hpp"
+#include "network/relay_selection.hpp"
 #include "render/video_renderer.hpp"
 #include "support/config.hpp"
 #include "support/diagnostics.hpp"
@@ -1047,7 +1048,23 @@ int main(int argc, char** argv) {
     if (control_target == ControlTarget::local_serial && open_connections &&
         session->snapshot().input_state == InputState::preview &&
         std::chrono::steady_clock::now() >= next_serial_scan) {
+      const std::string previous =
+          selected_port >= 0 && selected_port < static_cast<int>(ports.size())
+              ? ports[selected_port].name
+              : std::string{};
       ports = enumerate_serial_ports();
+      selected_port = -1;
+      std::string wanted = previous;
+      if (wanted.empty()) {
+        // Preselect only; connecting stays an explicit user action. On macOS
+        // this picks the single ch341-usb: entry, elsewhere the system port.
+        try {
+          wanted = relay::select_serial(ports);
+        } catch (const std::exception&) {
+        }
+      }
+      for (int i = 0; i < static_cast<int>(ports.size()); ++i)
+        if (ports[i].name == wanted) selected_port = i;
       next_serial_scan =
           std::chrono::steady_clock::now() + std::chrono::seconds(1);
     }
@@ -1703,10 +1720,14 @@ int main(int argc, char** argv) {
                                 selected_port < static_cast<int>(ports.size())
                             ? ports[selected_port].name.c_str()
                             : "Select port")) {
-                  for (int i = 0; i < static_cast<int>(ports.size()); ++i)
-                    if (ImGui::Selectable(ports[i].name.c_str(),
-                                          i == selected_port))
+                  for (int i = 0; i < static_cast<int>(ports.size()); ++i) {
+                    const std::string label =
+                        ports[i].description.empty()
+                            ? ports[i].name
+                            : ports[i].name + " (" + ports[i].description + ")";
+                    if (ImGui::Selectable(label.c_str(), i == selected_port))
                       selected_port = i;
+                  }
                   ImGui::EndCombo();
                 }
               }
