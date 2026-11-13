@@ -160,6 +160,125 @@ void load_connection(ConnectionForm& form, const Config& config) {
   form.capture_only = config.control_target == ControlTarget::none;
 }
 
+void collect_codepoints(std::vector<unsigned>& points, std::string_view text) {
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    unsigned codepoint = lead;
+    std::size_t width = 1;
+    if ((lead & 0xE0U) == 0xC0U && index + 1 < text.size()) {
+      codepoint = (lead & 0x1FU) << 6U |
+                  (static_cast<unsigned char>(text[index + 1]) & 0x3FU);
+      width = 2;
+    } else if ((lead & 0xF0U) == 0xE0U && index + 2 < text.size()) {
+      codepoint = (lead & 0x0FU) << 12U |
+                  (static_cast<unsigned char>(text[index + 1]) & 0x3FU) << 6U |
+                  (static_cast<unsigned char>(text[index + 2]) & 0x3FU);
+      width = 3;
+    } else if ((lead & 0xF8U) == 0xF0U && index + 3 < text.size()) {
+      codepoint = (lead & 0x07U) << 18U |
+                  (static_cast<unsigned char>(text[index + 1]) & 0x3FU) << 12U |
+                  (static_cast<unsigned char>(text[index + 2]) & 0x3FU) << 6U |
+                  (static_cast<unsigned char>(text[index + 3]) & 0x3FU);
+      width = 4;
+    }
+    index += width;
+    if (codepoint >= 0x80U && codepoint <= 0xFFFFU) points.push_back(codepoint);
+  }
+}
+
+const ImWchar* ui_chinese_ranges() {
+  static const ImWchar* published = nullptr;
+  static std::vector<ImWchar> ranges;
+  if (published != nullptr) return published;
+  constexpr std::string_view kText[] = {
+      "连接",
+      "显示",
+      "输入",
+      "动作",
+      "选择视频源 → 开始预览 → 连接控制 → 点击画面开始控制",
+      "点击画面开始控制，Host 键：",
+      "Local · Preview",
+      "粘贴已取消。",
+      "检测到按键，粘贴已取消。",
+      "窗口失去焦点，粘贴已取消。",
+      "画面中断，粘贴已取消。",
+      "界面无响应，粘贴已取消。",
+      "控制链路中断，粘贴已取消。",
+      "设备应答超时，粘贴已取消。",
+      "控制设备故障，粘贴已取消。",
+      "正在退出，粘贴已取消。",
+      "当前无法开始粘贴。",
+      "粘贴已停止（原因未知）",
+  };
+  std::vector<unsigned> points;
+  for (const auto text : kText) collect_codepoints(points, text);
+  std::sort(points.begin(), points.end());
+  points.erase(std::unique(points.begin(), points.end()), points.end());
+  if (points.empty()) {
+    ranges.push_back(0);
+    published = ranges.data();
+    return published;
+  }
+  unsigned start = points.front();
+  unsigned previous = start;
+  for (std::size_t i = 1; i < points.size(); ++i) {
+    if (points[i] == previous + 1U) {
+      previous = points[i];
+      continue;
+    }
+    ranges.push_back(static_cast<ImWchar>(start));
+    ranges.push_back(static_cast<ImWchar>(previous));
+    start = previous = points[i];
+  }
+  ranges.push_back(static_cast<ImWchar>(start));
+  ranges.push_back(static_cast<ImWchar>(previous));
+  ranges.push_back(0);
+  published = ranges.data();
+  return published;
+}
+
+void attach_cjk_fallback() {
+  const ImWchar* ranges = ui_chinese_ranges();
+  if (ranges == nullptr || ranges[0] == 0) return;
+  struct Candidate {
+    const char* path;
+    unsigned index;
+  };
+  constexpr Candidate kCandidates[] = {
+#if defined(_WIN32)
+      {"C:/Windows/Fonts/msyh.ttc", 0},
+      {"C:/Windows/Fonts/msyh.ttf", 0},
+      {"C:/Windows/Fonts/simhei.ttf", 0},
+#elif defined(__APPLE__)
+      {"/System/Library/Fonts/PingFang.ttc", 0},
+      {"/System/Library/Fonts/Hiragino Sans GB.ttc", 0},
+      {"/System/Library/Fonts/STHeiti Light.ttc", 0},
+#else
+      {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2},
+      {"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", 0},
+#endif
+  };
+  ImGuiIO& io = ImGui::GetIO();
+  if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();
+  for (const auto& candidate : kCandidates) {
+    std::error_code error;
+    if (!std::filesystem::exists(candidate.path, error)) continue;
+    ImFontConfig config;
+    config.MergeMode = true;
+    config.PixelSnapH = true;
+    config.FontNo = candidate.index;
+    config.Flags = ImFontFlags_NoLoadError;
+    if (io.Fonts->AddFontFromFileTTF(candidate.path, 0.F, &config, ranges) !=
+        nullptr) {
+      spdlog::debug("UI Chinese font: path={} index={}", candidate.path,
+                    candidate.index);
+      return;
+    }
+  }
+  spdlog::warn("UI Chinese font was not found");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -237,6 +356,7 @@ int main(int argc, char** argv) {
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;
   theme::apply();
+  attach_cjk_fallback();
   const GLuint brand_texture = load_brand_texture();
   ImGui_ImplSDL3_InitForOpenGL(window, context);
   ImGui_ImplOpenGL3_Init("#version 150");
