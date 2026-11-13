@@ -293,3 +293,7 @@ build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --prob
 ## GUI 帧上传（2026-11-13）
 
 macOS 诊断面板上还没有对比「只在新帧上传」前后的 `sample_to_gpu_submit` 和 `SwapWindow blocking`。这项保持未验证。Linux 上的 FakeCapture 单测只检查 `sample_to_gpu_submit` 的次数是否等于新帧数，不是 KVM 延迟，也不是这块面板的性能记录。
+
+## GUI 结构拆分（2026-11-13）
+
+面板、事件路由和链路状态的拆分没有在 macOS 上打开过 GUI。连接窗口、菜单、粘贴、副屏、状态栏和诊断窗是否和拆分前一样，都还没有人工核对。这项保持未验证。Linux 上的 `make test` 不覆盖这些窗口。

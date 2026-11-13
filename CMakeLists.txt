@@ -169,7 +169,8 @@ add_executable(kvmux-relay src/app/relay_main.cpp src/app/probe.cpp)
 target_link_libraries(kvmux-relay PRIVATE kvmux::capture)
 
 if(KVMUX_BUILD_GUI)
-    add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp src/app/recording.cpp src/app/scroll_stitcher.cpp)
+    add_executable(kvmux src/app/main.cpp src/app/kvm_session.cpp src/app/recording.cpp
+        src/app/scroll_stitcher.cpp src/app/ui_panels.cpp src/app/event_router.cpp)
     # SDL_GetBasePath resolves to Contents/Resources in a macOS bundle.
     set(kvmux_branding "${CMAKE_CURRENT_SOURCE_DIR}/assets/branding")
     if(APPLE)

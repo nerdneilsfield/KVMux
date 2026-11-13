@@ -178,6 +178,8 @@ Targets：`src/control/serial_worker.*`、`src/control/paste_*`、`src/input/inp
   - Q14：Uploading 收到乱序 chunk → `Failed(invalid_upload)`，走 release。
   - Q15：所有 relay、串口、输入相关测试 `--repeat until-fail:20` 通过；收敛清单逐项完成或写明保留原因。
 
+Status: 跳过（2026-11-13）。等待用户在 macOS 上的粘贴诊断。本任务没有改代码。
+
 ## 阶段三：GUI 结构与 UX（T4、T5、T5b）
 
 ### T4：结构拆分（不改行为）
@@ -189,6 +191,21 @@ Targets：`src/app/main.cpp`，新增 `src/app/ui_state.hpp`、`src/app/ui_panel
 - SDL 事件路由移入 `event_router.*`。
 - 链路状态只有一个来源：视频与控制各一份 `LinkStatus{state, error, hint}`。
 - 验收：Q16 现有测试全过；`main.cpp` 只剩初始化和帧循环。GUI 手动检查在 macOS 上进行，之前标为未验证。
+
+Status: 完成（2026-11-13）。T5 尚未开始。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。
+- `UiState` 分成 `ConnectionForm`、`MediaUi`、`PasteUi`、`OverlayFlags`。视频和控制各一份 `LinkStatus{state, error, hint}`。`hint` 保持为空，状态栏不因此多出一行。状态点仍是 `video_fresh && control ready`。
+- 面板是 `draw_chrome`、`draw_video`、`draw_status`、`draw_diagnostics`，只返回 `UiActions`。绘制时不调用会话。主循环在每个面板返回后立刻执行该面板的动作，再画下一个面板。会话的重建、连接、串口、预览、副屏和输入矩形仍在 `main.cpp`，因为它们持有会话、SDL 窗口和纹理。
+- 录制的截图、滚动和暂停仍在面板里调用 `Recording`。这些调用要当场得到布尔结果才能 `CloseCurrentPopup`。滚动开始成功后才把 `activate_control` 放进动作列表。
+- SDL 事件在 `event_router` 里按原来的顺序直接交给会话，不改成动作队列。Host 键、焦点丢失、副屏和浮动菜单的释放路径没有改。
+- 切源时面板先清掉同一帧还会画出来的设备列表和副屏标记，再排队重建。状态栏和诊断窗在视频矩形设置之后读取 diagnostics，和拆分前一样。
+- Q16：`make test` 30/30 通过，实测 98 s。没有为这次拆分新增 GUI 测试。
+- `make lint` 停在已知基线：`tests/codec_startup_fallback_test.cpp:21` 的 format-check。单独的 cppcheck 只报已知的 `src/network/relay_server.cpp:566` `identicalConditionAfterEarlyExit`。单独的 clang-tidy 退出码 0。搬过去的按位运算和 optional 警告没有当作新缺陷改掉。
+- GUI 结构的手动检查没有在这台 Linux 机器上做，macOS 上也还没有。已写入 `docs/hardware-validation.md`，标为未验证。
+- 未做 T5，未 push。
 
 ### T5：UX 修复（依赖 T4）
 
@@ -242,4 +259,4 @@ T1 → T2 → T3 → T4 → T5 → T5b → T6。T1、T2 各自独立提交。T1 
 
 ## 进度
 
-T1 完成。T2 完成。T3 尚未开始。
+T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。T5 尚未开始。
