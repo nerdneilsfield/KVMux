@@ -433,14 +433,14 @@ int main(int argc, char** argv) {
           std::make_unique<relay::NetworkCaptureSource>(new_video);
       const auto relay_devices = network_capture->enumerate_devices();
       if (relay_devices.empty()) {
-        ui.media.media_message = "Relay returned no capture devices.";
+        set_media_notice(ui.media, "Relay returned no capture devices.", true);
         return;
       }
       relay_device = relay_devices.front();
       const auto relay_modes =
           network_capture->enumerate_modes(relay_device.stable_id);
       if (relay_modes.empty()) {
-        ui.media.media_message = "Relay returned no capture modes.";
+        set_media_notice(ui.media, "Relay returned no capture modes.", true);
         return;
       }
       relay_mode = relay_modes.front();
@@ -505,7 +505,7 @@ int main(int argc, char** argv) {
                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
                                    SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window2) {
-      ui.media.media_message = "Could not open the second window.";
+      set_media_notice(ui.media, "Could not open the second window.", true);
       return;
     }
     second_window_id = SDL_GetWindowID(window2);
@@ -534,6 +534,8 @@ int main(int argc, char** argv) {
     (void)session->connect_control(config.serial_port, config.serial_baud_rate,
                                    config.serial_address);
   }
+  if (!restore_capture && config.video_source != VideoSource::relay)
+    ui.connection.open_connections = true;
   const auto apply = [&](const UiActions& actions) {
     for (const auto& item : actions.items) {
       switch (item.kind) {
@@ -653,6 +655,8 @@ int main(int argc, char** argv) {
         modes_future = session->enumerate_capture_modes(
             form.devices[static_cast<std::size_t>(matched_device)].stable_id);
         restore_mode = true;
+      } else if (restoring_device) {
+        form.open_connections = true;
       } else if (!restoring_device &&
                  (form.selected_device < 0 ||
                   form.selected_device >=
@@ -690,7 +694,9 @@ int main(int argc, char** argv) {
             form.modes[static_cast<std::size_t>(matched_mode)]);
         current_frame.reset();
         drop_primary_texture();
-      } else if (!restoring_mode) {
+      } else if (restoring_mode) {
+        form.open_connections = true;
+      } else {
         form.selected_mode = form.modes.empty() ? -1 : 0;
       }
     }
@@ -908,6 +914,7 @@ int main(int argc, char** argv) {
     view.has_texture = view.texture != 0 && view.renderer_width > 0;
     SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
     apply(draw_video(ui, view));
+    draw_banners(ui, view);
     // Chrome may have replaced the diagnostics object. Read it after the
     // video rect, matching the previous status and diagnostics windows.
     view.diagnostics = diagnostics->snapshot();

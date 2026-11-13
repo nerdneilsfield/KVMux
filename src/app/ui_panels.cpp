@@ -212,38 +212,39 @@ void append_media_menu(UiState& ui, const SessionView& view,
   if (ImGui::MenuItem("Save full screenshot")) {
     if (recording.snapshot(*view.frame)) {
       media.snapshot_queued = true;
-      media.media_message = "Screenshot queued.";
+      set_media_notice(media, "Screenshot queued.", false);
       ImGui::CloseCurrentPopup();
     } else
-      media.media_message = "Could not queue screenshot.";
+      set_media_notice(media, "Could not queue screenshot.", true);
   }
   ImGui::EndDisabled();
   ImGui::BeginDisabled(!view.valid_visible_cpu_frame || !media.saved_region);
   if (ImGui::MenuItem("Save region screenshot")) {
     if (recording.snapshot(*view.frame, media.saved_region)) {
       media.snapshot_queued = true;
-      media.media_message = "Screenshot queued.";
+      set_media_notice(media, "Screenshot queued.", false);
       ImGui::CloseCurrentPopup();
     } else
-      media.media_message = "Could not queue screenshot.";
+      set_media_notice(media, "Could not queue screenshot.", true);
   }
   if (ImGui::MenuItem("Start scrolling", nullptr, false,
                       !ui.connection.capture_only)) {
     if (recording.start_scroll(*view.frame, *media.saved_region)) {
       media.scroll_active = true;
       actions.add(action(UiActionKind::activate_control));
-      media.media_message = "Scrolling capture started.";
+      set_media_notice(media, "Scrolling capture started.", false);
       ImGui::CloseCurrentPopup();
     } else
-      media.media_message = "Could not start scrolling capture.";
+      set_media_notice(media, "Could not start scrolling capture.", true);
   }
   ImGui::EndDisabled();
   ImGui::BeginDisabled(!view.valid_visible_cpu_frame || !media.saved_region ||
                        status.state != RecordingState::idle);
   if (ImGui::MenuItem("Start recording")) {
-    media.media_message = recording.start(*view.frame, *media.saved_region)
-                              ? "Recording started."
-                              : "Could not start recording.";
+    const bool started = recording.start(*view.frame, *media.saved_region);
+    set_media_notice(
+        media, started ? "Recording started." : "Could not start recording.",
+        !started);
     ImGui::CloseCurrentPopup();
   }
   ImGui::EndDisabled();
@@ -490,7 +491,7 @@ void append_connections(UiState& ui, const SessionView& view,
       const auto& device =
           form.devices[static_cast<std::size_t>(form.selected_device)];
       if (form.screen2_open && device.stable_id == form.second_device_id) {
-        ui.media.media_message = "That device is in use by screen 2.";
+        set_media_notice(ui.media, "That device is in use by screen 2.", true);
       } else {
         form.close_connections_when_ready = true;
         form.primary_device_id = device.stable_id;
@@ -571,8 +572,9 @@ void append_connections(UiState& ui, const SessionView& view,
         if (action_button("Open screen 2", screen2_ready, screen2_reason)) {
           if (form.devices[static_cast<std::size_t>(form.selected_device2)]
                   .stable_id == form.primary_device_id) {
-            ui.media.media_message =
-                "Screen 2 must use a different capture device.";
+            set_media_notice(ui.media,
+                             "Screen 2 must use a different capture device.",
+                             true);
           } else {
             actions.add(action(UiActionKind::open_screen2));
           }
@@ -665,8 +667,8 @@ void sync_media_feedback(UiState& ui, const RecordingStatus& media_status) {
     media.displayed_snapshot_error = media_status.snapshot_error;
     if (!media.displayed_snapshot_error.empty()) {
       media.snapshot_queued = false;
-      media.media_message =
-          "Screenshot error: " + media.displayed_snapshot_error;
+      set_media_notice(
+          media, "Screenshot error: " + media.displayed_snapshot_error, true);
     }
   }
   if (media_status.last_snapshot_path != media.displayed_snapshot_path) {
@@ -676,8 +678,9 @@ void sync_media_feedback(UiState& ui, const RecordingStatus& media_status) {
   if (media_status.scroll_error != media.displayed_scroll_error) {
     media.displayed_scroll_error = media_status.scroll_error;
     if (!media.displayed_scroll_error.empty()) {
-      media.media_message =
-          "Scrolling screenshot error: " + media.displayed_scroll_error;
+      set_media_notice(
+          media, "Scrolling screenshot error: " + media.displayed_scroll_error,
+          true);
       media.scroll_active = false;
       media.scroll_sample_after.reset();
       ui.recording->cancel_scroll();
@@ -887,6 +890,22 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
   } else {
     ui.media.displayed_video_rect = {};
     actions.add(action(UiActionKind::set_video_rect));
+    constexpr const char* guide =
+        "选择视频源 → 开始预览 → 连接控制 → 点击画面开始控制";
+    constexpr float logo = 96.F;
+    const ImVec2 text_size = ImGui::CalcTextSize(guide);
+    const float block =
+        (ui.brand_texture != 0 ? logo + 16.F : 0.F) + text_size.y;
+    float text_y = start.y + (video_size.y - block) * 0.5F;
+    auto* empty = ImGui::GetWindowDrawList();
+    if (ui.brand_texture != 0) {
+      const float x = start.x + (video_size.x - logo) * 0.5F;
+      empty->AddImage(static_cast<ImTextureID>(ui.brand_texture), {x, text_y},
+                      {x + logo, text_y + logo});
+      text_y += logo + 16.F;
+    }
+    empty->AddText({start.x + (video_size.x - text_size.x) * 0.5F, text_y},
+                   ImGui::GetColorU32(ImGuiCol_Text), guide);
   }
   if (ui.media.region_selecting &&
       (ui.media.region_dragging || ui.media.region_ready)) {
@@ -897,12 +916,6 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(lo, hi, IM_COL32(196, 95, 60, 45));
     draw->AddRect(lo, hi, IM_COL32(237, 148, 100, 255), 0.F, 0, 2.F);
-  }
-  if (!view.video.ready) {
-    const ImVec2 warning_pos{start.x + 16.F, start.y + 16.F};
-    ImGui::GetWindowDrawList()->AddText(warning_pos,
-                                        IM_COL32(255, 100, 80, 255),
-                                        "VIDEO UNAVAILABLE - control disabled");
   }
   if (view.captured) {
     const double now = ImGui::GetTime();
@@ -977,21 +990,6 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
                    (view.remote_input ? ImGuiWindowFlags_NoInputs : 0));
   ImGui::PopStyleVar();
   if (!view.remote_input) record_local_region(ui);
-  if (!ui.media.media_message.empty()) {
-    ImGui::TextWrapped("%s", ui.media.media_message.c_str());
-    ImGui::Separator();
-  }
-  if (!view.snapshot.session_error.empty())
-    ImGui::TextWrapped("Session error: %s",
-                       view.snapshot.session_error.c_str());
-  if (!view.video.error.empty())
-    ImGui::TextWrapped("Capture error: %s", view.video.error.c_str());
-  if (!view.control.error.empty())
-    ImGui::TextWrapped("Control error: %s", view.control.error.c_str());
-  if (link_has_hint(view.video))
-    ImGui::TextWrapped("%s", view.video.hint.c_str());
-  if (link_has_hint(view.control))
-    ImGui::TextWrapped("%s", view.control.hint.c_str());
   const auto origin = ImGui::GetCursorScreenPos();
   const float line_height = ImGui::GetTextLineHeight();
   const ImU32 state_color =
@@ -1013,6 +1011,71 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
   ImGui::End();
   ImGui::PopStyleVar();
   return actions;
+}
+
+void append_banner_line(std::string& text, const std::string& line) {
+  if (line.empty()) return;
+  if (!text.empty()) text.push_back('\n');
+  text += line;
+}
+
+void draw_one_banner(UiState& ui, const char* title, const std::string& text,
+                     std::string& dismissed, bool remote, float& y) {
+  if (text.empty() || text == dismissed) return;
+  const auto* viewport = ImGui::GetMainViewport();
+  const float width = std::max(1.F, viewport->Size.x - 16.F);
+  ImGui::SetNextWindowPos({viewport->Pos.x + 8.F, y});
+  ImGui::SetNextWindowSize({width, 0.F});
+  const auto flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+                     ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoFocusOnAppearing |
+                     (remote ? ImGuiWindowFlags_NoInputs : 0);
+  if (!ImGui::Begin(title, nullptr, flags)) {
+    ImGui::End();
+    return;
+  }
+  if (!remote) record_local_region(ui);
+  const float close_width =
+      ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.F;
+  ImGui::PushTextWrapPos(ImGui::GetCursorPos().x +
+                         ImGui::GetContentRegionAvail().x - close_width - 8.F);
+  ImGui::TextUnformatted(text.c_str());
+  ImGui::PopTextWrapPos();
+  ImGui::SameLine();
+  if (ImGui::Button("Close")) dismissed = text;
+  y += ImGui::GetWindowSize().y + 8.F;
+  ImGui::End();
+}
+
+void draw_banners(UiState& ui, const SessionView& view) {
+  std::string errors;
+  if (!view.snapshot.session_error.empty()) {
+    append_banner_line(errors, "Session error: " + view.snapshot.session_error);
+  }
+  if (!view.video.error.empty()) {
+    append_banner_line(errors, "Capture error: " + view.video.error);
+  }
+  if (!view.control.error.empty()) {
+    append_banner_line(errors, "Control error: " + view.control.error);
+  }
+  if (link_has_hint(view.video)) append_banner_line(errors, view.video.hint);
+  if (link_has_hint(view.control))
+    append_banner_line(errors, view.control.hint);
+  if (ui.media.media_is_error)
+    append_banner_line(errors, ui.media.media_message);
+  const auto* viewport = ImGui::GetMainViewport();
+  const float chrome =
+      ui.overlay.chrome_visible ? ImGui::GetFrameHeight() : 0.F;
+  float y = viewport->Pos.y + chrome + 8.F;
+  const bool remote = view.remote_input;
+  draw_one_banner(ui, "Error banner", errors, ui.overlay.dismissed_errors,
+                  remote, y);
+  if (!ui.media.media_is_error) {
+    draw_one_banner(ui, "Notice", ui.media.media_message,
+                    ui.overlay.dismissed_notice, remote, y);
+  }
 }
 
 UiActions draw_diagnostics(UiState& ui, const SessionView& view) {

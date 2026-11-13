@@ -323,6 +323,7 @@ struct ConnectionForm {
 
 struct MediaUi {
   std::string media_message;
+  bool media_is_error{false};
   std::filesystem::path displayed_snapshot_path;
   std::filesystem::path displayed_scroll_path;
   std::string displayed_snapshot_error;
@@ -364,6 +365,8 @@ struct OverlayFlags {
   bool open_floating_menu{false};
   bool popup_open{false};
   bool local_ui_input_seen{false};
+  std::string dismissed_errors;
+  std::string dismissed_notice;
   FloatingMenuIcon menu_icon{};
   std::vector<ImVec4> local_regions;
 };
@@ -480,11 +483,18 @@ inline void commit_region(MediaUi& media, int width, int height) {
   if (r > x && b > y) {
     media.saved_region = FrameCrop{x, y, r - x, b - y};
     media.media_message = "Region saved.";
+    media.media_is_error = false;
     media.region_selecting = media.region_ready = false;
     media.region_confirm_requested = false;
   } else {
     media.media_message = "Select a larger region.";
+    media.media_is_error = true;
   }
+}
+
+inline void set_media_notice(MediaUi& media, std::string text, bool error) {
+  media.media_message = std::move(text);
+  media.media_is_error = error;
 }
 
 }  // namespace kvmux

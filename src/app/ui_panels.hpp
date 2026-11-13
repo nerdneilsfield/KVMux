@@ -13,6 +13,7 @@ void prepare_overlay_frame(UiState& ui, const SessionView& view);
 [[nodiscard]] UiActions draw_chrome(UiState& ui, const SessionView& view);
 [[nodiscard]] UiActions draw_video(UiState& ui, const SessionView& view);
 [[nodiscard]] UiActions draw_status(UiState& ui, const SessionView& view);
+void draw_banners(UiState& ui, const SessionView& view);
 [[nodiscard]] UiActions draw_diagnostics(UiState& ui, const SessionView& view);
 void draw_menu_icon(UiState& ui, const SessionView& view);
 
