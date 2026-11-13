@@ -21,8 +21,12 @@ include(CodecBackends)
 include(Ch341Usb)
 find_package(FFmpeg REQUIRED)
 option(KVMUX_BUILD_GUI "Build the desktop GUI and its display dependencies" ON)
-if(KVMUX_BUILD_GUI)
+# GL entry points come from glad through SDL_GL_GetProcAddress, and SDL loads
+# OpenGL.framework at run time on macOS. The macOS 27 SDK no longer ships
+# OpenGL.framework, so CMake's OpenGL::GL target points at a missing path.
+if(KVMUX_BUILD_GUI AND NOT APPLE)
     find_package(OpenGL REQUIRED)
+    set(KVMUX_OPENGL_LIBRARY OpenGL::GL)
 endif()
 add_subdirectory(third_party)
 
@@ -94,7 +98,7 @@ if(KVMUX_BUILD_GUI)
     add_library(kvmux::renderer ALIAS kvmux_renderer)
     target_compile_features(kvmux_renderer PUBLIC cxx_std_20)
     target_include_directories(kvmux_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(kvmux_renderer PUBLIC kvmux::core kvmux::glad OpenGL::GL)
+    target_link_libraries(kvmux_renderer PUBLIC kvmux::core kvmux::glad ${KVMUX_OPENGL_LIBRARY})
 endif()
 target_compile_features(kvmux_core PUBLIC cxx_std_20)
 target_include_directories(kvmux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -197,7 +201,7 @@ if(KVMUX_BUILD_GUI)
         set_target_properties(kvmux PROPERTIES MACOSX_BUNDLE TRUE
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
     endif()
-    target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 OpenGL::GL)
+    target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 ${KVMUX_OPENGL_LIBRARY})
 endif()
 
 if(BUILD_TESTING)
