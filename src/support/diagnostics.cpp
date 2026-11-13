@@ -277,7 +277,7 @@ bool configure_console_logging(const bool debug,
       std::make_shared<spdlog::logger>("kvmux", sinks.begin(), sinks.end());
   logger->set_level(debug ? spdlog::level::debug : spdlog::level::warn);
   logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [thread %t] [%l] %v");
-  logger->flush_on(spdlog::level::debug);
+  logger->flush_on(spdlog::level::warn);
   spdlog::set_default_logger(std::move(logger));
   spdlog::info("start program={} version={} os={} serial={} baud={}",
                program.empty() ? std::string_view("kvmux") : program,

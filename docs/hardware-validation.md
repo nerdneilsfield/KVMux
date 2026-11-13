@@ -289,3 +289,7 @@ build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --prob
 - 拔出时的失败行，包括 `state=`、`release_confirmed=` 和 `error=`。
 - 每台 relay 的操作系统、启动命令、主机、端口、角色，以及 Mac 上对应探针的标准输出。
 - Video 探针的 `codec`、`size`、`frames` 和 `longest_gap_ms`。这些数字不是延迟或性能结论。
+
+## GUI 帧上传（2026-11-13）
+
+macOS 诊断面板上还没有对比「只在新帧上传」前后的 `sample_to_gpu_submit` 和 `SwapWindow blocking`。这项保持未验证。Linux 上的 FakeCapture 单测只检查 `sample_to_gpu_submit` 的次数是否等于新帧数，不是 KVM 延迟，也不是这块面板的性能记录。

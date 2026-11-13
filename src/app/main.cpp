@@ -577,6 +577,11 @@ int main(int argc, char** argv) {
         }));
   };
   VideoRenderer renderer;
+  UploadedFrame primary_uploaded;
+  const auto drop_primary_texture = [&] {
+    renderer.destroy();
+    primary_uploaded = {};
+  };
   // Second screen: a view-only capture session whose window feeds input to the
   // main session. Both windows share the one GL context.
   const SDL_WindowID main_window_id = SDL_GetWindowID(window);
@@ -584,6 +589,8 @@ int main(int argc, char** argv) {
   SDL_WindowID second_window_id = 0;
   std::unique_ptr<KvmSession> session2;
   VideoRenderer renderer2;
+  UploadedFrame second_uploaded;
+  std::optional<VideoFrame> second_frame;
   std::vector<CaptureMode> modes2;
   std::optional<std::future<std::vector<CaptureMode>>> modes2_future;
   std::string primary_device_id, second_device_id;
@@ -608,6 +615,8 @@ int main(int argc, char** argv) {
           old.reset();
         }));
     renderer2.destroy();
+    second_uploaded = {};
+    second_frame.reset();
     SDL_DestroyWindow(window2);
     window2 = nullptr;
     second_window_id = 0;
@@ -709,7 +718,7 @@ int main(int argc, char** argv) {
     modes_future.reset();
     devices_future = session->enumerate_capture_devices();
     current_frame.reset();
-    renderer.destroy();
+    drop_primary_texture();
     (void)session->set_mouse_mode(config.mouse_mode);
     session->set_capture_only(capture_only);
     session->set_host_key(config.host_scancode);
@@ -805,7 +814,7 @@ int main(int argc, char** argv) {
     if (control_client && control_client != video_client)
       control_client->start();
     current_frame.reset();
-    renderer.destroy();
+    drop_primary_texture();
   };
 
   while (running) {
@@ -1114,12 +1123,26 @@ int main(int argc, char** argv) {
     }
     if (session2) {
       session2->tick();
-      if (auto newest = session2->take_latest_frame()) {
-        if (renderer2.upload(*newest, config.color_override)) {
-          second_uploaded_at = std::chrono::steady_clock::now();
-          second_upload_failed = false;
-        } else {
-          second_upload_failed = true;
+      if (auto newest = session2->take_latest_frame())
+        second_frame = std::move(newest);
+      if (second_frame &&
+          second_frame->generation != session2->snapshot().capture.generation)
+        second_frame.reset();
+      if (second_frame) {
+        const auto decision =
+            frame_upload(second_uploaded, second_frame->generation,
+                         second_frame->sequence, config.color_override);
+        if (decision != FrameUpload::skip) {
+          if (renderer2.upload(*second_frame, config.color_override)) {
+            second_uploaded = {true, second_frame->generation,
+                               second_frame->sequence, config.color_override};
+            second_upload_failed = false;
+            // Color-only conversion must not extend screen 2's freshness.
+            if (decision == FrameUpload::new_frame)
+              second_uploaded_at = std::chrono::steady_clock::now();
+          } else {
+            second_upload_failed = true;
+          }
         }
       }
       const bool fresh = session2->snapshot().video_fresh &&
@@ -1149,14 +1172,24 @@ int main(int argc, char** argv) {
         current_frame->sequence > scroll_sample_after->second) {
       if (recording.sample_scroll(*current_frame)) scroll_sample_after.reset();
     }
-    if (current_frame &&
-        renderer.upload(*current_frame, config.color_override)) {
-      session->video_presented(current_frame->generation,
-                               current_frame->sequence);
-      diagnostics->record_sample_to_gpu_submit(
-          std::chrono::steady_clock::now() - current_frame->arrival);
-      diagnostics->record_present(current_frame->generation,
-                                  current_frame->sequence);
+    if (current_frame) {
+      const auto decision =
+          frame_upload(primary_uploaded, current_frame->generation,
+                       current_frame->sequence, config.color_override);
+      if (decision != FrameUpload::skip &&
+          renderer.upload(*current_frame, config.color_override)) {
+        primary_uploaded = {true, current_frame->generation,
+                            current_frame->sequence, config.color_override};
+        // Color-only conversion does not refresh presentation freshness.
+        if (decision == FrameUpload::new_frame) {
+          session->video_presented(current_frame->generation,
+                                   current_frame->sequence);
+          diagnostics->record_sample_to_gpu_submit(
+              std::chrono::steady_clock::now() - current_frame->arrival);
+          diagnostics->record_present(current_frame->generation,
+                                      current_frame->sequence);
+        }
+      }
     }
     const auto snapshot = session->snapshot();
     if (scroll_active &&
@@ -1715,7 +1748,7 @@ int main(int argc, char** argv) {
                 (void)session->stop_capture();
                 video_rate.clear();
                 current_frame.reset();
-                renderer.destroy();
+                drop_primary_texture();
               }
               if (control_client) {
                 (void)session->disconnect_control();
@@ -1824,7 +1857,7 @@ int main(int argc, char** argv) {
                 (void)session->select_capture(devices[selected_device],
                                               modes[selected_mode]);
                 current_frame.reset();
-                renderer.destroy();
+                drop_primary_texture();
               }
             }
             if (control_target == ControlTarget::local_serial) {

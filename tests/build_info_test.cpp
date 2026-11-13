@@ -14,8 +14,10 @@ int main() {
       spdlog::should_log(spdlog::level::info) ||
       !spdlog::should_log(spdlog::level::warn))
     return 1;
+  if (spdlog::default_logger()->flush_level() != spdlog::level::warn) return 1;
   kvmux::configure_console_logging(true);
   if (!spdlog::should_log(spdlog::level::debug)) return 1;
+  if (spdlog::default_logger()->flush_level() != spdlog::level::warn) return 1;
   spdlog::debug("console logging smoke test");
   if (kvmux::application_name() != "KVMux") {
     std::cerr << "unexpected application name\n";

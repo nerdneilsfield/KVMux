@@ -19,6 +19,31 @@ enum class ColorOverride {
   bt709_full
 };
 
+// One renderer's last successful upload. Default: this renderer has not
+// uploaded the current frame.
+struct UploadedFrame {
+  bool valid{};
+  std::uint64_t generation{};
+  std::uint64_t sequence{};
+  ColorOverride color{ColorOverride::automatic};
+};
+
+// skip: already uploaded this (generation, sequence) and color.
+// new_frame: a new identity, or this renderer has not uploaded it.
+// color_only: same frame, color override changed. Not a presented frame.
+enum class FrameUpload { skip, new_frame, color_only };
+
+[[nodiscard]] constexpr FrameUpload frame_upload(const UploadedFrame& uploaded,
+                                                 std::uint64_t generation,
+                                                 std::uint64_t sequence,
+                                                 ColorOverride color) noexcept {
+  if (!uploaded.valid || uploaded.generation != generation ||
+      uploaded.sequence != sequence)
+    return FrameUpload::new_frame;
+  if (uploaded.color != color) return FrameUpload::color_only;
+  return FrameUpload::skip;
+}
+
 struct RenderSnapshot {
   std::string pixel_path;
   std::string color_choice;

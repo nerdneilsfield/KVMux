@@ -367,6 +367,12 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_video_contract_test PRIVATE kvmux::core)
     add_test(NAME video_contract COMMAND kvmux_video_contract_test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+
+    add_executable(kvmux_frame_upload_test tests/frame_upload_test.cpp)
+    target_link_libraries(kvmux_frame_upload_test PRIVATE kvmux::core)
+    add_test(NAME frame_upload COMMAND kvmux_frame_upload_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
+    set_tests_properties(frame_upload PROPERTIES TIMEOUT 30)
 endif()
 
 include(GNUInstallDirs)

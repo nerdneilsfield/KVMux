@@ -102,6 +102,20 @@ Targets：`src/app/main.cpp`、`src/render/video_renderer.*`、`src/support/diag
 - Q9：Linux 上 FakeCapture 运行时 `sample_to_gpu_submit` 计数等于新帧数（可用诊断计数或单测）。
 - 性能改善在 macOS 诊断面板（`sample_to_gpu_submit`、`SwapWindow blocking`）上对比，结果记入 `docs/hardware-validation.md`，之前标为未验证。
 
+Status: 完成（2026-11-13）。T3 未开始。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。
+- Q8：`frame_upload`。同一 `(generation, sequence)` 且颜色不变是 `skip`。颜色覆盖改变是 `color_only`。空的 `UploadedFrame`（renderer 尚未上传，含副屏）对当前帧是 `new_frame`。新序号或新 generation 也是 `new_frame`。
+- Q9：FakeCapture 经 VideoPipeline 跑约 500 ms。循环对同一帧重复判定，并在已上传的帧上改一次颜色。`sample_to_gpu_submit.samples` 等于实际取到的新帧数。重复绘制和颜色覆盖都不加计数。`record_present` 只在 `new_frame` 时调用。
+- 主屏和副屏各自记录最后一次成功上传。颜色覆盖会再上传，但不调用 `video_presented`、`record_sample_to_gpu_submit`、`record_present`，也不刷新副屏的 `second_uploaded_at`。纹理销毁后清掉上传记录，避免同一帧被跳过。
+- `flush_on` 改为 `warn`。`build_info` 断言 debug 与非 debug 两种配置都是这个级别。
+- macOS 诊断面板的 `sample_to_gpu_submit` 与 `SwapWindow blocking` 对比未做，已写入 `docs/hardware-validation.md`，标为未验证。
+- `make test`：30/30 通过，实测 100 s。
+- `make lint` 停在已知基线：`tests/codec_startup_fallback_test.cpp:21` 的 format-check。单独的 `make cppcheck` 只报已知的 `src/network/relay_server.cpp:566` `identicalConditionAfterEarlyExit`。单独的 `make clang-tidy` 退出码 0。这几处都没有当作本次缺陷去改。
+- 未做 T3，未 push。
+
 ## 阶段二：收敛粘贴状态（T3）
 
 依赖 T1 的硬件诊断结果。如果 macOS 上 `--paste` 和 GUI 粘贴已经稳定，T3 只做收敛，不改行为。
@@ -228,4 +242,4 @@ T1 → T2 → T3 → T4 → T5 → T5b → T6。T1、T2 各自独立提交。T1 
 
 ## 进度
 
-T1 完成。T2 尚未开始。
+T1 完成。T2 完成。T3 尚未开始。
