@@ -23,7 +23,11 @@ enum class PasteCancelReason {
   link_lost,
   ack_timeout,
   device_fault,
-  shutdown
+  shutdown,
+  // Start was refused because the router or session cannot accept a paste.
+  not_ready,
+  // A paste stopped and no caller knew why. The info log names the call site.
+  unknown
 };
 
 [[nodiscard]] inline const char* paste_cancel_reason_name(
@@ -49,9 +53,16 @@ enum class PasteCancelReason {
       return "device_fault";
     case PasteCancelReason::shutdown:
       return "shutdown";
+    case PasteCancelReason::not_ready:
+      return "not_ready";
+    case PasteCancelReason::unknown:
+      return "unknown";
   }
   return "none";
 }
+
+// Names `site` and records no paste text. Used only for `unknown`.
+void log_unknown_paste_cancel(const char* site) noexcept;
 
 enum class TextPasteError {
   none,

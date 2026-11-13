@@ -57,7 +57,7 @@ void KvmSession::set_capture_only(bool enabled) noexcept {
   // Toggling on must walk the same release path as focus loss etc., so a
   // previously connected session cannot keep half its HID state on target.
   if (enabled) {
-    request_release();
+    request_release(PasteCancelReason::link_lost);
     control_->disconnect();
   }
 }
@@ -99,7 +99,7 @@ bool KvmSession::select_capture(const DeviceInfo& device,
   if (!preview_only() || mode.device_id != device.stable_id ||
       device.stable_id.empty())
     return false;
-  request_release();
+  request_release(PasteCancelReason::video_stale);
   {
     std::lock_guard lock(mutex_);
     if (shutting_down_) return false;
@@ -122,7 +122,7 @@ bool KvmSession::select_capture(const DeviceInfo& device,
 
 bool KvmSession::stop_capture() {
   if (!preview_only()) return false;
-  request_release();
+  request_release(PasteCancelReason::video_stale);
   {
     std::lock_guard lock(mutex_);
     if (shutting_down_) return false;
@@ -156,7 +156,7 @@ bool KvmSession::connect_control(std::string port, int baud_rate,
 
 bool KvmSession::disconnect_control() {
   if (!preview_only()) return false;
-  request_release();
+  request_release(PasteCancelReason::link_lost);
   control_->disconnect();
   return true;
 }
@@ -199,7 +199,7 @@ TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
     auto blocked = map_us_ascii_text(text);
     if (blocked) {
       blocked.error = TextPasteError::canceled;
-      blocked.cancel_reason = PasteCancelReason::user;
+      blocked.cancel_reason = PasteCancelReason::not_ready;
     }
     return blocked;
   }
@@ -211,7 +211,7 @@ TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
 }
 void KvmSession::cancel_text_paste() noexcept {
   std::lock_guard lock(input_mutex_);
-  input_.cancel_text();
+  input_.cancel_text(PasteCancelReason::user);
   control_->set_control_active(false);
 }
 TextMappingResult KvmSession::text_paste_snapshot() const {
@@ -226,7 +226,9 @@ TextPasteSnapshot KvmSession::text_paste_progress() const noexcept {
 bool KvmSession::set_mouse_mode(MouseMode mode) {
   std::lock_guard lock(input_mutex_);
   if (input_.state() != InputState::preview) return false;
-  request_release_locked();
+  if (input_.text_active())
+    log_unknown_paste_cancel("KvmSession::set_mouse_mode");
+  request_release_locked(PasteCancelReason::unknown);
   input_.set_mouse_mode(mode);
   control_->set_mouse_mode(mode);
   return true;
@@ -372,7 +374,9 @@ void KvmSession::suspended() noexcept {
   request_release_locked(PasteCancelReason::focus_lost);
   input_.focus_lost();
 }
-void KvmSession::release_control() noexcept { request_release(); }
+void KvmSession::release_control(const PasteCancelReason reason) noexcept {
+  request_release(reason);
+}
 
 void KvmSession::update_ui_heartbeat() noexcept {
   control_->update_ui_heartbeat();

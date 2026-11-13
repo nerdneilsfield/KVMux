@@ -1,8 +1,20 @@
 #include "input/us_ascii_text.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <array>
+#include <exception>
 
 namespace kvmux {
+
+void log_unknown_paste_cancel(const char* site) noexcept {
+  try {
+    spdlog::info("paste cancel reason=unknown site={}",
+                 site != nullptr ? site : "unspecified");
+  } catch (const std::exception&) {
+  }
+}
+
 namespace {
 constexpr std::uint8_t kLeftShift = 0xe1;
 struct Entry {

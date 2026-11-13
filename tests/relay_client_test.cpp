@@ -213,14 +213,14 @@ void hevc_test(const char* path) {
                               99999999);
   gui.run_for(80ms);
   assert(proxy.last_presented < 99999999);
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 // A status sampled during release can still say "ready" until the clear's
 // epoch is published. Wait for that newer ready epoch before starting a paste.
 void release_to_settled_preview(GuiFixture& gui) {
   const auto epoch = gui.session.snapshot().control.epoch;
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
   assert(gui.wait([&] {
     const auto state = gui.session.snapshot();
     return state.control.epoch != epoch &&
@@ -323,7 +323,7 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
     const auto applied = relay.sink.snapshot().applied;
     return applied.known && applied.state.mode == MouseMode::relative;
   }));
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
@@ -367,7 +367,7 @@ void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
                kvmux::relay::PasteUploadState::completed;
       },
       10000ms));
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 void paste_challenge_gap_cancels_test(const char* jpeg) {
@@ -397,7 +397,7 @@ void paste_challenge_gap_cancels_test(const char* jpeg) {
   assert(progress.error == TextPasteError::canceled);
   assert(progress.cancel_reason == PasteCancelReason::link_lost);
   assert(!gui.session.snapshot().control.release_confirmed);
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 void concurrent_network_front_start_test(const char* jpeg) {
@@ -457,14 +457,14 @@ void first_frame_activation_test(const char* jpeg) {
   };
   gui.activate();
   assert(injected);
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 void input_recovery_test(const char* jpeg) {
   RelayFixture relay(jpeg);
   GuiFixture gui(relay.options());
   gui.activate();
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
   assert(gui.wait([&] {
     return gui.session.snapshot().input_state == InputState::preview;
   }));
@@ -539,7 +539,7 @@ void input_recovery_test(const char* jpeg) {
   gui.activate();
   assert(relay.sink.snapshot().applied.known &&
          relay.sink.snapshot().applied.state.mode == MouseMode::relative);
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
 }
 
 struct TestCase {

@@ -254,7 +254,7 @@ int main() {
     const auto release = std::get<ButtonEdge>(sink.events.back().payload);
     require(!release.pressed && release.x == 1,
             "drag release in embedded bar clamps to edge");
-    router.release();
+    router.release(PasteCancelReason::shutdown);
     router.set_video_rect(full);
     require(!router.pointer_snapshot().video_local,
             "aspect change clears old event geometry");
@@ -313,7 +313,7 @@ int main() {
     require(x == 301 && y == -261,
             "fractional and split relative totals conserved");
 
-    router.release();
+    router.release(PasteCancelReason::shutdown);
     sink.snapshot_value.release_confirmed = true;
     router.tick();
     router.set_mouse_mode(MouseMode::absolute);
@@ -456,7 +456,7 @@ int main() {
             "stale video clears diagnostics");
     router.set_video_fresh(true);
     router.handle({InputRelativeMotion{1, 1}});
-    router.release();
+    router.release(PasteCancelReason::shutdown);
     require(!router.pointer_snapshot().submitted_relative,
             "release clears diagnostics");
   }
@@ -549,6 +549,40 @@ int main() {
   }
 
   {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
+    require(static_cast<bool>(router.start_text("ab")), "paste starts");
+    sink.paste_value.state = AsciiPasteState::canceled;
+    sink.paste_value.cancel_reason = PasteCancelReason::none;
+    router.tick();
+    const auto progress = router.text_paste_snapshot();
+    require(!progress.active && progress.error == TextPasteError::canceled &&
+                progress.cancel_reason == PasteCancelReason::unknown,
+            "a canceled paste with no reason is unknown");
+  }
+
+  {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_rect({0, 0, 200, 200});
+    router.set_video_fresh(true);
+    capture(router, sink);
+    const auto rejected = router.start_text("ab");
+    require(rejected.error == TextPasteError::canceled &&
+                rejected.cancel_reason == PasteCancelReason::not_ready,
+            "paste start outside preview is not_ready");
+    router.release(PasteCancelReason::shutdown);
+    sink.snapshot_value.release_confirmed = true;
+    router.tick();
+    sink.snapshot_value.release_confirmed = false;
+    const auto offline = router.start_text("ab");
+    require(offline.error == TextPasteError::canceled &&
+                offline.cancel_reason == PasteCancelReason::link_lost,
+            "paste start without a ready sink is link_lost");
+  }
+
+  {
     // A relay must apply the empty-state barrier before it accepts synthetic
     // edges.
     FakeSink sink;
@@ -571,7 +605,7 @@ int main() {
                 sink.paste_text == std::vector<std::uint8_t>{'A'},
             "relay text uploads normalized bytes after the synchronization "
             "barrier");
-    router.cancel_text();
+    router.cancel_text(PasteCancelReason::user);
     require(sink.paste_cancels >= 1 && sink.releases > 0,
             "cancel releases the remote paste transaction");
   }
@@ -658,7 +692,7 @@ int main() {
     router.tick(start + std::chrono::milliseconds(2));
     require(router.captured(), "acked relay synchronization captures");
     router.handle({InputPointerMotion{100, 100}});
-    router.release();
+    router.release(PasteCancelReason::shutdown);
     sink.snapshot_value.release_confirmed = true;
     router.tick(start + std::chrono::milliseconds(3));
     require(router.state() == InputState::preview,
@@ -680,7 +714,7 @@ int main() {
         static_cast<int>(std::get<RelativeMotion>(sink.events[0].payload).dx);
     require(!router.injected_active(),
             "relay keep-alive releases the lease after its wiggle");
-    router.release();
+    router.release(PasteCancelReason::shutdown);
     sink.snapshot_value.release_confirmed = true;
     router.tick(start + std::chrono::milliseconds(6));
     sink.events.clear();

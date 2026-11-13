@@ -47,7 +47,7 @@ struct PasteUploadSnapshot {
   wire::PasteStatusReason reason{wire::PasteStatusReason::none};
   // Client keepalive submits. Status merges must not clear this.
   std::uint32_t keepalives_sent{};
-  // Local diagnostic. The wire cancel reason stays `user` in this version.
+  // Local diagnostic. Outbound PasteCancel still sends wire reason user.
   PasteCancelReason cancel_reason{PasteCancelReason::none};
   [[nodiscard]] bool terminal() const noexcept {
     return state == PasteUploadState::completed ||

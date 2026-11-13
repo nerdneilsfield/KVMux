@@ -135,7 +135,7 @@ int reconnect_test(GLuint ui_framebuffer, const char* jpeg_path) {
         ++failures;
       if (!server.start({"127.0.0.1", 0, 0}, error)) ++failures;
     } else {
-      session->release_control();
+      session->release_control(kvmux::PasteCancelReason::shutdown);
       (void)session->stop_capture();
       (void)session->disconnect_control();
     }

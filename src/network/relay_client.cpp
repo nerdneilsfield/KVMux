@@ -226,7 +226,8 @@ struct RelayClient::Impl {
         local = PasteCancelReason::link_lost;
         break;
       case wire::PasteStatusReason::canceled:
-        local = PasteCancelReason::user;
+        local = PasteCancelReason::unknown;
+        log_unknown_paste_cancel("RelayClient::note_wire_terminal_reason");
         break;
       default:
         break;
@@ -1102,7 +1103,6 @@ void RelayClient::cancel_ascii_paste_text() noexcept {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
   if (!p.paste || p.paste->snapshot.terminal()) return;
-  p.note_paste_reason(PasteCancelReason::user);
   p.paste->cancel_pending = true;
   p.paste->snapshot.state = PasteUploadState::canceled;
   p.paste->snapshot.reason = wire::PasteStatusReason::canceled;

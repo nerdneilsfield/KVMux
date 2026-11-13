@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   gui.run_for(100ms);
   assert(proxy.session_id == id);
   assert(proxy.challenges > 2 && proxy.proofs > 2);
-  gui.session.release_control();
+  gui.session.release_control(PasteCancelReason::shutdown);
   assert(gui.wait([&] {
     return gui.session.snapshot().input_state == InputState::preview;
   }));

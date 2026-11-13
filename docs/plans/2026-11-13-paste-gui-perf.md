@@ -86,6 +86,7 @@ Evidence:
 - `paste_keepalive_blackholed_status`：先释放到已稳定的 Preview，再把键盘 ACK 延迟设为 40 ms（释放清键本身也是 0x02，不能在释放完成前打开延迟）。20 个字符在 750 ms 黑洞期间保持服务端粘贴为 active，`keepalives_sent > 0`，之后 Completed。
 - 偏差：本地 `PasteCancelReason` 走粘贴快照和 router，不走线上枚举。客户端发出的 `PasteCancel` 仍是线上 `user`。线上枚举未改。router 保留先发生的原因；UI 读 router 的结果。从未开始的粘贴不打结束日志。
 - 粘贴结束打一行 info：结果、原因、已发送字节/总字节、耗时。不记录粘贴文本。自检固定串可以出现在 probe 输出里。未改 `flush_on`。
+- 验收修复：原因未知时不再记成 `user`。新增 `unknown`（界面「粘贴已停止（原因未知）」，info 日志 `paste cancel reason=unknown site=` 带调用点，不记文本）和 `not_ready`（`start_text` 因不在 preview、或已有 special/text 而被拒；capture-only 同样是 `not_ready`；链路未就绪仍是 `link_lost`）。只有取消按钮和 Esc 传 `user`。`cancel_text`、`release`、`begin_release`、`recover`、`request_release`、`release_control` 去掉 `= user`。submit 被拒为 `link_lost`。sink 已取消且原因为 none 时为 `unknown`。服务端 `canceled` 且本地尚无原因时为 `unknown`。`disconnect` 为 `link_lost`。发出的线上 `PasteCancel` 仍是 `user`，线上枚举未改。单测：断开连接的原因是 `link_lost`，不是 `user`；无原因的取消回退是 `unknown`。`make test` 29/29，实测 99 s。未做 T2，未 push。
 
 ### T2：只在需要时上传，统计只记新帧，日志刷新降级
 

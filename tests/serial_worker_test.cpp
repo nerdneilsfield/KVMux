@@ -445,5 +445,27 @@ int main() {
               diagnostics->snapshot().sdl_to_control_dequeue.samples == 1,
           "events without UI receipt time skip receipt-to-dequeue");
   measured.disconnect();
+
+  FakeSerial dropping;
+  Ch9329ControlSink dropped(dropping.io());
+  dropped.connect("fake", 57600);
+  require(eventually([&] {
+            return dropped.snapshot().state == ControlConnectionState::ready;
+          }),
+          "disconnect fixture reaches ready");
+  dropped.set_control_active(true);
+  dropped.update_ui_heartbeat();
+  {
+    std::lock_guard lock(dropping.mutex);
+    dropping.answer = false;
+  }
+  require(dropped.start_ascii_paste({{{{4, true}}, {{4, false}}}}) ==
+              SubmitResult::accepted,
+          "paste is active before disconnect");
+  dropped.disconnect();
+  const auto dropped_paste = dropped.ascii_paste_snapshot();
+  require(dropped_paste.cancel_reason != PasteCancelReason::user &&
+              dropped_paste.cancel_reason == PasteCancelReason::link_lost,
+          "disconnect cancels paste as link_lost");
   return EXIT_SUCCESS;
 }

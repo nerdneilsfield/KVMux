@@ -354,7 +354,9 @@ int main() {
       f.session->handle_input({InputKey{0x04, true, false}});
       (void)f.session->send_special(SpecialKeys::alt_tab);
       const auto paste = f.session->start_text_paste("k");
-      require(!paste, "capture only refuses text paste");
+      require(!paste && paste.error == TextPasteError::canceled &&
+                  paste.cancel_reason == PasteCancelReason::not_ready,
+              "capture only refuses text paste as not_ready");
       f.session->handle_input(left_down());
       f.session->handle_input(left_up());
     };

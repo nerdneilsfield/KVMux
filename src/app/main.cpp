@@ -280,6 +280,10 @@ const char* paste_cancel_message(PasteCancelReason reason) {
       return "控制设备故障，粘贴已取消。";
     case PasteCancelReason::shutdown:
       return "正在退出，粘贴已取消。";
+    case PasteCancelReason::not_ready:
+      return "当前无法开始粘贴。";
+    case PasteCancelReason::unknown:
+      return "粘贴已停止（原因未知）";
   }
   return "粘贴已取消。";
 }
@@ -595,7 +599,8 @@ int main(int argc, char** argv) {
   bool focus_release_pending = false;
   const auto close_second = [&] {
     if (!window2) return;
-    session->release_control();
+    if (session->text_paste_active()) log_unknown_paste_cancel("close_second");
+    session->release_control(PasteCancelReason::unknown);
     auto old = std::move(session2);
     retired_sessions.push_back(
         std::async(std::launch::async, [old = std::move(old)]() mutable {
@@ -961,7 +966,9 @@ int main(int argc, char** argv) {
                             static_cast<float>(event_width),
                             static_cast<float>(event_height))) {
         if (menu_icon.clicked) {
-          session->release_control();
+          if (session->text_paste_active())
+            log_unknown_paste_cancel("floating_menu");
+          session->release_control(PasteCancelReason::unknown);
           open_floating_menu = true;
           menu_icon.clicked = false;
         }
@@ -1005,7 +1012,7 @@ int main(int argc, char** argv) {
       // Closing window 1 quits even while screen 2 keeps SDL from doing so.
       if (event.type == SDL_EVENT_QUIT ||
           event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-        session->release_control();
+        session->release_control(PasteCancelReason::shutdown);
         running = false;
         continue;
       }
@@ -1123,7 +1130,7 @@ int main(int argc, char** argv) {
       // Losing screen 2 must not leave the target controlled half blind, and a
       // black screen must not take the pointer back.
       if (second_valid && !fresh) {
-        session->release_control();
+        session->release_control(PasteCancelReason::video_stale);
         // The drop below can eat the button up that would clear this bit.
         remote_buttons = 0;
       }
@@ -1703,7 +1710,7 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             if (ImGui::Button("Disconnect relay") &&
                 (video_client || control_client)) {
-              session->release_control();
+              session->release_control(PasteCancelReason::link_lost);
               if (video_client) {
                 (void)session->stop_capture();
                 video_rate.clear();

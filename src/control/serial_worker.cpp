@@ -867,7 +867,7 @@ void Ch9329ControlSink::disconnect() noexcept {
   std::lock_guard lock(impl_->mutex);
   impl_->control_active = false;
   impl_->invalidate_sync();
-  impl_->note_paste_reason_locked(PasteCancelReason::user);
+  impl_->note_paste_reason_locked(PasteCancelReason::link_lost);
   impl_->cancel_paste_locked(AsciiPasteState::canceled);
   impl_->queue.request_release();
   impl_->status.epoch = impl_->queue.epoch();

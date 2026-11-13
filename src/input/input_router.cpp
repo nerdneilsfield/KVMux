@@ -11,6 +11,9 @@
 #include "control/control_queue.hpp"
 
 namespace kvmux {
+namespace {
+constexpr std::uint16_t kEscapeUsage = 0x29;
+}
 
 bool Rect::contains(const double px, const double py) const noexcept {
   return width > 0 && height > 0 && px >= x && py >= y && px < x + width &&
@@ -84,7 +87,9 @@ void InputRouter::set_mouse_mode(const MouseMode mode) {
     return;
   }
   if (state_ != InputState::preview) {
-    begin_release();
+    if (text_active_ || direct_ascii_paste_ || remote_ascii_paste_)
+      log_unknown_paste_cancel("InputRouter::set_mouse_mode");
+    begin_release(PasteCancelReason::unknown);
     return;
   }
   mouse_mode_ = mode;
@@ -105,8 +110,7 @@ std::optional<std::uint64_t> InputRouter::submit(ControlPayload payload) {
       {snapshot.epoch, sequence, Clock::now(), payload, event_received_at_});
   if (result != SubmitResult::accepted) {
     if (snapshot.recoverable_transport)
-      recover(text_active_ ? PasteCancelReason::link_lost
-                           : PasteCancelReason::user);
+      recover(PasteCancelReason::link_lost);
     else
       fail();
     return false;
@@ -147,7 +151,9 @@ void InputRouter::handle(const InputEvent& event) {
   if (text_active_) {
     if (const auto* key = std::get_if<InputKey>(&event.payload)) {
       if (key->repeat || !key->pressed) return;
-      begin_release(PasteCancelReason::key_press);
+      begin_release(key->usb_usage == kEscapeUsage
+                        ? PasteCancelReason::user
+                        : PasteCancelReason::key_press);
       return;
     }
   }
@@ -197,7 +203,9 @@ void InputRouter::handle_key(const InputKey& key) {
   if (key.usb_usage == host_usage_) {
     if (key.pressed && (capture_intended() || injected_active())) {
       swallowed_host_releases_.insert(key.usb_usage);
-      begin_release();
+      if (text_active_ || direct_ascii_paste_ || remote_ascii_paste_)
+        log_unknown_paste_cancel("InputRouter::handle_key");
+      begin_release(PasteCancelReason::unknown);
     } else if (!key.pressed) {
       swallowed_host_releases_.erase(key.usb_usage);
     }
@@ -241,7 +249,9 @@ void InputRouter::handle_relative(const InputRelativeMotion& motion) {
   if (!std::isfinite(residual_x_) || !std::isfinite(residual_y_) ||
       std::abs(residual_x_) > max_counts ||
       std::abs(residual_y_) > max_counts) {
-    begin_release();
+    if (text_active_ || direct_ascii_paste_ || remote_ascii_paste_)
+      log_unknown_paste_cancel("InputRouter::handle_relative");
+    begin_release(PasteCancelReason::unknown);
     return;
   }
   const int dx = static_cast<int>(std::trunc(residual_x_));
@@ -479,9 +489,13 @@ void InputRouter::tick(const Clock::time_point now) {
           direct_paste_snapshot_.state == AsciiPasteState::canceled) {
         auto reason = direct_paste_snapshot_.cancel_reason;
         if (reason == PasteCancelReason::none) {
-          reason = direct_paste_snapshot_.state == AsciiPasteState::failed
-                       ? PasteCancelReason::device_fault
-                       : PasteCancelReason::user;
+          if (direct_paste_snapshot_.state == AsciiPasteState::failed) {
+            reason = PasteCancelReason::device_fault;
+          } else {
+            reason = PasteCancelReason::unknown;
+            if (text_result_.error != TextPasteError::canceled)
+              log_unknown_paste_cancel("InputRouter::tick");
+          }
         }
         note_paste_cancel(reason);
       }
@@ -746,12 +760,14 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
   std::vector<std::uint8_t> normalized;
   text_result_ = map_us_ascii_text(text, &normalized);
   if (!text_result_) return text_result_;
-  if (state_ != InputState::preview || special_active() || text_active_ ||
-      !sink_ready_released()) {
+  if (state_ != InputState::preview || special_active() || text_active_) {
     text_result_.error = TextPasteError::canceled;
-    text_result_.cancel_reason = !sink_ready_released()
-                                     ? PasteCancelReason::link_lost
-                                     : PasteCancelReason::user;
+    text_result_.cancel_reason = PasteCancelReason::not_ready;
+    return text_result_;
+  }
+  if (!sink_ready_released()) {
+    text_result_.error = TextPasteError::canceled;
+    text_result_.cancel_reason = PasteCancelReason::link_lost;
     return text_result_;
   }
   text_gestures_ = text_result_.gestures;
