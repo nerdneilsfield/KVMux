@@ -35,7 +35,8 @@ HEADER_FILTER := ^$(CURDIR)/(src|tests)/
 EXCLUDE_HEADER_FILTER := ^$(CURDIR)/third_party/
 
 .PHONY: help config-dev build-dev dev config-release build-release release \
-        config-asan build-asan asan test format format-check cppcheck clang-tidy lint clean
+        config-asan build-asan asan test format format-check color-literals \
+        cppcheck clang-tidy lint clean
 
 .DEFAULT_GOAL := help
 
@@ -48,6 +49,7 @@ help:
 	  '  make test            Build Debug and run its tests' \
 	  '  make format          Format first-party C/C++/Objective-C++ files' \
 	  '  make format-check    Check formatting without changing files' \
+	  '  make color-literals  Reject UI color literals outside ui_theme' \
 	  '  make cppcheck        Run cppcheck using the Debug compile database' \
 	  '  make clang-tidy      Run clang-tidy on first-party sources and tests' \
 	  '  make lint            Run all static checks' \
@@ -99,6 +101,10 @@ format-check:
 	@command -v "$(CLANG_FORMAT)" >/dev/null || { echo 'Error: clang-format not found.' >&2; exit 127; }
 	@$(CLANG_FORMAT) --dry-run --Werror $(SOURCES)
 
+color-literals:
+	@command -v python3 >/dev/null || { echo 'Error: python3 not found.' >&2; exit 127; }
+	@python3 tools/check_color_literals.py
+
 cppcheck: config-dev
 	@command -v "$(CPPCHECK)" >/dev/null || { echo 'Error: cppcheck not found.' >&2; exit 127; }
 	$(CPPCHECK) --project=$(DEV_BUILD_DIR)/compile_commands.json -ithird_party \
@@ -111,7 +117,7 @@ clang-tidy: config-dev
 	  -source-filter='$(FIRST_PARTY_SOURCE_FILTER)' \
 	  -header-filter='$(HEADER_FILTER)' -exclude-header-filter='$(EXCLUDE_HEADER_FILTER)'
 
-lint: format-check cppcheck clang-tidy
+lint: color-literals format-check cppcheck clang-tidy
 
 clean:
 	cmake -E rm -rf build

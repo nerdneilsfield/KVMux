@@ -24,6 +24,7 @@
 #include "app/recording.hpp"
 #include "app/ui_panels.hpp"
 #include "app/ui_state.hpp"
+#include "app/ui_theme.hpp"
 #include "network/relay_client.hpp"
 #include "network/relay_selection.hpp"
 #include "render/video_renderer.hpp"
@@ -42,78 +43,6 @@ struct TrafficRate {
     bytes_per_second.reset();
   }
 };
-
-constexpr ImVec4 brand_color(unsigned rgb, float alpha = 1.F) {
-  return {static_cast<float>((rgb >> 16) & 255) / 255.F,
-          static_cast<float>((rgb >> 8) & 255) / 255.F,
-          static_cast<float>(rgb & 255) / 255.F, alpha};
-}
-void apply_brand_style() {
-  ImGui::StyleColorsDark();
-  auto& style = ImGui::GetStyle();
-  style.WindowRounding = 6.F;
-  style.PopupRounding = 6.F;
-  style.FrameRounding = 4.F;
-  style.GrabRounding = 3.F;
-  style.WindowBorderSize = 1.F;
-  style.PopupBorderSize = 1.F;
-  style.FramePadding = {6.F, 3.F};
-  style.ItemSpacing = {6.F, 4.F};
-  auto& c = style.Colors;
-  const auto navy = brand_color(0x0B1823), panel = brand_color(0x202A33);
-  const auto silver = brand_color(0xBFC5C9), white = brand_color(0xF3F1EB);
-  const auto copper = brand_color(0xC45F3C), highlight = brand_color(0xED9464);
-  const auto hover = brand_color(0x633A2E), active = brand_color(0x84442E);
-  c[ImGuiCol_Text] = white;
-  c[ImGuiCol_TextDisabled] = silver;
-  c[ImGuiCol_WindowBg] = navy;
-  c[ImGuiCol_ChildBg] = navy;
-  c[ImGuiCol_PopupBg] = navy;
-  c[ImGuiCol_MenuBarBg] = panel;
-  c[ImGuiCol_Border] = brand_color(0x576570);
-  c[ImGuiCol_BorderShadow] = brand_color(0, 0.F);
-  c[ImGuiCol_FrameBg] = panel;
-  c[ImGuiCol_FrameBgHovered] = hover;
-  c[ImGuiCol_FrameBgActive] = active;
-  c[ImGuiCol_TitleBg] = navy;
-  c[ImGuiCol_TitleBgActive] = panel;
-  c[ImGuiCol_TitleBgCollapsed] = navy;
-  c[ImGuiCol_Button] = panel;
-  c[ImGuiCol_ButtonHovered] = hover;
-  c[ImGuiCol_ButtonActive] = active;
-  c[ImGuiCol_Header] = panel;
-  c[ImGuiCol_HeaderHovered] = hover;
-  c[ImGuiCol_HeaderActive] = active;
-  c[ImGuiCol_CheckMark] = highlight;
-  c[ImGuiCol_SliderGrab] = copper;
-  c[ImGuiCol_SliderGrabActive] = highlight;
-  c[ImGuiCol_ScrollbarBg] = navy;
-  c[ImGuiCol_ScrollbarGrab] = brand_color(0x576570);
-  c[ImGuiCol_ScrollbarGrabHovered] = silver;
-  c[ImGuiCol_ScrollbarGrabActive] = copper;
-  c[ImGuiCol_Separator] = brand_color(0x576570);
-  c[ImGuiCol_SeparatorHovered] = copper;
-  c[ImGuiCol_SeparatorActive] = highlight;
-  c[ImGuiCol_ResizeGrip] = brand_color(0xBFC5C9, .3F);
-  c[ImGuiCol_ResizeGripHovered] = copper;
-  c[ImGuiCol_ResizeGripActive] = highlight;
-  c[ImGuiCol_Tab] = panel;
-  c[ImGuiCol_TabHovered] = hover;
-  c[ImGuiCol_TabSelected] = active;
-  c[ImGuiCol_TabSelectedOverline] = copper;
-  c[ImGuiCol_TabDimmed] = navy;
-  c[ImGuiCol_TabDimmedSelected] = panel;
-  c[ImGuiCol_TabDimmedSelectedOverline] = silver;
-  c[ImGuiCol_TextSelectedBg] = active;
-  c[ImGuiCol_NavCursor] = highlight;
-  c[ImGuiCol_PlotLines] = silver;
-  c[ImGuiCol_PlotLinesHovered] = highlight;
-  c[ImGuiCol_PlotHistogram] = copper;
-  c[ImGuiCol_PlotHistogramHovered] = highlight;
-  c[ImGuiCol_TableHeaderBg] = panel;
-  c[ImGuiCol_TableBorderStrong] = brand_color(0x576570);
-  c[ImGuiCol_TableBorderLight] = panel;
-}
 
 GLuint load_brand_texture() {
   const char* base = SDL_GetBasePath();
@@ -285,7 +214,7 @@ int main(int argc, char** argv) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;
-  apply_brand_style();
+  theme::apply();
   const GLuint brand_texture = load_brand_texture();
   ImGui_ImplSDL3_InitForOpenGL(window, context);
   ImGui_ImplOpenGL3_Init("#version 150");
@@ -936,7 +865,8 @@ int main(int argc, char** argv) {
     int dw{}, dh{};
     SDL_GetWindowSizeInPixels(window, &dw, &dh);
     glViewport(0, 0, dw, dh);
-    glClearColor(11.F / 255.F, 24.F / 255.F, 35.F / 255.F, 1);
+    glClearColor(theme::unit(theme::bg.r), theme::unit(theme::bg.g),
+                 theme::unit(theme::bg.b), 1.F);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     const auto before = std::chrono::steady_clock::now();
@@ -959,7 +889,9 @@ int main(int argc, char** argv) {
         int w2{}, h2{};
         SDL_GetWindowSizeInPixels(window2, &w2, &h2);
         glViewport(0, 0, w2, h2);
-        glClearColor(0.F, 0.F, 0.F, 1.F);
+        glClearColor(theme::unit(theme::video_well.r),
+                     theme::unit(theme::video_well.g),
+                     theme::unit(theme::video_well.b), 1.F);
         glClear(GL_COLOR_BUFFER_BIT);
         if (second_valid) {
           const auto fit = fit_video_rect(

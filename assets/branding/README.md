@@ -27,6 +27,19 @@ These are chosen clean equivalents of the raster’s shaded colors, not recovere
 original brand specifications. The banner uses Helvetica/Arial with a sans-serif
 fallback; its committed PNG fixes the rendered appearance across README viewers.
 
+The interface uses the same colors through `src/app/ui_theme.hpp`, plus these
+extensions:
+
+- Video well and the dark end of the logo gradient: `#08121B`
+- Border: `#576570`
+- Raised inputs (`surface_raised`): `#2C3842`
+- Primary button fill: `#633A2E`; hover: `#84442E`. The active fill is the same
+  `#633A2E`. Button text is warm white. Connection orange is not a button fill.
+- Status: ok `#3DDC97`, warn `#E6C84A`, error `#FF6B6B`. Warn is yellow so it
+  stays distinct from connection orange. An error banner is a charcoal surface
+  with a left error bar, not a solid status-color fill.
+- Window and popup borders use Silver at 40% opacity.
+
 ## Export
 
 PNG files were rendered directly from the SVGs at their declared dimensions with

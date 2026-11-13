@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "app/ui_theme.hpp"
 #include "input/us_ascii_text.hpp"
 
 namespace kvmux {
@@ -46,10 +47,13 @@ void format_pointer(const InputPointerSnapshot& pointer, char* local,
 
 bool relay_port_ok(int port) { return port > 0 && port <= 65535; }
 
-bool action_button(const char* label, bool enabled, const char* reason) {
+bool action_button(const char* label, bool enabled, const char* reason,
+                   bool primary = false) {
+  if (primary) theme::push_primary_button();
   ImGui::BeginDisabled(!enabled);
   const bool pressed = ImGui::Button(label);
   ImGui::EndDisabled();
+  if (primary) theme::pop_primary_button();
   if (!enabled && reason != nullptr &&
       ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
     ImGui::SetTooltip("%s", reason);
@@ -330,7 +334,8 @@ void append_connections(UiState& ui, const SessionView& view,
   const char* apply_reason =
       view.retiring ? "Stopping previous session..."
                     : "Video source and control target are already applied.";
-  if (action_button("Apply", source_pending && !view.retiring, apply_reason)) {
+  if (action_button("Apply", source_pending && !view.retiring, apply_reason,
+                    true)) {
     form.video_source = form.draft_video;
     form.control_target = form.draft_control;
     note_rebuild_ui(form);
@@ -375,7 +380,7 @@ void append_connections(UiState& ui, const SessionView& view,
     if (action_button(
             "Connect relay",
             relay_reason == nullptr && !view.retiring && !source_pending,
-            relay_reason))
+            relay_reason, true))
       actions.add(action(UiActionKind::connect_relay));
     ImGui::SameLine();
     const bool relay_open = view.relay_video_open || view.relay_control_open;
@@ -487,7 +492,7 @@ void append_connections(UiState& ui, const SessionView& view,
         : view.retiring ? "Stopping previous session..."
                         : "Select a capture device and mode.";
     if (shown_video == VideoSource::local &&
-        action_button("Start preview", preview_ready, preview_reason)) {
+        action_button("Start preview", preview_ready, preview_reason, true)) {
       const auto& device =
           form.devices[static_cast<std::size_t>(form.selected_device)];
       if (form.screen2_open && device.stable_id == form.second_device_id) {
@@ -506,7 +511,7 @@ void append_connections(UiState& ui, const SessionView& view,
       const char* serial_reason =
           source_pending ? "Apply the video source and control target first."
                          : "Select a serial port.";
-      if (action_button("Connect", port_ready, serial_reason)) {
+      if (action_button("Connect", port_ready, serial_reason, true)) {
         form.close_connections_when_ready = true;
         actions.add(action(UiActionKind::connect_serial));
       }
@@ -569,7 +574,8 @@ void append_connections(UiState& ui, const SessionView& view,
             source_pending  ? "Apply the video source and control target first."
             : view.retiring ? "Stopping previous session..."
                             : "Select a screen 2 device and mode.";
-        if (action_button("Open screen 2", screen2_ready, screen2_reason)) {
+        if (action_button("Open screen 2", screen2_ready, screen2_reason,
+                          true)) {
           if (form.devices[static_cast<std::size_t>(form.selected_device2)]
                   .stable_id == form.primary_device_id) {
             set_media_notice(ui.media,
@@ -909,7 +915,7 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
   const ImVec2 start = viewport->Pos;
   ImGui::GetWindowDrawList()->AddRectFilled(
       start, {start.x + video_size.x, start.y + video_size.y},
-      IM_COL32(0, 0, 0, 255));
+      theme::packed(theme::video_well));
   if (view.has_texture) {
     const auto fit =
         fit_video_rect({start.x, start.y, video_size.x, video_size.y},
@@ -951,8 +957,8 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
     const ImVec2 hi{std::max(ui.media.region_start.x, ui.media.region_end.x),
                     std::max(ui.media.region_start.y, ui.media.region_end.y)};
     auto* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(lo, hi, IM_COL32(196, 95, 60, 45));
-    draw->AddRect(lo, hi, IM_COL32(237, 148, 100, 255), 0.F, 0, 2.F);
+    draw->AddRectFilled(lo, hi, theme::packed(theme::accent, 45));
+    draw->AddRect(lo, hi, theme::packed(theme::highlight), 0.F, 0, 2.F);
   }
   if (view.captured) {
     const double now = ImGui::GetTime();
@@ -964,12 +970,12 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
     const auto size = ImGui::CalcTextSize(hint);
     const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
     auto* draw = ImGui::GetWindowDrawList();
+    const auto wash = static_cast<std::uint8_t>(225.F * alpha);
+    const auto ink = static_cast<std::uint8_t>(255.F * alpha);
     draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F},
                         {pos.x + size.x + 8.F, pos.y + size.y + 4.F},
-                        IM_COL32(11, 24, 35, static_cast<int>(225.F * alpha)),
-                        4.F);
-    draw->AddText(pos, IM_COL32(243, 241, 235, static_cast<int>(255.F * alpha)),
-                  hint);
+                        theme::packed(theme::bg, wash), 4.F);
+    draw->AddText(pos, theme::packed(theme::text, ink), hint);
   } else if (view.snapshot.input_state == InputState::preview &&
              view.has_texture) {
     char hint[128];
@@ -1040,8 +1046,8 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
   const ImU32 state_color =
       links_ready(view.video, view.control,
                   ui.connection.control_target != ControlTarget::none)
-          ? IM_COL32(80, 210, 120, 255)
-          : IM_COL32(230, 155, 70, 255);
+          ? theme::packed(theme::ok)
+          : theme::packed(theme::warn);
   auto* draw = ImGui::GetWindowDrawList();
   draw->AddCircleFilled({origin.x + 4.F, origin.y + line_height * .5F}, 3.F,
                         state_color);
@@ -1081,7 +1087,8 @@ void append_banner_line(std::string& text, const std::string& line) {
 }
 
 void draw_one_banner(UiState& ui, const char* title, const std::string& text,
-                     std::string& dismissed, bool remote, float& y) {
+                     std::string& dismissed, bool remote, float& y,
+                     bool error_bar) {
   if (text.empty() || text == dismissed) return;
   const auto* viewport = ImGui::GetMainViewport();
   const float width = std::max(1.F, viewport->Size.x - 16.F);
@@ -1093,8 +1100,10 @@ void draw_one_banner(UiState& ui, const char* title, const std::string& text,
                      ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoFocusOnAppearing |
                      (remote ? ImGuiWindowFlags_NoInputs : 0);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, theme::rgba(theme::surface));
   if (!ImGui::Begin(title, nullptr, flags)) {
     ImGui::End();
+    ImGui::PopStyleColor();
     return;
   }
   if (!remote) record_local_region(ui);
@@ -1106,8 +1115,15 @@ void draw_one_banner(UiState& ui, const char* title, const std::string& text,
   ImGui::PopTextWrapPos();
   ImGui::SameLine();
   if (ImGui::Button("Close")) dismissed = text;
+  if (error_bar) {
+    const auto pos = ImGui::GetWindowPos();
+    const auto size = ImGui::GetWindowSize();
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        pos, {pos.x + 4.F, pos.y + size.y}, theme::packed(theme::error));
+  }
   y += ImGui::GetWindowSize().y + 8.F;
   ImGui::End();
+  ImGui::PopStyleColor();
 }
 
 void draw_banners(UiState& ui, const SessionView& view) {
@@ -1132,10 +1148,10 @@ void draw_banners(UiState& ui, const SessionView& view) {
   float y = viewport->Pos.y + chrome + 8.F;
   const bool remote = view.remote_input;
   draw_one_banner(ui, "Error banner", errors, ui.overlay.dismissed_errors,
-                  remote, y);
+                  remote, y, true);
   if (!ui.media.media_is_error) {
     draw_one_banner(ui, "Notice", ui.media.media_message,
-                    ui.overlay.dismissed_notice, remote, y);
+                    ui.overlay.dismissed_notice, remote, y, false);
   }
 }
 
