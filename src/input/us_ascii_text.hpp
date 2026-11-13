@@ -11,13 +11,56 @@
 
 namespace kvmux {
 
+// Why an in-progress paste stopped. `none` is not a cancellation.
+// `unsupported` stays a character-mapping failure and does not use this.
+enum class PasteCancelReason {
+  none,
+  user,
+  key_press,
+  focus_lost,
+  video_stale,
+  ui_stall,
+  link_lost,
+  ack_timeout,
+  device_fault,
+  shutdown
+};
+
+[[nodiscard]] inline const char* paste_cancel_reason_name(
+    PasteCancelReason reason) noexcept {
+  switch (reason) {
+    case PasteCancelReason::none:
+      return "none";
+    case PasteCancelReason::user:
+      return "user";
+    case PasteCancelReason::key_press:
+      return "key_press";
+    case PasteCancelReason::focus_lost:
+      return "focus_lost";
+    case PasteCancelReason::video_stale:
+      return "video_stale";
+    case PasteCancelReason::ui_stall:
+      return "ui_stall";
+    case PasteCancelReason::link_lost:
+      return "link_lost";
+    case PasteCancelReason::ack_timeout:
+      return "ack_timeout";
+    case PasteCancelReason::device_fault:
+      return "device_fault";
+    case PasteCancelReason::shutdown:
+      return "shutdown";
+  }
+  return "none";
+}
+
 enum class TextPasteError {
   none,
   empty,
   bare_carriage_return,
   non_ascii,
   unsupported,
-  too_long
+  too_long,
+  canceled
 };
 
 struct TextFilterResult {
@@ -38,6 +81,7 @@ struct TextMappingResult {
   std::size_t source_bytes{};
   std::size_t normalized_characters{};
   std::vector<TextGesture> gestures;
+  PasteCancelReason cancel_reason{PasteCancelReason::none};
   [[nodiscard]] explicit operator bool() const noexcept {
     return error == TextPasteError::none;
   }

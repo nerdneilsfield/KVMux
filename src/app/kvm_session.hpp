@@ -123,8 +123,10 @@ class KvmSession {
   void drain_motion_locked();
   void discard_motion() noexcept;
   void apply_input_locked(const InputEvent& event);
-  void request_release_locked() noexcept;
-  void request_release() noexcept;
+  void request_release_locked(
+      PasteCancelReason reason = PasteCancelReason::user) noexcept;
+  void request_release(
+      PasteCancelReason reason = PasteCancelReason::user) noexcept;
   void note_session_error(std::string error);
   void note_keep_alive(Clock::time_point now) noexcept;
   [[nodiscard]] bool preview_only() const noexcept;

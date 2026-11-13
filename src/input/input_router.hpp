@@ -85,6 +85,7 @@ struct TextPasteSnapshot {
   std::size_t scheduled_gestures{};
   bool active{};
   bool pending{};
+  PasteCancelReason cancel_reason{PasteCancelReason::none};
 };
 
 struct InputPointerSnapshot {
@@ -126,7 +127,7 @@ class InputRouter {
   [[nodiscard]] bool text_active() const noexcept { return text_active_; }
   [[nodiscard]] TextMappingResult start_text(
       std::string_view text, Clock::time_point now = Clock::now());
-  void cancel_text() noexcept;
+  void cancel_text(PasteCancelReason reason = PasteCancelReason::user) noexcept;
   [[nodiscard]] TextMappingResult text_snapshot() const { return text_result_; }
   [[nodiscard]] TextPasteSnapshot text_paste_snapshot() const noexcept;
 
@@ -152,8 +153,9 @@ class InputRouter {
   void tick(Clock::time_point now = Clock::now());
   void focus_lost() noexcept;
   void minimized() noexcept;
-  void video_stale() noexcept;
-  void release() noexcept;
+  void video_stale(
+      PasteCancelReason reason = PasteCancelReason::video_stale) noexcept;
+  void release(PasteCancelReason reason = PasteCancelReason::user) noexcept;
   void clear_fault() noexcept;
 
   [[nodiscard]] bool send_special(SpecialKeys keys,
@@ -179,9 +181,15 @@ class InputRouter {
   void handle_relative(const InputRelativeMotion& motion);
   void handle_button(const InputButton& button);
   void handle_wheel(const InputWheel& wheel);
-  void begin_release() noexcept;
+  void begin_release(
+      PasteCancelReason reason = PasteCancelReason::user) noexcept;
+  [[nodiscard]] PasteCancelReason paste_stop_reason(
+      const ControlSnapshot& snapshot) const;
+  void end_paste(PasteCancelReason reason) noexcept;
+  void note_paste_cancel(PasteCancelReason reason) noexcept;
+  void finish_paste_log(Clock::time_point now, std::size_t sent) noexcept;
   void fail() noexcept;
-  void recover() noexcept;
+  void recover(PasteCancelReason reason = PasteCancelReason::user) noexcept;
   DesiredInputState desired() const;
   void synchronize(Clock::time_point now);
   void schedule_special(SpecialKeys, Clock::time_point);
@@ -235,6 +243,9 @@ class InputRouter {
   AsciiPasteSnapshot direct_paste_snapshot_{};
   bool text_completion_pending_{};
   TextMappingResult text_result_;
+  bool paste_log_pending_{};
+  Clock::time_point paste_started_at_{};
+  std::size_t paste_total_bytes_{};
 };
 
 }  // namespace kvmux

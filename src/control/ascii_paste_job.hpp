@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "control/control_event.hpp"
+#include "input/us_ascii_text.hpp"
 
 namespace kvmux {
 
@@ -30,6 +31,8 @@ struct AsciiPasteSnapshot {
   std::size_t total_gestures{};
   std::size_t completed_gestures{};
   std::uint64_t job_id{};
+  // First reason wins. Later failures must not replace it.
+  PasteCancelReason cancel_reason{PasteCancelReason::none};
   [[nodiscard]] bool active() const noexcept {
     return state == AsciiPasteState::active;
   }

@@ -1,7 +1,11 @@
 #include "input/input_router.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <string>
 #include <utility>
 
 #include "control/control_queue.hpp"
@@ -101,7 +105,8 @@ std::optional<std::uint64_t> InputRouter::submit(ControlPayload payload) {
       {snapshot.epoch, sequence, Clock::now(), payload, event_received_at_});
   if (result != SubmitResult::accepted) {
     if (snapshot.recoverable_transport)
-      recover();
+      recover(text_active_ ? PasteCancelReason::link_lost
+                           : PasteCancelReason::user);
     else
       fail();
     return false;
@@ -137,10 +142,14 @@ void InputRouter::activate() noexcept {
 }
 
 void InputRouter::handle(const InputEvent& event) {
-  // A physical key edge cancels synthetic text before it can inject another
-  // character.
-  if (text_active_ && std::holds_alternative<InputKey>(event.payload)) {
-    cancel_text();
+  // A press edge cancels synthetic text. Release and repeat are ignored:
+  // preview does not forward keys, and submitting a release faults the sink.
+  if (text_active_) {
+    if (const auto* key = std::get_if<InputKey>(&event.payload)) {
+      if (key->repeat || !key->pressed) return;
+      begin_release(PasteCancelReason::key_press);
+      return;
+    }
   }
   event_received_at_ = event.received_at;
   std::visit(
@@ -355,9 +364,9 @@ DesiredInputState InputRouter::desired() const {
   value.absolute_y = desired_y_;
   return value;
 }
-void InputRouter::recover() noexcept {
+void InputRouter::recover(const PasteCancelReason reason) noexcept {
   if (temporary_intent_) {
-    begin_release();
+    begin_release(reason);
     return;
   }
   if (!capture_intended()) return;
@@ -438,12 +447,14 @@ void InputRouter::tick(const Clock::time_point now) {
   }
   if (snapshot.recoverable_transport && capture_intended() &&
       (!video_fresh_ || !sink_ready_released() ||
-       (barrier_epoch_ && barrier_epoch_ != snapshot.epoch)))
-    recover();
+       (barrier_epoch_ && barrier_epoch_ != snapshot.epoch))) {
+    recover(!video_fresh_ ? PasteCancelReason::video_stale
+                          : PasteCancelReason::link_lost);
+  }
   if (temporary_intent_ &&
       (!video_fresh_ || snapshot.state != ControlConnectionState::ready ||
        !snapshot.target_usb_ready || !snapshot.release_confirmed)) {
-    begin_release();
+    begin_release(paste_stop_reason(snapshot));
     return;
   }
   if (state_ == InputState::arming && activation_released_ && video_fresh_ &&
@@ -459,15 +470,26 @@ void InputRouter::tick(const Clock::time_point now) {
     text_active_ = false;
     direct_ascii_paste_ = false;
     temporary_intent_ = false;
+    finish_paste_log(now, scheduled_text_gestures_);
   }
   if (direct_ascii_paste_) {
     direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
     if (!direct_paste_snapshot_.active()) {
       if (direct_paste_snapshot_.state == AsciiPasteState::failed ||
-          direct_paste_snapshot_.state == AsciiPasteState::canceled)
-        text_result_.error = TextPasteError::unsupported;
+          direct_paste_snapshot_.state == AsciiPasteState::canceled) {
+        auto reason = direct_paste_snapshot_.cancel_reason;
+        if (reason == PasteCancelReason::none) {
+          reason = direct_paste_snapshot_.state == AsciiPasteState::failed
+                       ? PasteCancelReason::device_fault
+                       : PasteCancelReason::user;
+        }
+        note_paste_cancel(reason);
+      }
+      const auto sent = direct_paste_snapshot_.completed_gestures;
       text_active_ = false;
       direct_ascii_paste_ = false;
+      temporary_intent_ = false;
+      finish_paste_log(now, sent);
     }
   }
   if (snapshot.recoverable_transport &&
@@ -479,10 +501,12 @@ void InputRouter::tick(const Clock::time_point now) {
   if (remote_ascii_paste_ && text_active_ && barrier_epoch_ == snapshot.epoch) {
     if (sink_.start_ascii_paste_text(std::move(text_normalized_)) !=
         SubmitResult::accepted) {
+      note_paste_cancel(PasteCancelReason::link_lost);
       text_active_ = false;
       remote_ascii_paste_ = false;
       temporary_intent_ = false;
-      text_result_.error = TextPasteError::unsupported;
+      text_normalized_.clear();
+      finish_paste_log(now, 0);
     } else {
       remote_ascii_paste_ = false;
       direct_ascii_paste_ = true;
@@ -540,19 +564,75 @@ void InputRouter::tick(const Clock::time_point now) {
   }
 }
 
-void InputRouter::begin_release() noexcept {
+PasteCancelReason InputRouter::paste_stop_reason(
+    const ControlSnapshot& snapshot) const {
   if (direct_ascii_paste_) {
-    sink_.cancel_ascii_paste();
-    direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
-    if (direct_paste_snapshot_.state == AsciiPasteState::failed ||
-        direct_paste_snapshot_.state == AsciiPasteState::canceled)
-      text_result_.error = TextPasteError::unsupported;
+    const auto paste = sink_.ascii_paste_snapshot();
+    if (paste.cancel_reason != PasteCancelReason::none)
+      return paste.cancel_reason;
   }
-  if (text_active_) text_result_.error = TextPasteError::unsupported;
-  pointer_ = {};
-  special_steps_.clear();
-  pending_special_.reset();
-  pending_keep_alive_ = false;
+  if (!video_fresh_) return PasteCancelReason::video_stale;
+  if (snapshot.error.find("heartbeat") != std::string::npos)
+    return PasteCancelReason::ui_stall;
+  if (snapshot.error.find("timed out") != std::string::npos ||
+      snapshot.error.find("stalled") != std::string::npos)
+    return PasteCancelReason::ack_timeout;
+  if (!snapshot.error.empty() &&
+      snapshot.state != ControlConnectionState::ready)
+    return PasteCancelReason::device_fault;
+  return PasteCancelReason::link_lost;
+}
+
+void InputRouter::note_paste_cancel(const PasteCancelReason reason) noexcept {
+  if (reason == PasteCancelReason::none) return;
+  if (text_result_.error == TextPasteError::canceled) return;
+  text_result_.error = TextPasteError::canceled;
+  text_result_.cancel_reason = reason;
+}
+
+void InputRouter::finish_paste_log(const Clock::time_point now,
+                                   const std::size_t sent) noexcept {
+  if (!paste_log_pending_) return;
+  paste_log_pending_ = false;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           now - paste_started_at_)
+                           .count();
+  try {
+    spdlog::info(
+        "paste finished result={} reason={} sent_bytes={} total_bytes={} "
+        "elapsed_ms={}",
+        text_result_.error == TextPasteError::none ? "completed" : "canceled",
+        paste_cancel_reason_name(text_result_.cancel_reason), sent,
+        paste_total_bytes_, elapsed);
+  } catch (const std::exception&) {
+  }
+}
+
+void InputRouter::end_paste(PasteCancelReason reason) noexcept {
+  const bool running =
+      text_active_ || direct_ascii_paste_ || remote_ascii_paste_;
+  if (!running && !paste_log_pending_) return;
+  std::size_t sent = scheduled_text_gestures_;
+  if (direct_ascii_paste_) {
+    direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    if (direct_paste_snapshot_.cancel_reason != PasteCancelReason::none)
+      reason = direct_paste_snapshot_.cancel_reason;
+    sent = direct_paste_snapshot_.completed_gestures;
+    const auto latched = direct_paste_snapshot_.cancel_reason;
+    sink_.cancel_ascii_paste();
+    // The pre-cancel snapshot is still "active". Publish the sink's terminal
+    // view so the UI stops showing an in-progress paste. Keep a reason the
+    // sink had already latched.
+    direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    if (direct_paste_snapshot_.cancel_reason == PasteCancelReason::none)
+      direct_paste_snapshot_.cancel_reason = latched;
+    if (direct_paste_snapshot_.active())
+      direct_paste_snapshot_.state = AsciiPasteState::canceled;
+  } else if (remote_ascii_paste_) {
+    sink_.cancel_ascii_paste();
+  }
+  if (running) note_paste_cancel(reason);
+  finish_paste_log(Clock::now(), sent);
   text_active_ = false;
   direct_ascii_paste_ = false;
   remote_ascii_paste_ = false;
@@ -563,6 +643,14 @@ void InputRouter::begin_release() noexcept {
   text_edge_inflight_ = false;
   text_inflight_epoch_ = text_inflight_sequence_ = 0;
   temporary_intent_ = false;
+}
+
+void InputRouter::begin_release(const PasteCancelReason reason) noexcept {
+  end_paste(reason);
+  pointer_ = {};
+  special_steps_.clear();
+  pending_special_.reset();
+  pending_keep_alive_ = false;
   sync_.reset();
   barrier_epoch_ = 0;
   held_.clear();
@@ -576,23 +664,26 @@ void InputRouter::begin_release() noexcept {
   state_ = InputState::releasing;
 }
 
-void InputRouter::release() noexcept {
-  if (state_ != InputState::preview || injected_active()) begin_release();
+void InputRouter::release(const PasteCancelReason reason) noexcept {
+  if (state_ != InputState::preview || injected_active()) begin_release(reason);
 }
-void InputRouter::focus_lost() noexcept { begin_release(); }
-void InputRouter::minimized() noexcept { begin_release(); }
-void InputRouter::video_stale() noexcept {
+void InputRouter::focus_lost() noexcept {
+  begin_release(PasteCancelReason::focus_lost);
+}
+void InputRouter::minimized() noexcept {
+  begin_release(PasteCancelReason::focus_lost);
+}
+void InputRouter::video_stale(const PasteCancelReason reason) noexcept {
   video_fresh_ = false;
   if (sink_.snapshot().recoverable_transport)
-    recover();
+    recover(reason);
   else
-    begin_release();
+    begin_release(reason);
 }
 void InputRouter::fail() noexcept {
-  if (direct_ascii_paste_) {
-    sink_.cancel_ascii_paste();
-    direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
-  }
+  end_paste(sink_.snapshot().recoverable_transport
+                ? PasteCancelReason::link_lost
+                : PasteCancelReason::device_fault);
   pointer_ = {};
   sink_.release_all();
   release_requested_ = true;
@@ -654,9 +745,13 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
                                           const Clock::time_point now) {
   std::vector<std::uint8_t> normalized;
   text_result_ = map_us_ascii_text(text, &normalized);
-  if (!text_result_ || state_ != InputState::preview || special_active() ||
-      text_active_ || !sink_ready_released()) {
-    if (text_result_) text_result_.error = TextPasteError::unsupported;
+  if (!text_result_) return text_result_;
+  if (state_ != InputState::preview || special_active() || text_active_ ||
+      !sink_ready_released()) {
+    text_result_.error = TextPasteError::canceled;
+    text_result_.cancel_reason = !sink_ready_released()
+                                     ? PasteCancelReason::link_lost
+                                     : PasteCancelReason::user;
     return text_result_;
   }
   text_gestures_ = text_result_.gestures;
@@ -671,10 +766,14 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
   direct_ascii_paste_ = false;
   remote_ascii_paste_ = sink_.snapshot().recoverable_transport;
   direct_paste_snapshot_ = {};
+  paste_log_pending_ = true;
+  paste_started_at_ = now;
+  paste_total_bytes_ = text_result_.normalized_characters;
+  text_result_.cancel_reason = PasteCancelReason::none;
   if (remote_ascii_paste_) {
     text_normalized_ = std::move(normalized);
     if (!video_fresh_) {
-      cancel_text();
+      cancel_text(PasteCancelReason::video_stale);
       return text_result_;
     }
     ++intent_;
@@ -690,9 +789,10 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
     job.gestures.push_back(std::move(gesture.edges));
   text_gestures_.clear();
   if (sink_.start_ascii_paste(std::move(job)) != SubmitResult::accepted) {
+    note_paste_cancel(PasteCancelReason::link_lost);
     text_active_ = false;
     temporary_intent_ = false;
-    text_result_.error = TextPasteError::unsupported;
+    finish_paste_log(now, 0);
   } else {
     direct_ascii_paste_ = true;
     direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
@@ -700,8 +800,8 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
   return text_result_;
 }
 
-void InputRouter::cancel_text() noexcept {
-  if (text_active_) begin_release();
+void InputRouter::cancel_text(const PasteCancelReason reason) noexcept {
+  if (text_active_) begin_release(reason);
 }
 
 TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
@@ -714,7 +814,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
             paste.total_gestures,
             paste.completed_gestures,
             paste.active(),
-            false};
+            false,
+            text_result_.cancel_reason};
   }
   return {text_result_.error,
           text_result_.source_bytes,
@@ -722,7 +823,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
           text_result_.gestures.size(),
           scheduled_text_gestures_,
           text_active_,
-          text_active_ && !special_steps_.empty()};
+          text_active_ && !special_steps_.empty(),
+          text_result_.cancel_reason};
 }
 
 void InputRouter::schedule_text(const Clock::time_point now) {

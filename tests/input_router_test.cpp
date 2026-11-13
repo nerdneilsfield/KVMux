@@ -491,6 +491,61 @@ int main() {
     require(
         !router.text_active() && sink.paste_cancels >= 1 && sink.releases > 0,
         "physical key cancels local composite paste before release");
+    require(router.text_paste_snapshot().error == TextPasteError::canceled &&
+                router.text_paste_snapshot().cancel_reason ==
+                    PasteCancelReason::key_press,
+            "a press edge records key_press");
+  }
+
+  {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
+    router.handle({InputKey{0x28, true, false}});
+    const auto start = InputRouter::Clock::now();
+    require(static_cast<bool>(router.start_text("ab", start)),
+            "paste starts while Enter is held");
+    const auto cancels = sink.paste_cancels;
+    const auto events = sink.events.size();
+    router.handle({InputKey{0x28, true, true}});
+    router.handle({InputKey{0x28, false, false}});
+    require(router.text_active() && sink.paste_cancels == cancels &&
+                sink.events.size() == events,
+            "repeat and release during paste are ignored");
+    router.handle({InputKey{0x04, true, false}});
+    const auto progress = router.text_paste_snapshot();
+    require(!progress.active && progress.error == TextPasteError::canceled &&
+                progress.cancel_reason == PasteCancelReason::key_press &&
+                sink.events.size() == events,
+            "a press edge cancels paste and submits no key");
+  }
+
+  {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
+    require(static_cast<bool>(router.start_text("ab")), "paste starts");
+    router.set_video_fresh(false);
+    router.tick();
+    const auto progress = router.text_paste_snapshot();
+    require(!progress.active && progress.error == TextPasteError::canceled &&
+                progress.cancel_reason == PasteCancelReason::video_stale &&
+                sink.releases > 0,
+            "stale video cancels through release");
+  }
+
+  {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
+    require(static_cast<bool>(router.start_text("ab")), "paste starts");
+    sink.snapshot_value.release_confirmed = false;
+    router.tick();
+    const auto progress = router.text_paste_snapshot();
+    require(!progress.active && progress.error == TextPasteError::canceled &&
+                progress.cancel_reason == PasteCancelReason::link_lost &&
+                sink.releases > 0,
+            "unconfirmed release cancels as link_lost");
   }
 
   {

@@ -196,8 +196,11 @@ bool KvmSession::send_special(SpecialKeys keys) {
 TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
   std::lock_guard lock(input_mutex_);
   if (control_blocked()) {
-    TextMappingResult blocked;
-    blocked.error = TextPasteError::unsupported;
+    auto blocked = map_us_ascii_text(text);
+    if (blocked) {
+      blocked.error = TextPasteError::canceled;
+      blocked.cancel_reason = PasteCancelReason::user;
+    }
     return blocked;
   }
   drain_motion_locked();
@@ -315,7 +318,7 @@ void KvmSession::drain_motion_locked() {
     // Same rule as the control queue: input older than 100 ms is never
     // replayed; a controlled session releases instead.
     if (input_.capture_intended() || input_.injected_active())
-      request_release_locked();
+      request_release_locked(PasteCancelReason::ui_stall);
     return;
   }
   apply_input_locked(motion->event);
@@ -334,38 +337,39 @@ void KvmSession::mouse_loop() {
   }
 }
 
-void KvmSession::request_release_locked() noexcept {
+void KvmSession::request_release_locked(
+    const PasteCancelReason reason) noexcept {
   {
     std::lock_guard lock(motion_mutex_);
     pending_motion_.reset();  // A release must never be followed by old motion.
   }
-  input_.release();
+  input_.release(reason);
   control_->set_control_active(false);
   control_->release_all();
 }
 
-void KvmSession::request_release() noexcept {
+void KvmSession::request_release(const PasteCancelReason reason) noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
-  request_release_locked();
+  request_release_locked(reason);
 }
 
 void KvmSession::focus_lost() noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
-  request_release_locked();
+  request_release_locked(PasteCancelReason::focus_lost);
   input_.focus_lost();
 }
 void KvmSession::minimized() noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
-  request_release_locked();
+  request_release_locked(PasteCancelReason::focus_lost);
   input_.minimized();
 }
 void KvmSession::suspended() noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
-  request_release_locked();
+  request_release_locked(PasteCancelReason::focus_lost);
   input_.focus_lost();
 }
 void KvmSession::release_control() noexcept { request_release(); }
@@ -449,10 +453,16 @@ void KvmSession::tick(Clock::time_point now) {
     drain_motion_locked();
   input_.set_video_fresh(video_ok);
   if (release) {
+    const auto paste = control_->ascii_paste_snapshot();
+    auto reason = PasteCancelReason::link_lost;
+    if (paste.cancel_reason != PasteCancelReason::none)
+      reason = paste.cancel_reason;
+    else if (!video_ok)
+      reason = PasteCancelReason::video_stale;
     if (control_->snapshot().recoverable_transport)
-      input_.video_stale();
+      input_.video_stale(reason);
     else
-      request_release_locked();
+      request_release_locked(reason);
   }
   control_->set_control_active(input_.capture_intended() ||
                                input_.injected_active());
@@ -594,7 +604,7 @@ void KvmSession::shutdown(std::chrono::milliseconds serial_timeout) noexcept {
   }
   {
     std::lock_guard lock(input_mutex_);
-    request_release_locked();
+    request_release_locked(PasteCancelReason::shutdown);
     input_.set_video_fresh(false);
   }
   {

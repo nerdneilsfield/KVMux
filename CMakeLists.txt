@@ -260,6 +260,11 @@ if(BUILD_TESTING)
     add_test(NAME kvm_session_input COMMAND kvmux_kvm_session_input_test)
     set_tests_properties(kvm_session_input PROPERTIES TIMEOUT 30)
 
+    add_executable(kvmux_paste_cancel_test tests/paste_cancel_test.cpp src/app/kvm_session.cpp)
+    target_link_libraries(kvmux_paste_cancel_test PRIVATE kvmux::core kvmux::capture)
+    add_test(NAME paste_cancel COMMAND kvmux_paste_cancel_test)
+    set_tests_properties(paste_cancel PROPERTIES TIMEOUT 60)
+
     add_executable(kvmux_relay_selection_test tests/relay_selection_test.cpp)
     target_link_libraries(kvmux_relay_selection_test PRIVATE kvmux::core)
     add_test(NAME relay_selection COMMAND kvmux_relay_selection_test)

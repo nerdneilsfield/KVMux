@@ -19,6 +19,7 @@ struct ProbeControlOptions {
   bool declare_freshness{false};
   bool keys{false};
   bool mouse{false};
+  bool paste{false};
   int timeout_ms{5000};
 };
 

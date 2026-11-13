@@ -216,6 +216,23 @@ void hevc_test(const char* path) {
   gui.session.release_control();
 }
 
+// A status sampled during release can still say "ready" until the clear's
+// epoch is published. Wait for that newer ready epoch before starting a paste.
+void release_to_settled_preview(GuiFixture& gui) {
+  const auto epoch = gui.session.snapshot().control.epoch;
+  gui.session.release_control();
+  assert(gui.wait([&] {
+    const auto state = gui.session.snapshot();
+    return state.control.epoch != epoch &&
+           state.input_state == InputState::preview &&
+           state.control.state == ControlConnectionState::ready &&
+           state.control.release_confirmed && state.video_fresh &&
+           state.capture.state == CaptureState::streaming &&
+           state.capture.actual_mode.width != 0 &&
+           state.capture.actual_mode.height != 0;
+  }));
+}
+
 void chunked_ascii_paste_loopback_test(const char* jpeg) {
   // Exercise the GUI path: KvmSession enables temporary intent, waits for the
   // sync barrier, then sends the normalized text through NetworkControlSink.
@@ -226,18 +243,7 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
   }
   GuiFixture gui(relay.options());
   gui.activate();
-  gui.session.release_control();
-  assert(gui.wait([&] {
-    const auto state = gui.session.snapshot();
-    // A real user can start text only after the released preview has a
-    // negotiated mode and fresh displayed video. Do not race the relay's
-    // initial empty-to-actual-mode transition with the text intent.
-    return state.input_state == InputState::preview &&
-           state.control.release_confirmed && state.video_fresh &&
-           state.capture.state == CaptureState::streaming &&
-           state.capture.actual_mode.width != 0 &&
-           state.capture.actual_mode.height != 0;
-  }));
+  release_to_settled_preview(gui);
 
   constexpr std::size_t text_bytes = 961;
   const auto keyboard_reports_before = [&] {
@@ -273,11 +279,15 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
          paste.completed_bytes == text_bytes &&
          paste.reason == kvmux::relay::wire::PasteStatusReason::none);
   // Completion is reported before KvmSession tears down its temporary intent.
-  // Wait for that release to be confirmed before counting its final HID report.
+  // The pre-release snapshot can still say release_confirmed. Count the final
+  // HID report only after that release publishes a newer ready epoch.
+  const auto epoch_before_release = gui.session.snapshot().control.epoch;
   assert(gui.wait([&] {
     const auto state = gui.session.snapshot();
     return !state.text_paste_active &&
            state.input_state == InputState::preview &&
+           state.control.epoch != epoch_before_release &&
+           state.control.state == ControlConnectionState::ready &&
            state.control.release_confirmed;
   }));
   {
@@ -288,8 +298,22 @@ void chunked_ascii_paste_loopback_test(const char* jpeg) {
     // 961 bytes cross the normalized 960-byte upload chunk boundary. The
     // temporary remote intent contributes one synchronized empty report and one
     // release report.
-    assert(keyboard_reports_after ==
-           keyboard_reports_before + 2 + text_bytes * 2);
+    const auto expected = keyboard_reports_before + 2 + text_bytes * 2;
+    if (keyboard_reports_after != expected) {
+      std::fprintf(stderr,
+                   "chunked keyboard count before=%zu after=%zu expected=%zu "
+                   "frames=%zu\n",
+                   keyboard_reports_before, keyboard_reports_after, expected,
+                   relay.serial.received.size());
+      for (std::size_t i = 0; i < relay.serial.received.size(); ++i) {
+        const auto& frame = relay.serial.received[i];
+        std::fprintf(stderr, "frame[%zu] cmd=0x%02x len=%zu data=", i,
+                     frame.command, frame.data.size());
+        for (const auto byte : frame.data) std::fprintf(stderr, "%02x", byte);
+        std::fprintf(stderr, "\n");
+      }
+      assert(false);
+    }
   }
   // The relay-private authorization revision must not collide with the GUI
   // revision stream.
@@ -307,16 +331,26 @@ void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
   {
     std::lock_guard lock(relay.serial.mutex);
     relay.serial.write_limit = 4096;
-    relay.serial.hold_keyboard_ack = true;
   }
   UdpProxy proxy(relay.options());
   GuiFixture gui(proxy.options());
   gui.activate();
-  assert(gui.session.start_text_paste("keepalive"));
-  assert(gui.wait([&] {
-    return gui.client->ascii_paste_text_snapshot().state ==
-           kvmux::relay::PasteUploadState::executing;
-  }));
+  release_to_settled_preview(gui);
+  {
+    std::lock_guard lock(relay.serial.mutex);
+    // 20 characters x 2 reports x 40 ms stays under the 100 ms stall and runs
+    // longer than the 750 ms status blackhole. Arm the delay only after the
+    // release clear has completed; that clear is also a keyboard report.
+    relay.serial.keyboard_ack_delay = 40ms;
+  }
+  constexpr std::size_t text_bytes = 20;
+  assert(gui.session.start_text_paste(std::string(text_bytes, 'a')));
+  assert(gui.wait(
+      [&] {
+        return gui.client->ascii_paste_text_snapshot().state ==
+               kvmux::relay::PasteUploadState::executing;
+      },
+      5000ms));
 
   // Drop every server KCP packet after execution begins, while client-to-server
   // KCP remains live. The server must keep the serial job alive past its 500 ms
@@ -324,22 +358,45 @@ void paste_keepalive_survives_blackholed_server_status_test(const char* jpeg) {
   proxy.drop_server_kcp = true;
   gui.run_for(750ms);
   assert(relay.sink.ascii_paste_snapshot().state == AsciiPasteState::active);
+  assert(gui.client->ascii_paste_text_snapshot().keepalives_sent > 0);
 
   proxy.drop_server_kcp = false;
-  {
-    std::lock_guard lock(relay.serial.mutex);
-    relay.serial.hold_keyboard_ack = false;
-    relay.serial.incoming.insert(relay.serial.incoming.end(),
-                                 relay.serial.held_ack.begin(),
-                                 relay.serial.held_ack.end());
-    relay.serial.held_ack.clear();
-  }
   assert(gui.wait(
       [&] {
         return gui.client->ascii_paste_text_snapshot().state ==
                kvmux::relay::PasteUploadState::completed;
       },
+      10000ms));
+  gui.session.release_control();
+}
+
+void paste_challenge_gap_cancels_test(const char* jpeg) {
+  RelayFixture relay(jpeg);
+  {
+    std::lock_guard lock(relay.serial.mutex);
+    relay.serial.write_limit = 4096;
+  }
+  UdpProxy proxy(relay.options());
+  GuiFixture gui(proxy.options());
+  gui.activate();
+  release_to_settled_preview(gui);
+  {
+    std::lock_guard lock(relay.serial.mutex);
+    relay.serial.keyboard_ack_delay = 40ms;
+  }
+  assert(gui.session.start_text_paste(std::string(20, 'a')));
+  assert(gui.wait(
+      [&] {
+        return gui.client->ascii_paste_text_snapshot().state ==
+               kvmux::relay::PasteUploadState::executing;
+      },
       5000ms));
+  proxy.drop_server_challenge = true;
+  gui.run_for(400ms);
+  const auto progress = gui.session.text_paste_progress();
+  assert(progress.error == TextPasteError::canceled);
+  assert(progress.cancel_reason == PasteCancelReason::link_lost);
+  assert(!gui.session.snapshot().control.release_confirmed);
   gui.session.release_control();
 }
 
@@ -502,6 +559,9 @@ void run_chunked_ascii_paste_loopback(const char* jpeg, const char*) {
 void run_paste_keepalive_blackholed_status(const char* jpeg, const char*) {
   paste_keepalive_survives_blackholed_server_status_test(jpeg);
 }
+void run_paste_challenge_gap_cancels(const char* jpeg, const char*) {
+  paste_challenge_gap_cancels_test(jpeg);
+}
 void run_hevc(const char*, const char* hevc) { hevc_test(hevc); }
 void run_input_recovery(const char* jpeg, const char*) {
   input_recovery_test(jpeg);
@@ -517,6 +577,7 @@ int main(int argc, char** argv) {
                run_chunked_ascii_paste_loopback},
       TestCase{"paste_keepalive_blackholed_status",
                run_paste_keepalive_blackholed_status},
+      TestCase{"paste_challenge_gap_cancels", run_paste_challenge_gap_cancels},
       TestCase{"hevc", run_hevc},
       TestCase{"input_recovery", run_input_recovery},
   };

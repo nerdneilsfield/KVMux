@@ -70,11 +70,20 @@ struct Ch9329ControlSink::Impl {
     worker = std::thread([this] { run(); });
   }
 
+  // Caller holds mutex. The first reason sticks for the life of this job.
+  void note_paste_reason_locked(PasteCancelReason reason) {
+    if (reason == PasteCancelReason::none ||
+        paste.cancel_reason != PasteCancelReason::none)
+      return;
+    if (paste.state == AsciiPasteState::idle && !pending_paste) return;
+    paste.cancel_reason = reason;
+  }
+
   // Caller holds mutex. A report already written must still drain its ACK.
   void cancel_paste_locked(AsciiPasteState state) {
     if (pending_paste) {
       paste = {state, pending_paste->job.gestures.size(), 0,
-               pending_paste->job_id};
+               pending_paste->job_id, paste.cancel_reason};
       pending_paste.reset();
     }
     if (paste.state == AsciiPasteState::active) {
@@ -95,6 +104,7 @@ struct Ch9329ControlSink::Impl {
     {
       std::lock_guard lock(mutex);
       stopping = true;
+      note_paste_reason_locked(PasteCancelReason::shutdown);
       invalidate_sync();
       queue.request_release();
     }
@@ -110,6 +120,7 @@ struct Ch9329ControlSink::Impl {
   }
 
   void fail(std::string message, bool reconnect) {
+    const bool timed_out = message.find("timed out") != std::string::npos;
     if (transaction) {
       const auto elapsed =
           std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -133,6 +144,8 @@ struct Ch9329ControlSink::Impl {
     clear_step = ClearStep::none;
     {
       std::lock_guard lock(mutex);
+      note_paste_reason_locked(timed_out ? PasteCancelReason::ack_timeout
+                                         : PasteCancelReason::device_fault);
       cancel_paste_locked(AsciiPasteState::failed);
       keyboard.clear();
       buttons = 0;
@@ -378,6 +391,7 @@ struct Ch9329ControlSink::Impl {
       if (!usb_ready) {
         std::lock_guard lock(mutex);
         invalidate_sync();
+        note_paste_reason_locked(PasteCancelReason::link_lost);
         cancel_paste_locked(AsciiPasteState::canceled);
         queue.request_release();
         status.epoch = queue.epoch();
@@ -532,6 +546,7 @@ struct Ch9329ControlSink::Impl {
         release_requested = true;
       }
       if (control_active && now - heartbeat > kHeartbeatTimeout) {
+        note_paste_reason_locked(PasteCancelReason::ui_stall);
         control_active = false;
         invalidate_sync();
         queue.request_release();
@@ -660,6 +675,8 @@ struct Ch9329ControlSink::Impl {
             transaction->written, transaction->bytes.size());
         transaction->stalled = true;
         std::lock_guard lock(mutex);
+        if (transaction->ascii_paste)
+          note_paste_reason_locked(PasteCancelReason::ack_timeout);
         invalidate_sync();
         queue.request_release();
         status.epoch = queue.epoch();
@@ -691,8 +708,9 @@ struct Ch9329ControlSink::Impl {
             !input_sync && !sync_inflight && !ordinary_inflight &&
             queue.size() == 0 && !transaction;
         if (!owner_matches) {
+          note_paste_reason_locked(PasteCancelReason::link_lost);
           paste = {AsciiPasteState::canceled, request.job.gestures.size(), 0,
-                   request.job_id};
+                   request.job_id, paste.cancel_reason};
           pending_paste.reset();
         } else if (ready_for_paste) {
           paste = {AsciiPasteState::active, request.job.gestures.size(), 0,
@@ -849,6 +867,7 @@ void Ch9329ControlSink::disconnect() noexcept {
   std::lock_guard lock(impl_->mutex);
   impl_->control_active = false;
   impl_->invalidate_sync();
+  impl_->note_paste_reason_locked(PasteCancelReason::user);
   impl_->cancel_paste_locked(AsciiPasteState::canceled);
   impl_->queue.request_release();
   impl_->status.epoch = impl_->queue.epoch();
@@ -990,7 +1009,7 @@ void Ch9329ControlSink::cancel_ascii_paste() noexcept {
   if (impl_->pending_paste) {
     impl_->paste = {AsciiPasteState::canceled,
                     impl_->pending_paste->job.gestures.size(), 0,
-                    impl_->pending_paste->job_id};
+                    impl_->pending_paste->job_id, impl_->paste.cancel_reason};
     impl_->pending_paste.reset();
   }
   if (impl_->paste.state == AsciiPasteState::active) {

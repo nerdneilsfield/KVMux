@@ -68,6 +68,25 @@ Targets：`src/input/input_router.*`、`src/app/kvm_session.*`、`src/control/se
 - Q6：`relay_client`、`relay_role`、`relay_session`、`input_router` 测试 `--repeat until-fail:20` 全部通过。
 - Q7：`--probe-control --serial /dev/does-not-exist --paste` 打印 FAIL open；P3 风格的 relay 自检 `--probe-control --relay 127.0.0.1 --paste` 在 CTest 中 PASS。macOS 硬件上的 `--paste` 结果由用户运行，之前标为未验证。
 
+Status: 完成（2026-11-13）。T2 未开始。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。
+- Q1：`paste_cancel` 中画面暂停后，粘贴以 `canceled/video_stale` 结束，epoch 改变且 `release_confirmed` 最终为真（链路仍在，走公共释放）。
+- Q2：`paste_challenge_gap_cancels` 在 executing 后丢弃服务端 challenge 400 ms，结果 `canceled/link_lost`，`release_confirmed` 为假。该用例含在 `relay_client` 的 20 次重复里。
+- Q3：`input_router` 中粘贴期间重复和抬起不取消、不提交；按下 `key_press` 且不提交按键。画面变旧为 `video_stale`，`release_confirmed=false` 为 `link_lost`。
+- Q4：本地扣住 0x02 ACK。约 100 ms stall 时把原因记为 `ack_timeout`，700 ms 时粘贴已是 `canceled/ack_timeout` 且 `release_confirmed` 仍为假。stall 和 500 ms 硬超时都没有放宽。
+- Q5：本地 FakeSerial 上 4096 字节可打印 ASCII 完成，错误和取消原因都是 `none`。一次实测约 18.5 s，`paste_cancel` 在 60 s 时限内通过。
+- Q6：`ctest --preset linux-debug --repeat until-fail:20 -R '^(relay_client|relay_role|relay_session|input_router)$'` 退出码 0。四个测试各 20/20，实测约 485 s。
+- Q7：`probe_cli` 通过。不存在的串口加 `--paste` 在 open 失败，没有 paste 阶段行。relay `--paste` 为 `[PASS] paste`、`result=completed`、`reason=none`。未传 `--paste` 不打印 paste 行。macOS `--paste` 未验证。
+- `make test`：29/29 通过，实测约 100 s。
+- `make lint` 停在已知基线：`tests/codec_startup_fallback_test.cpp:21` 的 format-check，因此没有继续跑后面的目标。单独的 `make cppcheck` 只报已知的 `src/network/relay_server.cpp:566` `identicalConditionAfterEarlyExit`。单独的 `make clang-tidy` 退出码 0。这两处都没有当作本次缺陷去改。
+- `chunked_ascii_paste_loopback`：一次失败的计数是 before=4、after=1927、expected=1928。报文里有 961 次按下和 961 次抬起，少的是释放阶段的那一帧键盘报告。完成等待接受了释放前仍然为真的 `release_confirmed`。断言没有放宽。等待改为释放之后发布的新 epoch，并且状态回到 ready。随后单独 5/5，Q6 里 `relay_client` 20/20。
+- `paste_keepalive_blackholed_status`：先释放到已稳定的 Preview，再把键盘 ACK 延迟设为 40 ms（释放清键本身也是 0x02，不能在释放完成前打开延迟）。20 个字符在 750 ms 黑洞期间保持服务端粘贴为 active，`keepalives_sent > 0`，之后 Completed。
+- 偏差：本地 `PasteCancelReason` 走粘贴快照和 router，不走线上枚举。客户端发出的 `PasteCancel` 仍是线上 `user`。线上枚举未改。router 保留先发生的原因；UI 读 router 的结果。从未开始的粘贴不打结束日志。
+- 粘贴结束打一行 info：结果、原因、已发送字节/总字节、耗时。不记录粘贴文本。自检固定串可以出现在 probe 输出里。未改 `flush_on`。
+
 ### T2：只在需要时上传，统计只记新帧，日志刷新降级
 
 Targets：`src/app/main.cpp`、`src/render/video_renderer.*`、`src/support/diagnostics.cpp`。
@@ -208,4 +227,4 @@ T1 → T2 → T3 → T4 → T5 → T5b → T6。T1、T2 各自独立提交。T1 
 
 ## 进度
 
-尚未开始。
+T1 完成。T2 尚未开始。

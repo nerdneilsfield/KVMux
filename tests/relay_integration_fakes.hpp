@@ -55,7 +55,8 @@ struct UdpProxy {
   kvmux::udp::Socket control, video, backend;
   kvmux::udp::Endpoint server_control, server_video;
   std::optional<kvmux::udp::Endpoint> client;
-  std::atomic<bool> blackout{}, drop_server_kcp{}, done{};
+  std::atomic<bool> blackout{}, drop_server_kcp{}, drop_server_challenge{},
+      done{};
   std::atomic<unsigned> drop_welcome{}, drop_ready{};
   std::atomic<bool> wrong_source_only{}, wrong_tuple_only{};
   std::atomic<std::uint64_t> session_id{}, challenges{}, proofs{}, media{},
@@ -106,7 +107,10 @@ struct UdpProxy {
             --drop_welcome;
             continue;
           }
-          if (envelope->kind == Kind::challenge) ++challenges;
+          if (envelope->kind == Kind::challenge) {
+            ++challenges;
+            if (drop_server_challenge) continue;
+          }
           if (envelope->kind == Kind::media) {
             ++media;
             std::uint64_t sequence{};

@@ -201,6 +201,43 @@ struct RelayClient::Impl {
     }
     if (paste->snapshot.state == PasteUploadState::executing)
       paste->bytes.clear();
+    if (!previous.terminal() && paste->snapshot.terminal())
+      note_wire_terminal_reason();
+  }
+  void note_paste_reason(PasteCancelReason reason) {
+    if (!paste || reason == PasteCancelReason::none ||
+        paste->snapshot.cancel_reason != PasteCancelReason::none)
+      return;
+    paste->snapshot.cancel_reason = reason;
+  }
+  void note_wire_terminal_reason() {
+    if (!paste || paste->snapshot.cancel_reason != PasteCancelReason::none)
+      return;
+    PasteCancelReason local = PasteCancelReason::none;
+    switch (paste->snapshot.reason) {
+      case wire::PasteStatusReason::serial:
+        local = PasteCancelReason::device_fault;
+        break;
+      case wire::PasteStatusReason::proof:
+        local = PasteCancelReason::video_stale;
+        break;
+      case wire::PasteStatusReason::deadline:
+      case wire::PasteStatusReason::session:
+        local = PasteCancelReason::link_lost;
+        break;
+      case wire::PasteStatusReason::canceled:
+        local = PasteCancelReason::user;
+        break;
+      default:
+        break;
+    }
+    if (local == PasteCancelReason::none &&
+        paste->snapshot.state == PasteUploadState::expired)
+      local = PasteCancelReason::link_lost;
+    else if (local == PasteCancelReason::none &&
+             paste->snapshot.state == PasteUploadState::rejected)
+      local = PasteCancelReason::device_fault;
+    note_paste_reason(local);
   }
   void abandon_paste(PasteUploadState state, wire::PasteStatusReason reason) {
     if (!paste) return;
@@ -219,6 +256,7 @@ struct RelayClient::Impl {
     std::lock_guard lock(mutex);
     stopped = true;
     suspend();
+    note_paste_reason(PasteCancelReason::link_lost);
     abandon_paste(PasteUploadState::expired, wire::PasteStatusReason::session);
     active = false;
     control.state = ControlConnectionState::disconnected;
@@ -536,6 +574,7 @@ struct RelayClient::Impl {
                   paste->snapshot.state == PasteUploadState::executing ||
                   paste->snapshot.state == PasteUploadState::preparing);
           if (paste_action == PasteLifecycleAction::abandon_owner) {
+            note_paste_reason(PasteCancelReason::link_lost);
             abandon_paste(PasteUploadState::canceled,
                           wire::PasteStatusReason::canceled);
             if (intent) {
@@ -543,6 +582,12 @@ struct RelayClient::Impl {
               cancel_inflight = true;
             }
           } else if (paste_action == PasteLifecycleAction::cancel_current) {
+            PasteCancelReason why = PasteCancelReason::link_lost;
+            if (gui_seen && now - progress >= 250ms)
+              why = PasteCancelReason::ui_stall;
+            else if (!presented_recent(now))
+              why = PasteCancelReason::video_stale;
+            note_paste_reason(why);
             paste->cancel_pending = true;
             paste->snapshot.state = PasteUploadState::canceled;
             paste->snapshot.reason = wire::PasteStatusReason::canceled;
@@ -727,6 +772,7 @@ struct RelayClient::Impl {
             if (now - paste_keepalive_at >= 100ms &&
                 submit(wire::PasteKeepalive{job.snapshot.transaction_id})) {
               paste_keepalive_at = now;
+              ++job.snapshot.keepalives_sent;
             }
           } else if (!job.snapshot.terminal() && ready(now) && active) {
             if (!job.begin_sent) {
@@ -1056,6 +1102,7 @@ void RelayClient::cancel_ascii_paste_text() noexcept {
   auto& p = *impl_;
   std::lock_guard lock(p.mutex);
   if (!p.paste || p.paste->snapshot.terminal()) return;
+  p.note_paste_reason(PasteCancelReason::user);
   p.paste->cancel_pending = true;
   p.paste->snapshot.state = PasteUploadState::canceled;
   p.paste->snapshot.reason = wire::PasteStatusReason::canceled;
@@ -1080,7 +1127,9 @@ AsciiPasteSnapshot NetworkControlSink::ascii_paste_snapshot() const {
     state = AsciiPasteState::canceled;
   else if (paste.state == PasteUploadState::rejected)
     state = AsciiPasteState::failed;
-  return {state, paste.total_bytes, paste.completed_bytes};
+  AsciiPasteSnapshot result{state, paste.total_bytes, paste.completed_bytes};
+  result.cancel_reason = paste.cancel_reason;
+  return result;
 }
 ControlSnapshot RelayClient::control_snapshot() const {
   auto& p = *impl_;

@@ -254,8 +254,34 @@ const char* text_paste_error(TextPasteError error) {
       return "Unsupported characters found.";
     case TextPasteError::too_long:
       return "Text is limited to 65536 characters.";
+    case TextPasteError::canceled:
+      return "粘贴已取消。";
   }
   return "Could not prepare text.";
+}
+const char* paste_cancel_message(PasteCancelReason reason) {
+  switch (reason) {
+    case PasteCancelReason::none:
+    case PasteCancelReason::user:
+      return "粘贴已取消。";
+    case PasteCancelReason::key_press:
+      return "检测到按键，粘贴已取消。";
+    case PasteCancelReason::focus_lost:
+      return "窗口失去焦点，粘贴已取消。";
+    case PasteCancelReason::video_stale:
+      return "画面中断，粘贴已取消。";
+    case PasteCancelReason::ui_stall:
+      return "界面无响应，粘贴已取消。";
+    case PasteCancelReason::link_lost:
+      return "控制链路中断，粘贴已取消。";
+    case PasteCancelReason::ack_timeout:
+      return "设备应答超时，粘贴已取消。";
+    case PasteCancelReason::device_fault:
+      return "控制设备故障，粘贴已取消。";
+    case PasteCancelReason::shutdown:
+      return "正在退出，粘贴已取消。";
+  }
+  return "粘贴已取消。";
 }
 const char* debug_text_paste_error(TextPasteError error) {
   switch (error) {
@@ -271,6 +297,8 @@ const char* debug_text_paste_error(TextPasteError error) {
       return "error-unsupported";
     case TextPasteError::too_long:
       return "error-too-long";
+    case TextPasteError::canceled:
+      return "canceled";
   }
   return "error-unknown";
 }
@@ -604,6 +632,7 @@ int main(int argc, char** argv) {
   std::array<char, 65537> text_paste_buffer{};
   std::size_t text_paste_removed = 0;
   TextPasteError paste_error = TextPasteError::none;
+  PasteCancelReason paste_cancel_reason = PasteCancelReason::none;
   std::size_t clipboard_loaded_bytes = 0, clipboard_loaded_characters = 0;
   std::vector<ImVec4> local_regions;
   FloatingMenuIcon menu_icon;
@@ -623,6 +652,7 @@ int main(int argc, char** argv) {
   ImVec2 region_start{}, region_end{};
   Rect displayed_video_rect{};
   bool paste_was_active = false, paste_cancelled = false;
+  bool paste_seen_active = false;
   bool local_ui_input_seen = false;
   std::string last_status;
   const auto confirm_region = [&] {
@@ -1243,6 +1273,16 @@ int main(int argc, char** argv) {
         scroll_sample_after.reset();
       }
     }
+    {
+      const auto paste = session->text_paste_progress();
+      if (paste.active) {
+        paste_seen_active = true;
+      } else if (paste_seen_active) {
+        paste_seen_active = false;
+        paste_error = paste.error;
+        paste_cancel_reason = paste.cancel_reason;
+      }
+    }
     if (debug) {
       const auto paste = session->text_paste_progress();
       const char* paste_status = debug_text_paste_error(paste.error);
@@ -1270,6 +1310,7 @@ int main(int argc, char** argv) {
           (snapshot.control.error.empty() ? "none" : "present") +
           " input=" + input_state(snapshot.input_state) +
           " paste=" + paste_status +
+          " paste-reason=" + paste_cancel_reason_name(paste.cancel_reason) +
           " paste-bytes=" + std::to_string(paste.source_bytes) +
           " paste-chars=" + std::to_string(paste.normalized_characters) +
           " paste-scheduled=" + std::to_string(paste.scheduled_gestures) + "/" +
@@ -1304,7 +1345,9 @@ int main(int argc, char** argv) {
       if (text_paste_removed)
         ImGui::Text("Removed unsupported characters: %zu", text_paste_removed);
       if (paste_error != TextPasteError::none) {
-        ImGui::TextWrapped("%s", text_paste_error(paste_error));
+        ImGui::TextWrapped("%s", paste_error == TextPasteError::canceled
+                                     ? paste_cancel_message(paste_cancel_reason)
+                                     : text_paste_error(paste_error));
         if (paste_error == TextPasteError::bare_carriage_return ||
             paste_error == TextPasteError::non_ascii ||
             paste_error == TextPasteError::unsupported) {
@@ -1315,6 +1358,7 @@ int main(int argc, char** argv) {
             std::snprintf(text_paste_buffer.data(), text_paste_buffer.size(),
                           "%s", filtered.text.c_str());
             paste_error = TextPasteError::none;
+            paste_cancel_reason = PasteCancelReason::none;
           }
           ImGui::SameLine();
         }
@@ -1326,6 +1370,7 @@ int main(int argc, char** argv) {
       if (ImGui::Button("Type ASCII")) {
         const auto result = session->start_text_paste(text_paste_buffer.data());
         paste_error = result.error;
+        paste_cancel_reason = result.cancel_reason;
         if (result) {
           text_paste_buffer.fill('\0');
           text_paste_removed = 0;
@@ -1337,6 +1382,7 @@ int main(int argc, char** argv) {
         text_paste_buffer.fill('\0');
         text_paste_removed = 0;
         paste_error = TextPasteError::none;
+        paste_cancel_reason = PasteCancelReason::none;
         ImGui::CloseCurrentPopup();
       }
       ImGui::SameLine();

@@ -41,7 +41,7 @@ void print_help(std::ostream& out) {
          "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
          "Probe control: --probe-control (--serial PORT [--baud 9600] |\n"
          "       --relay HOST [--control-port 17000]) [--keys] [--mouse]\n"
-         "       [--timeout-ms 5000]\n"
+         "       [--paste] [--timeout-ms 5000]\n"
          "Probe video: --probe-video HOST [--control-port 17000]\n"
          "       [--video-port 17001] [--seconds 5]\n"
          "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] "
@@ -332,6 +332,7 @@ int probe_control_command(int argc, char** argv) {
   int timeout_ms = 5000;
   bool keys = false;
   bool mouse = false;
+  bool paste = false;
   bool baud_seen = false;
   bool port_seen = false;
   for (int i = 2; i < argc; ++i) {
@@ -342,6 +343,10 @@ int probe_control_command(int argc, char** argv) {
     }
     if (key == "--mouse") {
       mouse = true;
+      continue;
+    }
+    if (key == "--paste") {
+      paste = true;
       continue;
     }
     std::string_view value;
@@ -397,6 +402,7 @@ int probe_control_command(int argc, char** argv) {
   kvmux::ProbeControlOptions options;
   options.keys = keys;
   options.mouse = mouse;
+  options.paste = paste;
   options.timeout_ms = timeout_ms;
   options.baud = baud;
   options.control_port = control_port;

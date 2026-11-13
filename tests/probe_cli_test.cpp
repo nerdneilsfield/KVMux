@@ -143,6 +143,13 @@ void missing_serial_fails_open(const char* binary) {
   require_code(absent, 1);
   require_contains(absent, "[FAIL] open");
   require_contains(absent, "设备不存在或已拔出");
+
+  const auto paste_missing = run_relay(
+      binary,
+      {"--probe-control", "--serial", "/dev/does-not-exist", "--paste"});
+  require_code(paste_missing, 1);
+  require_contains(paste_missing, "[FAIL] open");
+  check(paste_missing.output.find("paste stage=") == std::string::npos);
 }
 
 void control_relay_probe_passes(const char* binary) {
@@ -165,6 +172,26 @@ void control_relay_probe_passes(const char* binary) {
   require_contains(result, "无画面，CLI 自行声明新鲜，仅用于自检");
   check(result.output.find("[FAIL]") == std::string::npos);
   check(result.output.find("[SKIP]") == std::string::npos);
+  check(result.output.find("paste stage=") == std::string::npos);
+  check(result.output.find("[PASS] paste") == std::string::npos);
+}
+
+void control_relay_paste_passes(const char* binary) {
+  FakeSerial serial;
+  Ch9329ControlSink sink(serial.io());
+  sink.connect("fake", 115200);
+  check(until([&] { return sink.snapshot().release_confirmed; }));
+  RelayServer server(nullptr, &sink);
+  start_server(server);
+  const auto result = run_relay(
+      binary, {"--probe-control", "--relay", "127.0.0.1", "--control-port",
+               std::to_string(server.control_port()), "--paste"});
+  require_code(result, 0);
+  require_contains(result, "[PASS] paste");
+  require_contains(result, "result=completed");
+  require_contains(result, "reason=none");
+  require_contains(result, "paste stage=active");
+  check(result.output.find("[FAIL]") == std::string::npos);
 }
 
 void video_relay_probe_counts_frames(const char* binary, const char* jpeg) {
@@ -203,6 +230,7 @@ int main(int argc, char** argv) {
   argument_errors_exit_2(argv[2]);
   missing_serial_fails_open(argv[2]);
   control_relay_probe_passes(argv[2]);
+  control_relay_paste_passes(argv[2]);
   video_probe_rejects_control_relay(argv[2]);
   video_relay_probe_counts_frames(argv[2], argv[1]);
   std::cout << "probe_cli: passed\n";

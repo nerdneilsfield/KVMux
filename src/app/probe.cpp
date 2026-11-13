@@ -14,6 +14,7 @@
 #include "control/ch341_usb.hpp"
 #include "control/control_event.hpp"
 #include "control/control_sink.hpp"
+#include "input/us_ascii_text.hpp"
 #include "video/capture/capture_source.hpp"
 
 namespace kvmux {
@@ -23,6 +24,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr auto kPulse = std::chrono::milliseconds(30);
 constexpr std::uint8_t kLeftShift = 0xE1;
+constexpr std::string_view kPasteProbe = "kvmux paste 0123456789\n";
 
 const char* state_name(ControlConnectionState state) {
   switch (state) {
@@ -314,6 +316,22 @@ PollResult send_and_wait(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
   }
 }
 
+const char* paste_state_name(AsciiPasteState state) {
+  switch (state) {
+    case AsciiPasteState::idle:
+      return "idle";
+    case AsciiPasteState::active:
+      return "active";
+    case AsciiPasteState::completed:
+      return "completed";
+    case AsciiPasteState::canceled:
+      return "canceled";
+    case AsciiPasteState::failed:
+      return "failed";
+  }
+  return "unknown";
+}
+
 std::string step_failure(const PollResult& result) {
   if (result.status == Poll::fault || result.snap.error.empty())
     return failure_text(result.snap, result.status != Poll::fault);
@@ -390,6 +408,68 @@ int probe_control(std::ostream& out, ControlSink& sink,
     if (left.status != Poll::ok)
       return fail_step(out, sink, "mouse", step_failure(left));
     step_line(out, "PASS", "mouse", "relative +20,-20 acknowledged");
+  }
+
+  if (options.paste) {
+    if (const int failed = require_sync("paste")) return failed;
+    std::vector<std::uint8_t> normalized;
+    auto mapped = map_us_ascii_text(kPasteProbe, &normalized);
+    if (!mapped) return fail_step(out, sink, "paste", "mapping failed");
+    const auto paste_started = Clock::now();
+    SubmitResult submitted = SubmitResult::not_ready;
+    if (options.serial) {
+      AsciiPasteJob job;
+      job.gestures.reserve(mapped.gestures.size());
+      for (auto& gesture : mapped.gestures)
+        job.gestures.push_back(std::move(gesture.edges));
+      submitted = sink.start_ascii_paste(std::move(job));
+    } else {
+      submitted = sink.start_ascii_paste_text(std::move(normalized));
+    }
+    if (submitted != SubmitResult::accepted)
+      return fail_step(out, sink, "paste", "not started");
+    const auto deadline =
+        Clock::now() + std::chrono::milliseconds(options.timeout_ms);
+    AsciiPasteSnapshot last;
+    AsciiPasteState seen = AsciiPasteState::idle;
+    std::size_t seen_done = static_cast<std::size_t>(-1);
+    for (;;) {
+      pulse();
+      last = sink.ascii_paste_snapshot();
+      if (last.state != seen || last.completed_gestures != seen_done) {
+        seen = last.state;
+        seen_done = last.completed_gestures;
+        out << "paste stage=" << paste_state_name(last.state)
+            << " sent=" << last.completed_gestures << "/" << last.total_gestures
+            << " reason=" << paste_cancel_reason_name(last.cancel_reason)
+            << '\n';
+        out.flush();
+      }
+      if (last.state == AsciiPasteState::completed ||
+          last.state == AsciiPasteState::canceled ||
+          last.state == AsciiPasteState::failed)
+        break;
+      if (Clock::now() >= deadline)
+        return fail_step(out, sink, "paste", "timed out");
+      std::this_thread::sleep_for(kPulse);
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - paste_started);
+    const bool ok = last.state == AsciiPasteState::completed &&
+                    last.cancel_reason == PasteCancelReason::none;
+    spdlog::info(
+        "paste finished result={} reason={} sent_bytes={} total_bytes={} "
+        "elapsed_ms={}",
+        paste_state_name(last.state),
+        paste_cancel_reason_name(last.cancel_reason), last.completed_gestures,
+        last.total_gestures, elapsed.count());
+    const std::string detail =
+        std::string("result=") + paste_state_name(last.state) +
+        " reason=" + paste_cancel_reason_name(last.cancel_reason) +
+        " sent=" + std::to_string(last.completed_gestures) + "/" +
+        std::to_string(last.total_gestures);
+    if (!ok) return fail_step(out, sink, "paste", detail);
+    step_line(out, "PASS", "paste", detail);
   }
 
   const auto started = Clock::now();

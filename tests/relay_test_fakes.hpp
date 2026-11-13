@@ -1,8 +1,10 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <mutex>
+#include <vector>
 
 #include "control/ch9329_protocol.hpp"
 #include "network/relay_server.hpp"
@@ -15,7 +17,14 @@ struct FakeSerial {
   bool answer{true};
   bool hold_mouse_ack{};
   bool hold_keyboard_ack{};
+  // Delays only command 0x02. Handshake info/config and mouse stay immediate.
+  std::chrono::milliseconds keyboard_ack_delay{};
   std::deque<std::uint8_t> held_ack;
+  struct DelayedBytes {
+    std::chrono::steady_clock::time_point ready;
+    std::vector<std::uint8_t> bytes;
+  };
+  std::deque<DelayedBytes> delayed;
   std::deque<std::uint8_t> incoming;
   kvmux::ch9329::Parser requests;
   std::vector<kvmux::ch9329::Frame> received;
@@ -55,14 +64,21 @@ struct FakeSerial {
               response.data[1] = 0x80;
             }
             const auto encoded = kvmux::ch9329::encode(response);
-            auto& destination =
-                (hold_mouse_ack &&
-                 (request.command == 0x04U || request.command == 0x05U)) ||
-                        (hold_keyboard_ack && request.command == 0x02U)
-                    ? held_ack
-                    : incoming;
-            destination.insert(destination.end(), encoded.begin(),
-                               encoded.end());
+            if (keyboard_ack_delay.count() > 0 && request.command == 0x02U &&
+                !hold_keyboard_ack) {
+              delayed.push_back(
+                  {std::chrono::steady_clock::now() + keyboard_ack_delay,
+                   encoded});
+            } else {
+              auto& destination =
+                  (hold_mouse_ack &&
+                   (request.command == 0x04U || request.command == 0x05U)) ||
+                          (hold_keyboard_ack && request.command == 0x02U)
+                      ? held_ack
+                      : incoming;
+              destination.insert(destination.end(), encoded.begin(),
+                                 encoded.end());
+            }
           }
           return static_cast<std::ptrdiff_t>(count);
         },
@@ -70,6 +86,12 @@ struct FakeSerial {
           std::lock_guard lock(mutex);
           if (!opened) {
             return -1;
+          }
+          const auto now = std::chrono::steady_clock::now();
+          while (!delayed.empty() && delayed.front().ready <= now) {
+            incoming.insert(incoming.end(), delayed.front().bytes.begin(),
+                            delayed.front().bytes.end());
+            delayed.pop_front();
           }
           const auto count = std::min(bytes.size(), incoming.size());
           for (std::size_t i = 0; i < count; ++i) {
