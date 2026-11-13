@@ -1,7 +1,10 @@
 #include "app/kvm_session.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <array>
+#include <string>
 #include <utility>
 
 namespace kvmux {
@@ -12,6 +15,59 @@ constexpr auto kKeepAliveInterval = std::chrono::seconds(60);
 constexpr std::array kReconnectBackoff{
     std::chrono::milliseconds(500), std::chrono::milliseconds(1000),
     std::chrono::milliseconds(2000), std::chrono::milliseconds(5000)};
+
+const char* capture_state_name(CaptureState state) {
+  switch (state) {
+    case CaptureState::stopped:
+      return "stopped";
+    case CaptureState::starting:
+      return "starting";
+    case CaptureState::streaming:
+      return "streaming";
+    case CaptureState::stopping:
+      return "stopping";
+    case CaptureState::permission_denied:
+      return "permission-denied";
+    case CaptureState::fault:
+      return "fault";
+  }
+  return "unknown";
+}
+
+const char* device_name(const DeviceInfo& device) {
+  return device.display_name.empty() ? "(unnamed)"
+                                     : device.display_name.c_str();
+}
+
+std::string capture_mode_label(const CaptureMode& mode) {
+  return std::to_string(mode.width) + "x" + std::to_string(mode.height) +
+         " @ " + std::to_string(mode.frame_rate.numerator) + "/" +
+         std::to_string(mode.frame_rate.denominator) + " " +
+         (mode.device_format_name.empty() ? "?" : mode.device_format_name);
+}
+
+void log_capture_devices(const std::vector<DeviceInfo>& devices) {
+  if (!spdlog::should_log(spdlog::level::debug)) return;
+  std::string names;
+  for (const auto& device : devices) {
+    if (!names.empty()) names += "; ";
+    names += device_name(device);
+  }
+  spdlog::debug("Capture devices: count={} result={} names=[{}]",
+                devices.size(), devices.empty() ? "empty" : "ok", names);
+}
+
+void log_capture_modes(const std::vector<CaptureMode>& modes) {
+  if (!spdlog::should_log(spdlog::level::debug)) return;
+  std::string listed;
+  for (const auto& mode : modes) {
+    if (!listed.empty()) listed += "; ";
+    listed += capture_mode_label(mode);
+  }
+  spdlog::debug("Capture modes: count={} result={} modes=[{}]", modes.size(),
+                modes.empty() ? "empty" : "ok", listed);
+}
+
 }  // namespace
 
 KvmSession::KvmSession(const std::shared_ptr<Diagnostics>& diagnostics)
@@ -68,8 +124,18 @@ void KvmSession::note_session_error(std::string error) {
 }
 
 std::future<std::vector<DeviceInfo>> KvmSession::enumerate_capture_devices() {
-  auto task = std::make_shared<std::packaged_task<std::vector<DeviceInfo>()>>(
-      [this] { return capture_->enumerate_devices(); });
+  auto task =
+      std::make_shared<std::packaged_task<std::vector<DeviceInfo>()>>([this] {
+        try {
+          auto devices = capture_->enumerate_devices();
+          log_capture_devices(devices);
+          return devices;
+        } catch (const std::exception& error) {
+          spdlog::debug("Capture devices: count=0 result=failed error={}",
+                        error.what());
+          throw;
+        }
+      });
   auto future = task->get_future();
   {
     std::lock_guard lock(mutex_);
@@ -83,7 +149,15 @@ std::future<std::vector<CaptureMode>> KvmSession::enumerate_capture_modes(
     std::string stable_id) {
   auto task = std::make_shared<std::packaged_task<std::vector<CaptureMode>()>>(
       [this, stable_id = std::move(stable_id)] {
-        return capture_->enumerate_modes(stable_id);
+        try {
+          auto modes = capture_->enumerate_modes(stable_id);
+          log_capture_modes(modes);
+          return modes;
+        } catch (const std::exception& error) {
+          spdlog::debug("Capture modes: count=0 result=failed error={}",
+                        error.what());
+          throw;
+        }
       });
   auto future = task->get_future();
   {
@@ -97,26 +171,47 @@ std::future<std::vector<CaptureMode>> KvmSession::enumerate_capture_modes(
 bool KvmSession::select_capture(const DeviceInfo& device,
                                 const CaptureMode& mode) {
   if (!preview_only() || mode.device_id != device.stable_id ||
-      device.stable_id.empty())
+      device.stable_id.empty()) {
+    const char* reason = "id-mismatch";
+    if (!preview_only())
+      reason = "not-preview";
+    else if (device.stable_id.empty())
+      reason = "empty-id";
+    spdlog::debug("Capture start: device={} mode={} result=rejected reason={}",
+                  device_name(device), capture_mode_label(mode), reason);
     return false;
+  }
   request_release(PasteCancelReason::video_stale);
+  bool rejected = false;
   {
     std::lock_guard lock(mutex_);
-    if (shutting_down_) return false;
-    selected_device_ = device;
-    selected_mode_ = mode;
-    requested_mode_ = mode;
-    command_ = CaptureCommand::start;
-    video_state_ = SessionVideoState::stopping;
-    session_error_.clear();
-    video_fresh_ = false;
-    last_sample_arrival_ = {};
+    if (shutting_down_) {
+      rejected = true;
+    } else {
+      selected_device_ = device;
+      selected_mode_ = mode;
+      requested_mode_ = mode;
+      command_ = CaptureCommand::start;
+      video_state_ = SessionVideoState::stopping;
+      session_error_.clear();
+      video_fresh_ = false;
+      last_sample_arrival_ = {};
+    }
+  }
+  if (rejected) {
+    spdlog::debug(
+        "Capture start: device={} mode={} result=rejected "
+        "reason=shutting-down",
+        device_name(device), capture_mode_label(mode));
+    return false;
   }
   {
     std::lock_guard lock(input_mutex_);
     input_.set_video_fresh(false);
   }
   wake_.notify_one();
+  spdlog::debug("Capture start: device={} mode={} result=accepted",
+                device_name(device), capture_mode_label(mode));
   return true;
 }
 
@@ -553,7 +648,12 @@ void KvmSession::capture_loop() {
           video_state_ = SessionVideoState::connecting;
         }
         capture_->start(*requested);
-        const auto generation = capture_->snapshot().generation;
+        const auto started = capture_->snapshot();
+        spdlog::debug("Capture start issued: mode={} state={} error={}",
+                      capture_mode_label(*requested),
+                      capture_state_name(started.state),
+                      started.error.empty() ? "none" : started.error);
+        const auto generation = started.generation;
         video_.set_generation(generation);
         video_.start(generation);
         retry_index = 0;
@@ -580,6 +680,7 @@ void KvmSession::capture_loop() {
     if (now < retry_at) continue;
 
     const auto devices = capture_->enumerate_devices();
+    log_capture_devices(devices);
     std::size_t exact_matches = 0;
     for (const auto& candidate : devices) {
       if (!candidate.weak_match && candidate.stable_id == device->stable_id)
@@ -592,7 +693,12 @@ void KvmSession::capture_loop() {
     }
     capture_->stop();
     capture_->start(*mode);
-    const auto generation = capture_->snapshot().generation;
+    const auto restarted = capture_->snapshot();
+    spdlog::debug("Capture start issued: mode={} state={} error={}",
+                  capture_mode_label(*mode),
+                  capture_state_name(restarted.state),
+                  restarted.error.empty() ? "none" : restarted.error);
+    const auto generation = restarted.generation;
     video_.set_generation(generation);
     retry_at = Clock::time_point::max();
   }

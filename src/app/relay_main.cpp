@@ -588,6 +588,7 @@ int main(int argc, char** argv) {
                                           serial_port, baud)) {
       return 2;
     }
+    const kvmux::ConsoleLoggingSession logging_session;
     return run(static_cast<int>(arguments.size()), arguments.data());
   } catch (const std::exception& error) {
     std::cerr << "kvmux-relay: " << error.what() << '\n';

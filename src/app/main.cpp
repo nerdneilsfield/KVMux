@@ -99,6 +99,26 @@ bool same_saved_mode(const CaptureMode& saved, const CaptureMode& listed) {
          saved.delivered_format == listed.delivered_format;
 }
 
+const char* listed_device_name(const ConnectionForm& form,
+                               std::string_view stable_id) {
+  for (const auto& device : form.devices) {
+    if (device.stable_id == stable_id) {
+      return device.display_name.empty() ? "(unnamed)"
+                                         : device.display_name.c_str();
+    }
+  }
+  return "(unknown device)";
+}
+
+void request_capture_modes(
+    std::optional<std::future<std::vector<CaptureMode>>>& pending,
+    KvmSession& session, const ConnectionForm& form, std::string stable_id,
+    const char* screen) {
+  spdlog::debug("Capture enumerate modes requested: device={} screen={}",
+                listed_device_name(form, stable_id), screen);
+  pending = session.enumerate_capture_modes(std::move(stable_id));
+}
+
 void store_connection(Config& config, const ConnectionForm& form) {
   config.video_source = form.video_source;
   config.control_target = form.control_target;
@@ -171,6 +191,7 @@ int main(int argc, char** argv) {
     }
   }
   if (!configure_console_logging(debug, log_file, "kvmux")) return 2;
+  const ConsoleLoggingSession logging_session;
   if (help) {
     std::cout
         << "Usage: kvmux [--debug] [--log-file PATH] [--help]\n"
@@ -481,10 +502,12 @@ int main(int argc, char** argv) {
           disconnect_relay();
           break;
         case UiActionKind::enumerate_modes:
-          modes_future = session->enumerate_capture_modes(item.text);
+          request_capture_modes(modes_future, *session, ui.connection,
+                                item.text, "primary");
           break;
         case UiActionKind::enumerate_screen2_modes:
-          modes2_future = session->enumerate_capture_modes(item.text);
+          request_capture_modes(modes2_future, *session, ui.connection,
+                                item.text, "2");
           break;
         case UiActionKind::start_preview:
           (void)session->select_capture(
@@ -581,17 +604,27 @@ int main(int argc, char** argv) {
       }
       if (matched_device >= 0) {
         form.selected_device = matched_device;
-        modes_future = session->enumerate_capture_modes(
-            form.devices[static_cast<std::size_t>(matched_device)].stable_id);
+        request_capture_modes(
+            modes_future, *session, form,
+            form.devices[static_cast<std::size_t>(matched_device)].stable_id,
+            "primary");
         restore_mode = true;
       } else if (restoring_device) {
         form.open_connections = true;
-      } else if (!restoring_device &&
-                 (form.selected_device < 0 ||
-                  form.selected_device >=
-                      static_cast<int>(form.devices.size()))) {
+        spdlog::debug("Capture restore: saved device not listed");
+      } else if (form.selected_device < 0 ||
+                 form.selected_device >=
+                     static_cast<int>(form.devices.size())) {
         form.selected_device = form.devices.empty() ? -1 : 0;
+        if (form.selected_device >= 0 && form.modes.empty() && !modes_future)
+          request_capture_modes(
+              modes_future, *session, form,
+              form.devices[static_cast<std::size_t>(form.selected_device)]
+                  .stable_id,
+              "primary");
       }
+      spdlog::debug("Capture devices applied: count={} selected={}",
+                    form.devices.size(), form.selected_device);
     }
     if (modes_future && modes_future->wait_for(std::chrono::seconds(0)) ==
                             std::future_status::ready) {
@@ -625,9 +658,18 @@ int main(int argc, char** argv) {
         drop_primary_texture();
       } else if (restoring_mode) {
         form.open_connections = true;
+        form.selected_mode = form.modes.empty() ? -1 : 0;
+        spdlog::debug(
+            "Capture restore: saved mode {}x{} @ {}/{} not listed; selected={}",
+            config.capture_mode.width, config.capture_mode.height,
+            config.capture_mode.frame_rate.numerator,
+            config.capture_mode.frame_rate.denominator, form.selected_mode);
       } else {
         form.selected_mode = form.modes.empty() ? -1 : 0;
       }
+      spdlog::debug(
+          "Capture modes applied: count={} selected={} screen=primary",
+          form.modes.size(), form.selected_mode);
     }
     if (form.control_target == ControlTarget::local_serial &&
         form.open_connections &&
@@ -659,6 +701,8 @@ int main(int argc, char** argv) {
       form.modes2 = modes2_future->get();
       form.selected_mode2 = form.modes2.empty() ? -1 : 0;
       modes2_future.reset();
+      spdlog::debug("Capture modes applied: count={} selected={} screen=2",
+                    form.modes2.size(), form.selected_mode2);
     }
     if (session2) {
       session2->tick();

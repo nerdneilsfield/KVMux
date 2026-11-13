@@ -98,13 +98,30 @@ class Diagnostics {
 
 // Stderr, and when `log_file` is set the same logger also appends to a
 // rotating file (10 MiB, three retained files). Both sinks use one level and
-// one pattern. Debug is opt-in. Returns false when the file cannot be opened;
-// the process then exits 2. `serial_port` and `baud` are argument text, or
-// empty when those arguments are absent. An info line records version, OS,
-// and those arguments. The repository does not embed a commit id.
+// one pattern. Debug is opt-in. Warnings flush immediately. Debug is also
+// flushed every second and by shutdown_console_logging(). Returns false when
+// the file cannot be opened; the process then exits 2. `serial_port` and
+// `baud` are argument text, or empty when those arguments are absent. An info
+// line records version, OS, and those arguments. The repository does not
+// embed a commit id.
 bool configure_console_logging(bool debug, std::string_view log_file = {},
                                std::string_view program = {},
                                std::string_view serial_port = {},
                                std::string_view baud = {});
+
+// Flushes the default logger, then spdlog::shutdown(). Safe to call twice.
+void shutdown_console_logging() noexcept;
+
+// Destructor calls shutdown_console_logging(). Construct after a successful
+// configure_console_logging() so every return path flushes.
+class ConsoleLoggingSession {
+ public:
+  ConsoleLoggingSession() = default;
+  ~ConsoleLoggingSession();
+  ConsoleLoggingSession(const ConsoleLoggingSession&) = delete;
+  ConsoleLoggingSession& operator=(const ConsoleLoggingSession&) = delete;
+  ConsoleLoggingSession(ConsoleLoggingSession&&) = delete;
+  ConsoleLoggingSession& operator=(ConsoleLoggingSession&&) = delete;
+};
 
 }  // namespace kvmux

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <mutex>
@@ -279,6 +280,7 @@ bool configure_console_logging(const bool debug,
   logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [thread %t] [%l] %v");
   logger->flush_on(spdlog::level::warn);
   spdlog::set_default_logger(std::move(logger));
+  spdlog::flush_every(std::chrono::seconds(1));
   spdlog::info("start program={} version={} os={} serial={} baud={}",
                program.empty() ? std::string_view("kvmux") : program,
                application_version(), operating_system_name(),
@@ -286,5 +288,24 @@ bool configure_console_logging(const bool debug,
                baud.empty() ? std::string_view("-") : baud);
   return true;
 }
+
+void shutdown_console_logging() noexcept {
+  try {
+    if (const auto logger = spdlog::default_logger()) logger->flush();
+  } catch (const std::exception& error) {
+    std::cerr << "log flush failed: " << error.what() << '\n';
+  } catch (...) {
+    std::cerr << "log flush failed\n";
+  }
+  try {
+    spdlog::shutdown();
+  } catch (const std::exception& error) {
+    std::cerr << "log shutdown failed: " << error.what() << '\n';
+  } catch (...) {
+    std::cerr << "log shutdown failed\n";
+  }
+}
+
+ConsoleLoggingSession::~ConsoleLoggingSession() { shutdown_console_logging(); }
 
 }  // namespace kvmux
