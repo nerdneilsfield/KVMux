@@ -18,7 +18,9 @@ class Decoder final : public VideoDecoder {
     ++software_submits;
     return {};
   }
-  CodecResult poll(VideoFrame&) override { return {CodecStatus::again, {}}; }
+  CodecResult poll(VideoFrame&) override {
+    return {CodecStatus::again, {}};
+  }
   CodecResult finish() override { return {}; }
   CodecResult reset() override { return {}; }
   void shutdown() noexcept override {}

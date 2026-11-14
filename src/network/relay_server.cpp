@@ -563,7 +563,9 @@ struct RelayServer::Impl {
       if (sink)
         actions(session.update_ascii_paste(sink->ascii_paste_snapshot(), now));
       actions(session.tick(now));
-      if (!kcp) continue;
+      // Paste update and tick() both report expiry through actions(), which
+      // resets this channel. The null test above does not cover that.
+      if (kcp.get() == nullptr) continue;
       if (sink) actions(session.update_control_snapshot(sink->snapshot(), now));
       // Serial progress status is coalesced after its state was sampled.
       if (sink && now - status_at >= 50ms) {
