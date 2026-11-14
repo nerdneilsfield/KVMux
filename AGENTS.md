@@ -54,12 +54,18 @@ decision in the relevant documentation.
   and Enter, starts only on an explicit user action, and sends paced, bounded
   events through the existing `InputRouter`/`ControlSink`. It must use the
   common cancel/release path and must not persist or log clipboard/text data.
-  Unicode and Wubi input are out of scope. The Host key is local-only and must
-  never reach the target.
+  Chinese text is in scope (decision 2026-11-15, after the first version
+  shipped) only as a second explicit opt-in engine that types Wubi codes as
+  ordinary scancodes into an input method the user has set up on the target.
+  It follows the same rules: user-started, paced, bounded, through
+  `InputRouter`/`ControlSink`, common cancel/release path, no logging or
+  persistence of text or its codes. Its design and prerequisites live in
+  `docs/plans/2026-11-15-chinese-paste.md`. Other Unicode input stays out of
+  scope. The Host key is local-only and must never reach the target.
 - Keep platform capture code in the three native adapters: Media Foundation on
   Windows, V4L2 on Linux, and AVFoundation in Objective-C++ files on macOS.
   Shared video, input, control, and UI code must not depend on native handles.
-- Do not implement excluded first-version features or speculative networking,
+- Do not implement features the design lists as out of scope, or speculative networking,
   plugin, media-graph, zero-copy, hardware-decoding, or second-renderer layers.
 
 ### Verification and delivery
