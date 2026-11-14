@@ -553,6 +553,11 @@ struct Ch9329ControlSink::Impl {
         status.epoch = queue.epoch();
         release_requested = true;
         status.state = ControlConnectionState::clearing;
+        if (status.error != "UI heartbeat expired") {
+          spdlog::debug(
+              "Control timeout: source=ui-heartbeat shown=\"UI heartbeat "
+              "expired\"");
+        }
         status.error = "UI heartbeat expired";
       }
     }
@@ -655,12 +660,13 @@ struct Ch9329ControlSink::Impl {
       if (elapsed >= kHardTimeout) {
         spdlog::debug(
             "CH9329 transaction timeout: kind={} source_sequence={} epoch={} "
-            "command=0x{:02x} elapsed_ms={} written={} total={}",
+            "command=0x{:02x} elapsed_ms={} written={} total={} shown={}",
             transaction->kind, transaction->source_sequence, transaction->epoch,
             transaction->frame.command,
             std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)
                 .count(),
-            transaction->written, transaction->bytes.size());
+            transaction->written, transaction->bytes.size(),
+            "CH9329 transaction timed out; release is unconfirmed");
         update_snapshot([](auto& value) { ++value.timeout_count; });
         if (diagnostics) diagnostics->record_timeout();
         fail("CH9329 transaction timed out; release is unconfirmed", true);

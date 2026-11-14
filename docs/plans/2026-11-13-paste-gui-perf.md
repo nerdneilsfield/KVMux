@@ -257,6 +257,22 @@ Targets：T4 的文件、`src/support/config.hpp`、`src/support/config.cpp`、`
 
 T1 → T2 → T3 → T4 → T5 → T5b → T6。T1、T2 各自独立提交。T1 完成后先请用户在 macOS 上运行 `--probe-control --serial ch341-usb:... --paste` 和 GUI 粘贴，带 `--debug --log-file`，据日志里的取消原因决定 T3 的重点；T4 起不依赖该结果，可继续。每个任务完成后：`make lint`、`make test`，按 AGENTS 要求记录 Evidence。
 
+## Connect 超时排查
+
+Status: 完成（2026-11-13）。只补充能区分来源的 debug 日志。超时门槛、界面文案和状态转移都没有改。
+
+GUI 没有名为 connect timeout 的字符串。点 Connect 之后，用户能看见的超时相关句子是：
+
+- 串口硬超时：控制行和错误横幅显示 `Failed: CH9329 transaction timed out; release is unconfirmed`。状态变为 reconnecting。debug 记 `CH9329 transaction timeout`，带 kind、command 和 `shown=`。
+- 串口约 100 ms stall：显示 `Failed: CH9329 transaction stalled`。这句话不含 timeout。随后仍可能进入上面的硬超时。
+- UI 心跳超过 250 ms：显示 `UI heartbeat expired`，状态变为 clearing。补了 `Control timeout: source=ui-heartbeat`。
+- Relay 握手 2 s、会话租约 10 s、取消等待 2 s 都显示同一句 `Failed: UDP session expired`。日志用 `source=handshake-2s`、`session-10s` 或 `cancel-2s` 区分。其他 `RelayClient::fail` 字符串原样记为 `Relay client failed`。KCP 发送失败的界面句是 `UDP KCP send failed` 或 `KCP queue or transport failure`。
+- 粘贴取消 `设备应答超时，粘贴已取消。` 只在粘贴过程中出现，不是 Connect。
+- 诊断面板的 `ACK timeouts` 是计数，不是连接提示。
+- 采集 start 没有超时文案。失败原因进入 `Capture error` 横幅。
+
+Opening、USB not ready、Clearing input、capture Starting 在 error 为空时显示 Connecting。会话 debug 行现在带 `video-shown`、`control-shown` 和错误原文，不再把错误收成 `present`。不记录粘贴文本。macOS 上用户看到的那一次超时还没有带这些新日志的实机记录，来源仍未在实机上确认。
+
 ## 进度
 
-T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。T5 尚未开始。
+T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 尚未开始。

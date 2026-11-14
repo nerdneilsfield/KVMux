@@ -789,6 +789,7 @@ struct ClientSession::Impl {
   bool active{}, video_fresh{};
   std::uint64_t presented{};
   std::optional<wire::Cancel> cancellation;
+  SessionExpireCause expire_cause{SessionExpireCause::none};
   Impl(udp::Endpoint p, std::uint8_t c, wire::RelayRole r)
       : peer(std::move(p)), codecs(c), role(r) {
     if (!c || c > 7) throw std::invalid_argument("supported codecs");
@@ -803,14 +804,25 @@ struct ClientSession::Impl {
     tuple = {};
     challenge = 0;
     action(out, SessionAction::Kind::expired);
+    if (out.size > 0 &&
+        out.items[out.size - 1].kind == SessionAction::Kind::expired) {
+      out.items[out.size - 1].expire_cause = expire_cause;
+    }
+    expire_cause = SessionExpireCause::none;
   }
   void deadlines(SessionActions& out, SessionTime now) {
-    if ((phase == SessionPhase::pending && now >= attempt_deadline) ||
-        (phase == SessionPhase::established && now >= session_deadline) ||
-        (cancellation &&
-         cancellation->reason == wire::CancelReason::disconnect &&
-         now >= cancel_deadline))
+    if (phase == SessionPhase::pending && now >= attempt_deadline) {
+      expire_cause = SessionExpireCause::handshake;
       close(out);
+    } else if (phase == SessionPhase::established && now >= session_deadline) {
+      expire_cause = SessionExpireCause::session_lease;
+      close(out);
+    } else if (cancellation &&
+               cancellation->reason == wire::CancelReason::disconnect &&
+               now >= cancel_deadline) {
+      expire_cause = SessionExpireCause::cancel_deadline;
+      close(out);
+    }
   }
   void handshake(SessionActions& out) {
     if (tuple.session)

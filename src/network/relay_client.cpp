@@ -1,5 +1,7 @@
 #include "network/relay_client.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -254,6 +256,7 @@ struct RelayClient::Impl {
     paste->cancel_pending = false;
   }
   void fail(std::string error) {
+    spdlog::debug("Relay client failed: {}", error);
     std::lock_guard lock(mutex);
     stopped = true;
     suspend();
@@ -466,6 +469,22 @@ struct RelayClient::Impl {
               decoder_worker = std::thread([this] { decoder_loop(); });
           }
         } else if (action.kind == SessionAction::Kind::expired) {
+          const char* source = nullptr;
+          switch (action.expire_cause) {
+            case SessionExpireCause::handshake:
+              source = "handshake-2s";
+              break;
+            case SessionExpireCause::session_lease:
+              source = "session-10s";
+              break;
+            case SessionExpireCause::cancel_deadline:
+              source = "cancel-2s";
+              break;
+            case SessionExpireCause::none:
+              break;
+          }
+          if (source != nullptr)
+            spdlog::debug("Relay session expired: source={}", source);
           if (closing)
             stopped = true;
           else if (!stopped)

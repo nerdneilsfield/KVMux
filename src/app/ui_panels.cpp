@@ -10,6 +10,19 @@
 #include "input/us_ascii_text.hpp"
 
 namespace kvmux {
+
+std::string link_status_text(const LinkStatus& link) {
+  if (link.ready) return "Ready";
+  if (!link.error.empty()) return "Failed: " + link.error;
+  if (link.state == "Fault" || link.state == "Permission denied" ||
+      link.state == "Stalled") {
+    return "Failed: " + link.state;
+  }
+  if (link.state == "Stopped" || link.state == "Disconnected")
+    return link.state;
+  return "Connecting";
+}
+
 namespace {
 
 UiAction action(UiActionKind kind) {
@@ -79,18 +92,6 @@ void baud_combo(int& baud) {
     if (ImGui::Selectable(item, baud == rate)) baud = rate;
   }
   ImGui::EndCombo();
-}
-
-std::string link_status_text(const LinkStatus& link) {
-  if (link.ready) return "Ready";
-  if (!link.error.empty()) return "Failed: " + link.error;
-  if (link.state == "Fault" || link.state == "Permission denied" ||
-      link.state == "Stalled") {
-    return "Failed: " + link.state;
-  }
-  if (link.state == "Stopped" || link.state == "Disconnected")
-    return link.state;
-  return "Connecting";
 }
 
 void note_rebuild_ui(ConnectionForm& form) {
@@ -798,11 +799,16 @@ void log_debug_session(UiState& ui, const SessionView& view,
       : ui.media.snapshot_queued                   ? "queued"
       : !view.recording.last_snapshot_path.empty() ? "saved"
                                                    : "idle";
+  const auto error_text = [](const LinkStatus& link) {
+    return link.error.empty() ? std::string("none") : link.error;
+  };
   const auto status =
       std::string("capture=") + view.video.state +
-      " capture-error=" + link_error_token(view.video) +
+      " video-shown=" + link_status_text(view.video) +
+      " video-error=" + error_text(view.video) +
       " control=" + view.control.state +
-      " control-error=" + link_error_token(view.control) +
+      " control-shown=" + link_status_text(view.control) +
+      " control-error=" + error_text(view.control) +
       " input=" + input_state_label(view.snapshot.input_state) +
       " paste=" + paste_status +
       " paste-reason=" + paste_cancel_reason_name(paste.cancel_reason) +

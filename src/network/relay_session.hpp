@@ -9,6 +9,13 @@
 namespace kvmux::relay {
 using SessionTime = std::chrono::steady_clock::time_point;
 enum class SessionPhase { idle, pending, established };
+// Which deadline produced Kind::expired. The GUI string stays the same.
+enum class SessionExpireCause {
+  none,
+  handshake,
+  session_lease,
+  cancel_deadline
+};
 struct SessionAction {
   enum class Kind {
     send_raw,
@@ -26,6 +33,7 @@ struct SessionAction {
   std::optional<wire::StateAck> ack;
   std::optional<wire::BusyReason> rejection;
   std::optional<wire::PasteStatus> paste_status;
+  SessionExpireCause expire_cause{SessionExpireCause::none};
 };
 // Fixed-capacity synchronous results. No internal output queue; consume each
 // batch.
