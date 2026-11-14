@@ -246,7 +246,7 @@ if(BUILD_TESTING)
     add_executable(kvmux_recording_test tests/recording_test.cpp src/app/recording.cpp src/app/scroll_stitcher.cpp)
     target_compile_features(kvmux_recording_test PRIVATE cxx_std_20)
     target_include_directories(kvmux_recording_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(kvmux_recording_test PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale SDL3::SDL3)
+    target_link_libraries(kvmux_recording_test PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale SDL3::SDL3 spdlog::spdlog_header_only)
     add_test(NAME recording COMMAND kvmux_recording_test)
 
     endif()

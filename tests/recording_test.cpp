@@ -11,7 +11,9 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
+#include <libavutil/mem.h>
 }
 
 using namespace std::chrono_literals;
@@ -36,6 +38,50 @@ static kvmux::VideoFrame frame(int width = 64, int height = 64) {
     for (int y = 0; y < height / 2; ++y)
       std::fill_n(value.frame->data[plane] + y * value.frame->linesize[plane],
                   width / 2, 128);
+  return value;
+}
+
+// Stride is wider than the width, and the limited range lives on VideoFrame.
+// That is the CPU frame process_raw builds from macOS 420v. AVFrame.color_range
+// stays unspecified, as it does in that path.
+static kvmux::VideoFrame nv12_frame() {
+  constexpr int width = 64;
+  constexpr int height = 48;
+  constexpr int stride = 96;
+  kvmux::VideoFrame value;
+  value.arrival = std::chrono::steady_clock::now();
+  value.color_range = kvmux::ColorRange::limited;
+  value.frame = {av_frame_alloc(),
+                 [](AVFrame* frame) { av_frame_free(&frame); }};
+  auto* frame = value.frame.get();
+  require(frame != nullptr, "nv12 frame");
+  frame->format = AV_PIX_FMT_NV12;
+  frame->width = width;
+  frame->height = height;
+  const auto bytes = static_cast<std::size_t>(stride) * (height + height / 2);
+  auto* storage = static_cast<std::uint8_t*>(av_malloc(bytes));
+  require(storage != nullptr, "nv12 storage");
+  std::fill_n(storage, bytes, 0);
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      storage[static_cast<std::size_t>(y * stride + x)] =
+          static_cast<std::uint8_t>(16 + (219 * x) / (width - 1));
+    }
+  }
+  const auto chroma = static_cast<std::size_t>(stride) * height;
+  std::fill_n(storage + chroma, static_cast<std::size_t>(stride) * (height / 2),
+              128);
+  frame->buf[0] =
+      av_buffer_create(storage, bytes, av_buffer_default_free, nullptr, 0);
+  if (frame->buf[0] == nullptr) {
+    av_free(storage);
+    require(false, "nv12 buffer");
+  }
+  frame->data[0] = storage;
+  frame->data[1] = storage + chroma;
+  frame->linesize[0] = stride;
+  frame->linesize[1] = stride;
+  frame->extended_data = frame->data;
   return value;
 }
 
@@ -225,6 +271,42 @@ int main() {
   parse_output(cropped_done.output_path, 24, 20);
   cropped.shutdown();
   recording.shutdown();
+
+  kvmux::Recording nv12(directory);
+  auto nv12_first = nv12_frame();
+  require(nv12.snapshot(nv12_first), "queue nv12 snapshot");
+  const auto nv12_shot = wait_snapshot(nv12);
+  require(nv12_shot.snapshot_error.empty(), nv12_shot.snapshot_error.c_str());
+  parse_output(nv12_shot.last_snapshot_path, 64, 48);
+  require_nonblank_jpeg(nv12_shot.last_snapshot_path);
+  require(nv12.start(nv12_first), "queue nv12 recording");
+  const auto nv12_started = wait(nv12, kvmux::RecordingState::recording);
+  require(nv12_started.state == kvmux::RecordingState::recording,
+          nv12_started.error.c_str());
+  require(nv12.append(nv12_frame()), "append nv12");
+  require(nv12.stop(), "stop nv12");
+  const auto nv12_done = wait(nv12, kvmux::RecordingState::idle);
+  require(nv12_done.state == kvmux::RecordingState::idle,
+          nv12_done.error.c_str());
+  parse_output(nv12_done.output_path, 64, 48);
+
+  kvmux::Recording nv12_crop(directory);
+  require(nv12_crop.start(nv12_frame(), kvmux::FrameCrop{8, 4, 32, 24}),
+          "queue nv12 cropped recording");
+  const auto nv12_crop_started =
+      wait(nv12_crop, kvmux::RecordingState::recording);
+  require(nv12_crop_started.state == kvmux::RecordingState::recording,
+          nv12_crop_started.error.c_str());
+  require(nv12_crop_started.width == 32 && nv12_crop_started.height == 24,
+          "nv12 cropped recording dimensions");
+  require(nv12_crop.append(nv12_frame()), "append nv12 crop");
+  require(nv12_crop.stop(), "stop nv12 crop");
+  const auto nv12_crop_done = wait(nv12_crop, kvmux::RecordingState::idle);
+  require(nv12_crop_done.state == kvmux::RecordingState::idle,
+          nv12_crop_done.error.c_str());
+  parse_output(nv12_crop_done.output_path, 32, 24);
+  nv12_crop.shutdown();
+  nv12.shutdown();
   std::filesystem::remove_all(directory);
   std::cout << "JPEG snapshots and full/cropped MP4 outputs parsed\n";
 }

@@ -1,9 +1,11 @@
 #include "app/recording.hpp"
 
 #include <SDL3/SDL.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -18,6 +20,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -27,6 +30,44 @@ std::string av_error(int code) {
   std::array<char, AV_ERROR_MAX_STRING_SIZE> text{};
   av_strerror(code, text.data(), text.size());
   return text.data();
+}
+const char* pixel_format_name(const VideoFrame& frame) {
+  if (!frame.frame) return "none";
+  const char* const name =
+      av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame.frame->format));
+  return name != nullptr ? name : "unknown";
+}
+const char* range_name(ColorRange range) {
+  switch (range) {
+    case ColorRange::limited:
+      return "limited";
+    case ColorRange::full:
+      return "full";
+    case ColorRange::unknown:
+      return "unknown";
+  }
+  return "unknown";
+}
+std::string path_text(const std::filesystem::path& path) {
+  if (path.empty()) return "-";
+  const auto utf8 = path.u8string();
+  return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+}
+void log_snapshot_failed(const std::filesystem::path& path, unsigned width,
+                         unsigned height, const char* format,
+                         std::string_view error, int err) {
+  spdlog::debug(
+      "snapshot failed: path={} width={} height={} format={} error={} errno={}",
+      path_text(path), width, height, format != nullptr ? format : "unknown",
+      error, err);
+}
+void log_recording_result(const char* event, const char* result,
+                          const std::string& encoder,
+                          const std::filesystem::path& path, unsigned frames,
+                          std::string_view error) {
+  spdlog::debug("recording {}: result={} encoder={} path={} frames={} error={}",
+                event, result, encoder.empty() ? "-" : encoder, path_text(path),
+                frames, error.empty() ? "-" : error);
 }
 std::filesystem::path downloads_directory() {
   const char* path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
@@ -73,6 +114,8 @@ struct Recording::Impl {
   std::chrono::steady_clock::time_point first_arrival{};
   std::int64_t last_pts{-1};
   FrameCrop crop{};
+  std::string encoder_name;
+  unsigned frames_written{};
 };
 
 Recording::Recording(std::filesystem::path output_directory)
@@ -94,39 +137,55 @@ RecordingStatus Recording::status() const {
 
 bool Recording::snapshot_now(const VideoFrame& input,
                              std::optional<FrameCrop> requested_crop) {
+  const char* const format = pixel_format_name(input);
+  const unsigned source_width =
+      input.frame ? static_cast<unsigned>(input.frame->width) : 0;
+  const unsigned source_height =
+      input.frame ? static_cast<unsigned>(input.frame->height) : 0;
   if (!valid_frame(input)) {
-    std::lock_guard lock(mutex_);
-    status_.snapshot_error = "snapshot requires a valid CPU VideoFrame";
+    constexpr char message[] = "snapshot requires a valid CPU VideoFrame";
+    {
+      std::lock_guard lock(mutex_);
+      status_.snapshot_error = message;
+    }
+    log_snapshot_failed({}, source_width, source_height, format, message, 0);
     return false;
   }
-  const unsigned source_width = static_cast<unsigned>(input.frame->width);
-  const unsigned source_height = static_cast<unsigned>(input.frame->height);
   const FrameCrop crop =
       requested_crop.value_or(FrameCrop{0, 0, source_width, source_height});
   if (!crop.width || !crop.height || crop.x >= source_width ||
       crop.y >= source_height || crop.width > source_width - crop.x ||
       crop.height > source_height - crop.y) {
-    std::lock_guard lock(mutex_);
-    status_.snapshot_error = "snapshot crop is outside the source frame";
+    constexpr char message[] = "snapshot crop is outside the source frame";
+    {
+      std::lock_guard lock(mutex_);
+      status_.snapshot_error = message;
+    }
+    log_snapshot_failed({}, crop.width, crop.height, format, message, 0);
     return false;
   }
   const auto directory = downloads_directory();
   std::error_code ec;
   std::filesystem::create_directories(directory, ec);
   if (ec) {
+    const std::string message = "create Downloads directory: " + ec.message();
     {
       std::lock_guard lock(mutex_);
-      status_.snapshot_error = "create Downloads directory: " + ec.message();
+      status_.snapshot_error = message;
     }
+    log_snapshot_failed({}, crop.width, crop.height, format, message,
+                        ec.value());
     return false;
   }
   const auto path = timestamped(directory, ".jpeg");
   const auto* encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
   if (!encoder) {
+    constexpr char message[] = "FFmpeg MJPEG encoder unavailable";
     {
       std::lock_guard lock(mutex_);
-      status_.snapshot_error = "FFmpeg MJPEG encoder unavailable";
+      status_.snapshot_error = message;
     }
+    log_snapshot_failed({}, crop.width, crop.height, format, message, 0);
     return false;
   }
   AVCodecContext* context = avcodec_alloc_context3(encoder);
@@ -136,10 +195,12 @@ bool Recording::snapshot_now(const VideoFrame& input,
     avcodec_free_context(&context);
     av_frame_free(&image);
     av_packet_free(&packet);
+    constexpr char message[] = "allocate JPEG encoder";
     {
       std::lock_guard lock(mutex_);
-      status_.snapshot_error = "allocate JPEG encoder";
+      status_.snapshot_error = message;
     }
+    log_snapshot_failed({}, crop.width, crop.height, format, message, 0);
     return false;
   }
   context->width = static_cast<int>(crop.width);
@@ -181,19 +242,28 @@ bool Recording::snapshot_now(const VideoFrame& input,
   if (result >= 0) result = avcodec_receive_packet(context, packet);
   auto temporary = path;
   temporary += ".part";
+  int io_errno = 0;
+  const int jpeg_bytes = packet != nullptr ? packet->size : 0;
   if (result >= 0) {
     std::ofstream file(temporary, std::ios::binary);
-    if (!file)
+    if (!file) {
+      io_errno = errno;
       result = AVERROR(EIO);
-    else {
+    } else {
       file.write(reinterpret_cast<const char*>(packet->data), packet->size);
-      if (!file) result = AVERROR(EIO);
+      if (!file) {
+        io_errno = errno;
+        result = AVERROR(EIO);
+      }
     }
   }
   if (result >= 0) {
     std::error_code rename_error;
     std::filesystem::rename(temporary, path, rename_error);
-    if (rename_error) result = AVERROR(EIO);
+    if (rename_error) {
+      io_errno = rename_error.value();
+      result = AVERROR(EIO);
+    }
   }
   if (result < 0) {
     std::error_code remove_error;
@@ -205,10 +275,13 @@ bool Recording::snapshot_now(const VideoFrame& input,
   av_frame_free(&image);
   avcodec_free_context(&context);
   if (result < 0) {
+    const std::string message = "write JPEG: " + av_error(result);
     {
       std::lock_guard lock(mutex_);
-      status_.snapshot_error = "write JPEG: " + av_error(result);
+      status_.snapshot_error = message;
     }
+    log_snapshot_failed(path, crop.width, crop.height, format, message,
+                        io_errno);
     return false;
   }
   {
@@ -216,6 +289,10 @@ bool Recording::snapshot_now(const VideoFrame& input,
     status_.last_snapshot_path = path;
     status_.snapshot_error.clear();
   }
+  spdlog::debug(
+      "snapshot saved: path={} width={} height={} format={} range={} bytes={}",
+      path_text(path), crop.width, crop.height, format,
+      range_name(input.color_range), jpeg_bytes);
   return true;
 }
 
@@ -319,35 +396,44 @@ bool Recording::start_now(const VideoFrame& first,
     status_.error.clear();
     status_.output_path.clear();
   }
+  const auto reject = [](std::string message, const std::string& encoder,
+                         const std::filesystem::path& path) {
+    log_recording_result("start", "failed", encoder, path, 0, message);
+    return message;
+  };
   if (!valid_frame(first)) {
-    fail("recording requires a valid CPU VideoFrame first=" +
-         std::to_string(first.frame ? first.frame->width : -1));
+    const std::string message =
+        "recording requires a valid CPU VideoFrame first=" +
+        std::to_string(first.frame ? first.frame->width : -1);
+    fail(reject(message, {}, {}));
     return false;
   }
   const auto directory = downloads_directory();
   std::error_code ec;
   std::filesystem::create_directories(directory, ec);
   if (ec) {
-    fail("create Downloads directory: " + ec.message());
+    fail(reject("create Downloads directory: " + ec.message(), {}, {}));
     return false;
   }
   auto impl = std::make_unique<Impl>();
   const auto* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
   if (!encoder) {
-    fail("FFmpeg H.264 encoder unavailable");
+    fail(reject("FFmpeg H.264 encoder unavailable", {}, {}));
     return false;
   }
+  impl->encoder_name = encoder->name != nullptr ? encoder->name : "h264";
   int result =
       avformat_alloc_output_context2(&impl->format, nullptr, "mp4", nullptr);
   if (result < 0 || !impl->format) {
-    fail("allocate MP4 muxer: " + av_error(result));
+    fail(reject("allocate MP4 muxer: " + av_error(result), impl->encoder_name,
+                {}));
     return false;
   }
   impl->stream = avformat_new_stream(impl->format, nullptr);
   impl->codec = avcodec_alloc_context3(encoder);
   if (!impl->stream || !impl->codec) {
     avformat_free_context(impl->format);
-    fail("allocate MP4 stream/encoder");
+    fail(reject("allocate MP4 stream/encoder", impl->encoder_name, {}));
     return false;
   }
   const unsigned source_width = static_cast<unsigned>(first.frame->width),
@@ -358,9 +444,10 @@ bool Recording::start_now(const VideoFrame& first,
       crop.y >= source_height || crop.width > source_width - crop.x ||
       crop.height > source_height - crop.y ||
       (crop.x | crop.y | crop.width | crop.height) & 1U) {
-    fail(
+    fail(reject(
         "recording crop must be inside the source frame with even coordinates "
-        "and dimensions");
+        "and dimensions",
+        impl->encoder_name, {}));
     return false;
   }
   const unsigned width = crop.width, height = crop.height;
@@ -401,12 +488,29 @@ bool Recording::start_now(const VideoFrame& first,
     if (impl->format->pb) avio_closep(&impl->format->pb);
     avcodec_free_context(&impl->codec);
     avformat_free_context(impl->format);
-    fail("start MP4 recording: " + av_error(result));
+    fail(reject("start MP4 recording: " + av_error(result), impl->encoder_name,
+                output));
     return false;
   }
   impl->first_arrival = first.arrival;
   impl_ = impl.release();
-  return write_frame(first);
+  if (!write_frame(first)) {
+    std::string error;
+    {
+      std::lock_guard lock(mutex_);
+      error = status_.error;
+    }
+    log_recording_result("start", "failed", impl_->encoder_name, output,
+                         impl_->frames_written, error);
+    return false;
+  }
+  spdlog::debug(
+      "recording start: result=ok encoder={} path={} width={} height={} "
+      "format={} range={} frames={}",
+      impl_->encoder_name, path_text(output), width, height,
+      pixel_format_name(first), range_name(first.color_range),
+      impl_->frames_written);
+  return true;
 }
 
 bool Recording::write_frame(const VideoFrame& input) {
@@ -486,9 +590,18 @@ bool Recording::write_frame(const VideoFrame& input) {
   av_frame_free(&picture);
   av_packet_free(&packet);
   if (result < 0) {
-    fail("append MP4 frame: " + av_error(result));
+    const std::string message = "append MP4 frame: " + av_error(result);
+    std::filesystem::path path;
+    {
+      std::lock_guard lock(mutex_);
+      path = status_.output_path;
+    }
+    fail(message);
+    spdlog::debug("recording write: result=failed path={} error={}",
+                  path_text(path), message);
     return false;
   }
+  ++impl.frames_written;
   return true;
 }
 bool Recording::append(const VideoFrame& input) {
@@ -508,9 +621,19 @@ bool Recording::append(const VideoFrame& input) {
 }
 bool Recording::snapshot(const VideoFrame& input,
                          std::optional<FrameCrop> crop) {
+  const unsigned width =
+      input.frame != nullptr ? static_cast<unsigned>(input.frame->width) : 0;
+  const unsigned height =
+      input.frame != nullptr ? static_cast<unsigned>(input.frame->height) : 0;
+  const FrameCrop shown = crop.value_or(FrameCrop{0, 0, width, height});
   if (!valid_frame(input)) {
-    std::lock_guard lock(mutex_);
-    status_.snapshot_error = "snapshot requires a valid CPU VideoFrame";
+    constexpr char message[] = "snapshot requires a valid CPU VideoFrame";
+    {
+      std::lock_guard lock(mutex_);
+      status_.snapshot_error = message;
+    }
+    log_snapshot_failed({}, width, height, pixel_format_name(input), message,
+                        0);
     return false;
   }
   ensure_worker();
@@ -520,6 +643,12 @@ bool Recording::snapshot(const VideoFrame& input,
     snapshot_ = std::pair{input, crop};
   }
   wake_.notify_one();
+  spdlog::debug(
+      "snapshot request: width={} height={} format={} range={} "
+      "crop={}x{}+{},{}",
+      shown.width, shown.height, pixel_format_name(input),
+      range_name(input.color_range), shown.width, shown.height, shown.x,
+      shown.y);
   return true;
 }
 bool Recording::start_scroll(const VideoFrame& input, FrameCrop crop) {
@@ -561,8 +690,12 @@ void Recording::cancel_scroll() {
 }
 bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
   if (!valid_frame(input)) {
-    std::lock_guard lock(mutex_);
-    status_.error = "recording requires a valid CPU VideoFrame";
+    constexpr char message[] = "recording requires a valid CPU VideoFrame";
+    {
+      std::lock_guard lock(mutex_);
+      status_.error = message;
+    }
+    log_recording_result("start", "rejected", {}, {}, 0, message);
     return false;
   }
   if (crop &&
@@ -572,55 +705,92 @@ bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
        crop->width > static_cast<unsigned>(input.frame->width) - crop->x ||
        crop->height > static_cast<unsigned>(input.frame->height) - crop->y ||
        (crop->x | crop->y | crop->width | crop->height) & 1U)) {
-    std::lock_guard lock(mutex_);
-    status_.error =
+    constexpr char message[] =
         "recording crop must be inside the source frame with even coordinates "
         "and dimensions";
+    {
+      std::lock_guard lock(mutex_);
+      status_.error = message;
+    }
+    log_recording_result("start", "rejected", {}, {}, 0, message);
     return false;
   }
   ensure_worker();
+  std::filesystem::path path;
+  bool busy = false;
   {
     std::lock_guard lock(mutex_);
+    path = status_.output_path;
     if (status_.state != RecordingState::idle &&
-        status_.state != RecordingState::failed)
-      return false;
-    status_.error.clear();
-    status_.state = RecordingState::starting;
-    start_ = std::pair{input, crop};
+        status_.state != RecordingState::failed) {
+      busy = true;
+    } else {
+      status_.error.clear();
+      status_.state = RecordingState::starting;
+      start_ = std::pair{input, crop};
+    }
+  }
+  if (busy) {
+    log_recording_result("start", "rejected", {}, path, 0, "busy");
+    return false;
   }
   wake_.notify_one();
   return true;
 }
 bool Recording::pause() {
-  std::lock_guard lock(mutex_);
-  if (status_.state != RecordingState::recording) return false;
-  status_.state = RecordingState::paused;
-  paused_at_ = std::chrono::steady_clock::now();
-  return true;
-}
-bool Recording::resume() {
-  std::lock_guard lock(mutex_);
-  if (status_.state != RecordingState::paused) return false;
-  paused_duration_ += std::chrono::steady_clock::now() - paused_at_;
-  status_.state = RecordingState::recording;
-  return true;
-}
-bool Recording::stop() {
+  std::filesystem::path path;
+  bool accepted = false;
   {
     std::lock_guard lock(mutex_);
+    path = status_.output_path;
+    if (status_.state == RecordingState::recording) {
+      status_.state = RecordingState::paused;
+      paused_at_ = std::chrono::steady_clock::now();
+      accepted = true;
+    }
+  }
+  log_recording_result("pause", accepted ? "ok" : "rejected", {}, path, 0, {});
+  return accepted;
+}
+bool Recording::resume() {
+  std::filesystem::path path;
+  bool accepted = false;
+  {
+    std::lock_guard lock(mutex_);
+    path = status_.output_path;
+    if (status_.state == RecordingState::paused) {
+      paused_duration_ += std::chrono::steady_clock::now() - paused_at_;
+      status_.state = RecordingState::recording;
+      accepted = true;
+    }
+  }
+  log_recording_result("resume", accepted ? "ok" : "rejected", {}, path, 0, {});
+  return accepted;
+}
+bool Recording::stop() {
+  std::filesystem::path path;
+  const char* result = "rejected";
+  {
+    std::lock_guard lock(mutex_);
+    path = status_.output_path;
     if (status_.state == RecordingState::failed) {
       status_.state = RecordingState::idle;
       status_.error.clear();
-      return true;
+      result = "reset";
+    } else if (status_.state == RecordingState::idle) {
+      result = "idle";
+    } else if (status_.state == RecordingState::recording ||
+               status_.state == RecordingState::paused) {
+      status_.state = RecordingState::stopping;
+      stop_requested_ = true;
+      result = "requested";
     }
-    if (status_.state != RecordingState::recording &&
-        status_.state != RecordingState::paused)
-      return status_.state == RecordingState::idle;
-    status_.state = RecordingState::stopping;
-    stop_requested_ = true;
   }
-  wake_.notify_one();
-  return true;
+  if (std::string_view{result} == "requested") wake_.notify_one();
+  log_recording_result("stop", result, {}, path, 0, {});
+  return result == std::string_view{"requested"} ||
+         result == std::string_view{"reset"} ||
+         result == std::string_view{"idle"};
 }
 void Recording::ensure_worker() {
   if (!worker_.joinable())
@@ -735,16 +905,22 @@ void Recording::worker(std::stop_token token) {
       av_packet_free(&packet);
       if (result >= 0) result = av_write_trailer(impl_->format);
       if (impl_->format->pb) avio_closep(&impl_->format->pb);
+      const std::string encoder = impl_->encoder_name;
+      const unsigned frames = impl_->frames_written;
       sws_freeContext(impl_->convert);
       avcodec_free_context(&impl_->codec);
       avformat_free_context(impl_->format);
       delete impl_;
       impl_ = nullptr;
+      std::filesystem::path path;
       {
         std::lock_guard lock(mutex_);
         status_.state =
             result < 0 ? RecordingState::failed : RecordingState::idle;
+        path = status_.output_path;
       }
+      log_recording_result("stop", result < 0 ? "failed" : "ok", encoder, path,
+                           frames, result < 0 ? av_error(result) : "");
     }
     if (next) {
       bool accept = false;
@@ -780,16 +956,22 @@ void Recording::worker(std::stop_token token) {
     av_packet_free(&packet);
     if (result >= 0) result = av_write_trailer(impl_->format);
     if (impl_->format->pb) avio_closep(&impl_->format->pb);
+    const std::string encoder = impl_->encoder_name;
+    const unsigned frames = impl_->frames_written;
     sws_freeContext(impl_->convert);
     avcodec_free_context(&impl_->codec);
     avformat_free_context(impl_->format);
     delete impl_;
     impl_ = nullptr;
+    std::filesystem::path path;
     {
       std::lock_guard lock(mutex_);
       status_.state =
           result < 0 ? RecordingState::failed : RecordingState::idle;
+      path = status_.output_path;
     }
+    log_recording_result("shutdown", result < 0 ? "failed" : "ok", encoder,
+                         path, frames, result < 0 ? av_error(result) : "");
   }
 }
 void Recording::shutdown() noexcept {

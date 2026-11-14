@@ -180,9 +180,10 @@ libserialport. The option accepts only `AUTO`, `ON`, or `OFF`.
 
 The GUI serial combo and `kvmux-relay --list-serial` both call
 `enumerate_serial_ports()`. That function appends the libusb list to the
-system ports. Debug logs print every `1A86` device, including ones that are
-not offered: VID, PID, `bcdDevice`, the first interface class, and the list
-or skip reason. No clipboard or typed text is included.
+system ports. A debug log names every `1A86` device when that set or a
+list/skip decision changes: VID, PID, `bcdDevice`, the first interface class,
+and the reason. An unchanged scan is not logged again. No clipboard or typed
+text is included.
 
 | PID | Chip | Direct backend |
 | --- | --- | --- |

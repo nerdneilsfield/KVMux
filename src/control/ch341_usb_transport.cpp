@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <span>
 #include <string>
@@ -742,23 +743,59 @@ int first_interface_class(libusb_device* device) {
   return value;
 }
 
-void log_wch_device(const WchObservedDevice& device,
-                    const WchPortChoice& choice, std::string_view port) {
-  const auto decision =
+std::string format_wch_device(const WchObservedDevice& device,
+                              const WchPortChoice& choice,
+                              std::string_view port) {
+  const char* const decision =
       choice.decision == WchPortDecision::list ? "list" : "skip";
+  const char* const chip = choice.chip.empty() ? "" : choice.chip.data();
+  const char* const port_text = port.empty() ? "" : port.data();
+  const char* const reason = choice.reason.empty() ? "" : choice.reason.data();
+  char line[640];
   if (device.interface_class < 0) {
-    spdlog::debug(
-        "WCH enumerate: vid=0x{:04x} pid=0x{:04x} bcdDevice=0x{:04x} "
-        "class=unavailable decision={} chip={} port={} reason={}",
-        device.vendor_id, device.product_id, device.bcd_device, decision,
-        choice.chip, port, choice.reason);
+    std::snprintf(line, sizeof(line),
+                  "WCH enumerate: vid=0x%04x pid=0x%04x bcdDevice=0x%04x "
+                  "class=unavailable decision=%s chip=%.*s port=%.*s "
+                  "reason=%.*s",
+                  static_cast<unsigned>(device.vendor_id),
+                  static_cast<unsigned>(device.product_id),
+                  static_cast<unsigned>(device.bcd_device), decision,
+                  static_cast<int>(choice.chip.size()), chip,
+                  static_cast<int>(port.size()), port_text,
+                  static_cast<int>(choice.reason.size()), reason);
+  } else {
+    std::snprintf(line, sizeof(line),
+                  "WCH enumerate: vid=0x%04x pid=0x%04x bcdDevice=0x%04x "
+                  "class=0x%02x decision=%s chip=%.*s port=%.*s reason=%.*s",
+                  static_cast<unsigned>(device.vendor_id),
+                  static_cast<unsigned>(device.product_id),
+                  static_cast<unsigned>(device.bcd_device),
+                  static_cast<unsigned>(device.interface_class), decision,
+                  static_cast<int>(choice.chip.size()), chip,
+                  static_cast<int>(port.size()), port_text,
+                  static_cast<int>(choice.reason.size()), reason);
+  }
+  return line;
+}
+
+void log_wch_scan(std::vector<std::string> lines) {
+  std::sort(lines.begin(), lines.end());
+  std::string signature;
+  for (const std::string& line : lines) {
+    signature.append(line);
+    signature.push_back('\n');
+  }
+  // The GUI repeats this scan about once a second. Log only when the set of
+  // 1a86 devices, or a list/skip decision, changes. Skip reasons stay in the
+  // line that is emitted for that change.
+  static std::string previous;
+  if (signature == previous) return;
+  previous = std::move(signature);
+  if (lines.empty()) {
+    spdlog::debug("WCH enumerate: no 1a86 devices");
     return;
   }
-  spdlog::debug(
-      "WCH enumerate: vid=0x{:04x} pid=0x{:04x} bcdDevice=0x{:04x} "
-      "class=0x{:02x} decision={} chip={} port={} reason={}",
-      device.vendor_id, device.product_id, device.bcd_device,
-      device.interface_class, decision, choice.chip, port, choice.reason);
+  for (const std::string& line : lines) spdlog::debug("{}", line);
 }
 
 }  // namespace
@@ -782,6 +819,7 @@ std::vector<SerialPortInfo> enumerate_ch341_usb_ports() {
     return {};
   }
   std::vector<SerialPortInfo> ports;
+  std::vector<std::string> lines;
   for (ssize_t index = 0; index < count; ++index) {
     libusb_device* device = list[index];
     libusb_device_descriptor descriptor{};
@@ -808,7 +846,7 @@ std::vector<SerialPortInfo> enumerate_ch341_usb_ports() {
       choice.link = WchLinkKind::none;
       choice.reason = "端口路径无法命名";
     }
-    log_wch_device(observed, choice, name);
+    lines.push_back(format_wch_device(observed, choice, name));
     if (choice.decision != WchPortDecision::list) {
       continue;
     }
@@ -819,6 +857,7 @@ std::vector<SerialPortInfo> enumerate_ch341_usb_ports() {
     info.usb_product_id = descriptor.idProduct;
     ports.push_back(std::move(info));
   }
+  log_wch_scan(std::move(lines));
   libusb_free_device_list(list, 1);
   return ports;
 }

@@ -119,11 +119,39 @@ CH340、CH340K、CH341 沿用原有厂商请求，同样未经硬件验证。实
 | 需要指定接口号的型号 | `55db`、`55dd`、`55de`、`55e7`、`55eb`、`5610` | 枚举会跳过。 | 未实现，未验证 |
 | 其他 `1A86` PID | — | 枚举会跳过，原因是协议未确认。 | 未实现，未验证 |
 
-`--debug` 日志对每个 `1A86` 设备打一行 `WCH enumerate`，带 VID、PID、
-`bcdDevice`、首个接口类，以及 `decision=list` 或 `decision=skip` 和原因。
-GUI 串口下拉框和 `kvmux-relay --list-serial` 用同一个
-`enumerate_serial_ports()`。被列出的芯片描述是 `<芯片名> (USB direct)`，
-CH341 仍是 `CH341 (USB direct)`。
+`--debug` 只在 `1A86` 设备集合或判定变化时打 `WCH enumerate`。一行里有
+VID、PID、`bcdDevice`、首个接口类、`decision=list` 或 `decision=skip`，以及
+跳过原因。集合没变时不再每秒重复。GUI 串口下拉框和
+`kvmux-relay --list-serial` 用同一个 `enumerate_serial_ports()`。被列出的
+芯片描述是 `<芯片名> (USB direct)`，CH341 仍是 `CH341 (USB direct)`。
+
+## macOS 截图与录像日志（2026-11-14）
+
+日志是 Darwin 27.2.0 上的 `kvmux`，4139 行，没有 warn 或 error。
+
+读到的事实：
+
+- 采集设备是 KUHAIMI 4K60 Version，模式是 1920x1080 `420v`。
+- `WCH enumerate` 有 32 行，不是日志的大部分。重复的两台设备是
+  `1a86:7523`（list，CH340，`ch341-usb:32-1.1`）和 `1a86:9354`
+  （skip，class `0x03`，PID 未确认）。
+- 同一份日志里大量行是 `CH341 direct in/out` 和 CH9329 ACK。控制后来到过
+  Ready，也有键盘 ACK。
+- `media=snapshot-queued` 只出现一次，8 ms 后变成 `snapshot-saved`。
+  后面 10 行里的 `snapshot-saved` 是同一状态被别的字段带出来，不是 10 次截图。
+- `recording` 始终是 `idle`，包括输入已经是 Captured 的时候。
+- 日志没有截图路径、JPEG 字节数、编码器名或写入帧数。
+
+代码里对得上的事实：
+
+- `snapshot-saved` 只表示 JPEG 临时文件已经 rename 成功。应用不检查文件是否为空，也不解码看是不是黑的。
+- 默认目录是 `SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS)`。仓库里的
+  `Info.plist` 没有沙盒 entitlement。这次日志已经是 saved，所以这次写入没有被权限拒绝。文件内容仍然没有看到。
+- `Start recording` 在没有选定区域时是禁用的。全屏截图不需要区域。这次日志里的 idle 不能区分“没点录像”和“菜单项是灰的”。
+- `420v` 在 AVFoundation 适配器里记成 NV12、limited range。`process_raw` 把这个范围放在 `VideoFrame` 上，不写进 `AVFrame.color_range`。截图和录像的 swscale 不读 `color_range`。
+- 录像用 `avcodec_find_encoder(AV_CODEC_ID_H264)`，不是按名字找 `libx264`。这份日志没有走到 start，所以看不出本机 FFmpeg 会返回哪个 H.264 编码器。
+
+没有根据这份日志改像素转换。Linux 上的 `recording` CTest 用 stride 大于宽度的 limited-range NV12 走截图和录像。通过时只说明这条软件路径能写出可打开的 JPEG（亮度不全是同一值）和尺寸正确的 MP4，不能代替 macOS 上的文件。
 
 ## macOS CH341 与分离 relay 自检步骤
 
