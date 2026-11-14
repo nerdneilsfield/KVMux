@@ -177,33 +177,46 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
     media.scroll_sample_after.reset();
   }
   if (media.region_selecting) {
-    if (!preview || event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
-        event.type == SDL_EVENT_WINDOW_MINIMIZED ||
-        event.type == SDL_EVENT_WINDOW_HIDDEN ||
-        (event.type == SDL_EVENT_KEY_DOWN &&
-         event.key.scancode == SDL_SCANCODE_ESCAPE)) {
-      media.region_selecting = media.region_dragging = media.region_ready =
-          false;
-      media.region_confirm_requested = false;
+    const bool escape = event.type == SDL_EVENT_KEY_DOWN &&
+                        event.key.scancode == SDL_SCANCODE_ESCAPE;
+    const bool lost = event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+                      event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                      event.type == SDL_EVENT_WINDOW_HIDDEN;
+    if (!preview || lost || escape) {
+      cancel_region_selection(media, !preview ? "not-preview"
+                                     : escape ? "escape"
+                                              : "focus");
       if (event.type == SDL_EVENT_KEY_DOWN) return;
     }
-    if (preview && media.region_ready &&
-        event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-        event.button.button == SDL_BUTTON_LEFT && event.button.clicks >= 2 &&
-        event.button.x >= std::min(media.region_start.x, media.region_end.x) &&
-        event.button.x <= std::max(media.region_start.x, media.region_end.x) &&
-        event.button.y >= std::min(media.region_start.y, media.region_end.y) &&
-        event.button.y <= std::max(media.region_start.y, media.region_end.y)) {
-      commit_region(media, host.renderer_width, host.renderer_height);
-      media.region_confirm_requested = false;
+    const bool enter = event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                       (event.key.scancode == SDL_SCANCODE_RETURN ||
+                        event.key.scancode == SDL_SCANCODE_KP_ENTER);
+    if (media.region_selecting && preview && media.region_ready && enter) {
+      (void)confirm_region_selection(media, host.renderer_width,
+                                     host.renderer_height);
       return;
     }
-    if (preview && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+    if (media.region_selecting && preview && media.region_ready &&
+        media.region_buttons && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        event.button.button == SDL_BUTTON_LEFT) {
+      if (media.region_confirm_hit.contains(event.button.x, event.button.y)) {
+        (void)confirm_region_selection(media, host.renderer_width,
+                                       host.renderer_height);
+        return;
+      }
+      if (media.region_cancel_hit.contains(event.button.x, event.button.y)) {
+        cancel_region_selection(media, "button");
+        return;
+      }
+    }
+    if (media.region_selecting && preview &&
+        event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
         event.button.button == SDL_BUTTON_LEFT &&
         media.displayed_video_rect.contains(event.button.x, event.button.y)) {
       media.region_start = media.region_end = {event.button.x, event.button.y};
       media.region_dragging = true;
       media.region_ready = false;
+      media.region_buttons = false;
       return;
     }
     if (media.region_dragging && event.type == SDL_EVENT_MOUSE_MOTION) {

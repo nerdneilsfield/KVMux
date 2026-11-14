@@ -689,6 +689,21 @@ void Recording::cancel_scroll() {
   wake_.notify_one();
 }
 bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
+  const unsigned source_width =
+      input.frame ? static_cast<unsigned>(input.frame->width) : 0;
+  const unsigned source_height =
+      input.frame ? static_cast<unsigned>(input.frame->height) : 0;
+  const FrameCrop shown =
+      crop.value_or(FrameCrop{0, 0, source_width, source_height});
+  const bool full_frame =
+      source_width > 0 && source_height > 0 && shown.x == 0 && shown.y == 0 &&
+      shown.width == source_width && shown.height == source_height;
+  spdlog::debug(
+      "recording start request: mode={} crop={}x{}+{},{} source={}x{} "
+      "format={} range={}",
+      full_frame ? "full" : "region", shown.width, shown.height, shown.x,
+      shown.y, source_width, source_height, pixel_format_name(input),
+      range_name(input.color_range));
   if (!valid_frame(input)) {
     constexpr char message[] = "recording requires a valid CPU VideoFrame";
     {

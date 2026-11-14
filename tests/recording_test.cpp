@@ -178,11 +178,84 @@ static void require_nonblank_jpeg(const std::filesystem::path& path) {
   require(maximum - minimum > 32, "JPEG contains visible image content");
 }
 
+static void require_crop(const std::optional<kvmux::FrameCrop>& crop,
+                         unsigned x, unsigned y, unsigned width,
+                         unsigned height, const char* message) {
+  const kvmux::FrameCrop value = crop.value_or(kvmux::FrameCrop{});
+  require(crop.has_value() && value.x == x && value.y == y &&
+              value.width == width && value.height == height,
+          message);
+}
+
+// Display pixels below are chosen so each expected source edge is an exact
+// half or whole source pixel. The numbers are the pixels that drag covers,
+// not the floor/ceil expression in crop_from_display.
+static void require_region_confirm_mapping() {
+  // Fitted video 200x200 at the origin, source 100x100: two display pixels
+  // cover one source pixel. Drag (3, 1) -> (81, 41):
+  //   3 px = 1.5 source px, first included column is 1
+  //   1 px = 0.5 source px, first included row is 0
+  //   81 px = 40.5 source px, exclusive end column is 41
+  //   41 px = 20.5 source px, exclusive end row is 21
+  const auto partial =
+      kvmux::crop_from_display(0, 0, 200, 200, 3, 1, 81, 41, 100, 100);
+  require_crop(partial, 1, 0, 40, 21, "partial region");
+  const auto reversed =
+      kvmux::crop_from_display(0, 0, 200, 200, 81, 41, 3, 1, 100, 100);
+  require_crop(reversed, 1, 0, 40, 21, "reversed drag");
+  // 4 display px is exactly source column 2, so a press and release on that
+  // point covers no area.
+  require(!kvmux::crop_from_display(0, 0, 200, 200, 4, 2, 4, 2, 100, 100),
+          "empty drag");
+
+  // Fitted video at (8, 4), 128x96, source 64x48. The drag starts on the
+  // fitted video's top-left and ends on its bottom-right, so the crop is the
+  // whole 64x48 frame.
+  const auto full =
+      kvmux::crop_from_display(8, 4, 128, 96, 8, 4, 136, 100, 64, 48);
+  require_crop(full, 0, 0, 64, 48, "fitted video is the whole frame");
+  // This drag contains that fitted video, including area outside it.
+  const auto covered =
+      kvmux::crop_from_display(8, 4, 128, 96, -20, -10, 400, 300, 64, 48);
+  require_crop(covered, 0, 0, 64, 48, "drag covering the fitted video");
+}
+
+static void require_full_frame_recording(
+    const std::filesystem::path& directory) {
+  const auto crop =
+      kvmux::crop_from_display(8, 4, 128, 96, 8, 4, 136, 100, 64, 48);
+  require_crop(crop, 0, 0, 64, 48, "full-frame crop");
+  kvmux::Recording recording(directory);
+  auto source = frame(64, 48);
+  require(recording.start(source, crop.value_or(kvmux::FrameCrop{})),
+          "queue full-frame crop");
+  const auto started = wait(recording, kvmux::RecordingState::recording);
+  require(started.state == kvmux::RecordingState::recording,
+          started.error.c_str());
+  require(started.width == 64 && started.height == 48,
+          "full-frame recording dimensions");
+  require(recording.append(frame(64, 48)), "append full-frame recording");
+  require(recording.stop(), "stop full-frame recording");
+  const auto done = wait(recording, kvmux::RecordingState::idle);
+  require(done.state == kvmux::RecordingState::idle, done.error.c_str());
+  parse_output(done.output_path, 64, 48);
+  recording.shutdown();
+
+  kvmux::Recording odd(directory);
+  require(!odd.start(frame(64, 48), kvmux::FrameCrop{0, 0, 63, 48}),
+          "odd width crop rejected");
+  require(odd.status().state == kvmux::RecordingState::idle, "odd stays idle");
+  require(!odd.status().error.empty(), "odd crop error");
+  odd.shutdown();
+}
+
 int main() {
   const auto directory =
       std::filesystem::temp_directory_path() / u8"kvmux-recording-测试";
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
+  require_region_confirm_mapping();
+  require_full_frame_recording(directory);
   kvmux::Recording recording(directory);
   auto first = frame();
 

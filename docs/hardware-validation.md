@@ -147,7 +147,7 @@ VID、PID、`bcdDevice`、首个接口类、`decision=list` 或 `decision=skip`�
 - `snapshot-saved` 只表示 JPEG 临时文件已经 rename 成功。应用不检查文件是否为空，也不解码看是不是黑的。
 - 默认目录是 `SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS)`。仓库里的
   `Info.plist` 没有沙盒 entitlement。这次日志已经是 saved，所以这次写入没有被权限拒绝。文件内容仍然没有看到。
-- `Start recording` 在没有选定区域时是禁用的。全屏截图不需要区域。这次日志里的 idle 不能区分“没点录像”和“菜单项是灰的”。
+- 写这份日志时，菜单里只有一个 `Start recording`，没有选定区域时是灰的，而且没有说明。全屏截图不需要区域。这份日志里的 idle 不能区分“没点录像”和“菜单项是灰的”。当前菜单分成 `Recording: Full screen`（整帧，不需要区域）和 `Recording: Region`。这次日志没有走到 start。
 - `420v` 在 AVFoundation 适配器里记成 NV12、limited range。`process_raw` 把这个范围放在 `VideoFrame` 上，不写进 `AVFrame.color_range`。截图和录像的 swscale 不读 `color_range`。
 - 录像用 `avcodec_find_encoder(AV_CODEC_ID_H264)`，不是按名字找 `libx264`。这份日志没有走到 start，所以看不出本机 FFmpeg 会返回哪个 H.264 编码器。
 

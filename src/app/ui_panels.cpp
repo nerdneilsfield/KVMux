@@ -31,6 +31,68 @@ UiAction action(UiActionKind kind) {
   return out;
 }
 
+Rect paint_region_button(ImDrawList* draw, ImVec2 pos, const char* label,
+                         bool primary) {
+  const ImVec2 text = ImGui::CalcTextSize(label);
+  constexpr float pad_x = 8.F;
+  constexpr float pad_y = 4.F;
+  const ImVec2 end{pos.x + text.x + pad_x * 2.F, pos.y + text.y + pad_y * 2.F};
+  draw->AddRectFilled(
+      pos, end, theme::packed(primary ? theme::accent_fill : theme::surface),
+      4.F);
+  draw->AddRect(pos, end,
+                theme::packed(primary ? theme::highlight : theme::border), 4.F);
+  draw->AddText({pos.x + pad_x, pos.y + pad_y},
+                theme::packed(primary ? theme::on_accent : theme::text), label);
+  return {pos.x, pos.y, end.x - pos.x, end.y - pos.y};
+}
+
+void draw_saved_region(ImDrawList* draw, const Rect& video,
+                       const FrameCrop& crop, int source_width,
+                       int source_height) {
+  if (source_width <= 0 || source_height <= 0 || video.width <= 0.0 ||
+      video.height <= 0.0)
+    return;
+  const double scale_x = video.width / static_cast<double>(source_width);
+  const double scale_y = video.height / static_cast<double>(source_height);
+  const ImVec2 lo{
+      static_cast<float>(video.x + static_cast<double>(crop.x) * scale_x),
+      static_cast<float>(video.y + static_cast<double>(crop.y) * scale_y)};
+  const ImVec2 hi{
+      static_cast<float>(video.x +
+                         static_cast<double>(crop.x + crop.width) * scale_x),
+      static_cast<float>(video.y +
+                         static_cast<double>(crop.y + crop.height) * scale_y)};
+  draw->AddRect(lo, hi, theme::packed(theme::highlight), 0.F, 0, 2.F);
+}
+
+void draw_region_actions(ImDrawList* draw, MediaUi& media, ImVec2 lo, ImVec2 hi,
+                         float left, float top, float right, float bottom) {
+  const ImVec2 confirm_text = ImGui::CalcTextSize("确认");
+  const ImVec2 cancel_text = ImGui::CalcTextSize("取消");
+  constexpr float pad_x = 8.F;
+  constexpr float pad_y = 4.F;
+  constexpr float gap = 8.F;
+  const float confirm_w = confirm_text.x + pad_x * 2.F;
+  const float cancel_w = cancel_text.x + pad_x * 2.F;
+  const float height = std::max(confirm_text.y, cancel_text.y) + pad_y * 2.F;
+  const float row = confirm_w + gap + cancel_w;
+  float x = hi.x + gap;
+  float y = lo.y;
+  if (x + row > right) {
+    x = lo.x;
+    y = hi.y + gap;
+  }
+  if (y + height > bottom) y = lo.y - height - gap;
+  if (x < left) x = left;
+  if (y < top) y = top;
+  if (x + row > right) x = std::max(left, right - row);
+  media.region_confirm_hit = paint_region_button(draw, {x, y}, "确认", true);
+  media.region_cancel_hit =
+      paint_region_button(draw, {x + confirm_w + gap, y}, "取消", false);
+  media.region_buttons = true;
+}
+
 void record_local_region(UiState& ui) {
   const auto pos = ImGui::GetWindowPos();
   const auto size = ImGui::GetWindowSize();
@@ -59,6 +121,15 @@ void format_pointer(const InputPointerSnapshot& pointer, char* local,
 }
 
 bool relay_port_ok(int port) { return port > 0 && port <= 65535; }
+
+bool media_menu_item(const char* label, bool enabled, const char* reason) {
+  const bool pressed = ImGui::MenuItem(label, nullptr, false, enabled);
+  if (!enabled && reason != nullptr &&
+      ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip("%s", reason);
+  }
+  return pressed;
+}
 
 bool action_button(const char* label, bool enabled, const char* reason,
                    bool primary = false) {
@@ -197,80 +268,119 @@ void append_text_paste(UiState& ui, const SessionView& view,
   }
 }
 
+const char* frame_reason(bool frame) {
+  return frame ? nullptr : "需要可见的视频画面";
+}
+
+const char* region_reason(bool frame, bool region) {
+  if (!frame) return "需要可见的视频画面";
+  if (!region) return "先选择区域";
+  return nullptr;
+}
+
+const char* recording_reason(bool frame, bool region_required, bool region,
+                             RecordingState state) {
+  if (!frame) return "需要可见的视频画面";
+  if (region_required && !region) return "先选择区域";
+  if (state == RecordingState::failed) return "先重置失败的录像";
+  if (state != RecordingState::idle) return "正在录像";
+  return nullptr;
+}
+
+void queue_screenshot(MediaUi& media, bool queued) {
+  if (queued) {
+    media.snapshot_queued = true;
+    set_media_notice(media, "Screenshot queued.", false);
+    ImGui::CloseCurrentPopup();
+  } else {
+    set_media_notice(media, "Could not queue screenshot.", true);
+  }
+}
+
 void append_media_menu(UiState& ui, const SessionView& view,
                        UiActions& actions) {
   auto& media = ui.media;
   auto& recording = *ui.recording;
   const auto& status = view.recording;
+  const bool frame = view.valid_visible_cpu_frame;
+  const bool region = media.saved_region.has_value();
+  const bool idle = status.state == RecordingState::idle;
   if (media.region_selecting) {
     if (media.region_confirm_requested ||
-        ImGui::MenuItem("Confirm region", nullptr, false, media.region_ready))
-      commit_region(media, view.renderer_width, view.renderer_height);
-    if (ImGui::MenuItem("Cancel region selection")) {
-      media.region_selecting = media.region_dragging = media.region_ready =
-          false;
-      media.region_confirm_requested = false;
+        media_menu_item(
+            "Confirm region", media.region_ready,
+            media.region_ready ? nullptr : "先在画面上拖动选择区域")) {
+      (void)confirm_region_selection(media, view.renderer_width,
+                                     view.renderer_height);
     }
+    if (ImGui::MenuItem("Cancel region selection"))
+      cancel_region_selection(media, "menu");
     ImGui::Separator();
   }
-  ImGui::BeginDisabled(!view.valid_visible_cpu_frame);
-  if (ImGui::MenuItem("Save full screenshot")) {
-    if (recording.snapshot(*view.frame)) {
-      media.snapshot_queued = true;
-      set_media_notice(media, "Screenshot queued.", false);
-      ImGui::CloseCurrentPopup();
-    } else
-      set_media_notice(media, "Could not queue screenshot.", true);
+  if (media_menu_item("Screenshot: Full screen", frame, frame_reason(frame)))
+    queue_screenshot(media, recording.snapshot(*view.frame));
+  if (media_menu_item("Screenshot: Region", frame && region,
+                      region_reason(frame, region))) {
+    queue_screenshot(media,
+                     recording.snapshot(*view.frame, media.saved_region));
   }
-  ImGui::EndDisabled();
-  ImGui::BeginDisabled(!view.valid_visible_cpu_frame || !media.saved_region);
-  if (ImGui::MenuItem("Save region screenshot")) {
-    if (recording.snapshot(*view.frame, media.saved_region)) {
-      media.snapshot_queued = true;
-      set_media_notice(media, "Screenshot queued.", false);
-      ImGui::CloseCurrentPopup();
-    } else
-      set_media_notice(media, "Could not queue screenshot.", true);
-  }
-  if (ImGui::MenuItem("Start scrolling", nullptr, false,
-                      !ui.connection.capture_only)) {
-    if (recording.start_scroll(*view.frame, *media.saved_region)) {
-      media.scroll_active = true;
-      actions.add(action(UiActionKind::activate_control));
-      set_media_notice(media, "Scrolling capture started.", false);
-      ImGui::CloseCurrentPopup();
-    } else
-      set_media_notice(media, "Could not start scrolling capture.", true);
-  }
-  ImGui::EndDisabled();
-  ImGui::BeginDisabled(!view.valid_visible_cpu_frame || !media.saved_region ||
-                       status.state != RecordingState::idle);
-  if (ImGui::MenuItem("Start recording")) {
-    const bool started = recording.start(*view.frame, *media.saved_region);
+  if (media_menu_item("Recording: Full screen", frame && idle,
+                      recording_reason(frame, false, region, status.state))) {
+    const auto* picture = view.frame->frame.get();
+    const bool started = recording.start(
+        *view.frame, FrameCrop{0, 0, static_cast<unsigned>(picture->width),
+                               static_cast<unsigned>(picture->height)});
     set_media_notice(
         media, started ? "Recording started." : "Could not start recording.",
         !started);
     ImGui::CloseCurrentPopup();
   }
-  ImGui::EndDisabled();
-  if (ImGui::MenuItem("Select region")) {
-    media.region_selecting = true;
-    media.region_dragging = media.region_ready = false;
+  if (media_menu_item("Recording: Region", frame && region && idle,
+                      recording_reason(frame, true, region, status.state))) {
+    const bool started = recording.start(*view.frame, media.saved_region);
+    set_media_notice(
+        media, started ? "Recording started." : "Could not start recording.",
+        !started);
     ImGui::CloseCurrentPopup();
   }
+  const char* scroll_reason = region_reason(frame, region);
+  if (scroll_reason == nullptr && ui.connection.capture_only)
+    scroll_reason = "滚动截图需要控制连接";
+  if (media_menu_item("Start scrolling", scroll_reason == nullptr,
+                      scroll_reason)) {
+    if (recording.start_scroll(*view.frame, *media.saved_region)) {
+      media.scroll_active = true;
+      actions.add(action(UiActionKind::activate_control));
+      set_media_notice(media, "Scrolling capture started.", false);
+      ImGui::CloseCurrentPopup();
+    } else {
+      set_media_notice(media, "Could not start scrolling capture.", true);
+    }
+  }
+  if (ImGui::MenuItem("Select region")) {
+    begin_region_selection(media);
+    ImGui::CloseCurrentPopup();
+  }
+  if (media_menu_item("Clear region", region, region ? nullptr : "先选择区域"))
+    clear_saved_region(media);
   if (status.state == RecordingState::recording) {
     if (ImGui::MenuItem("Pause recording")) (void)recording.pause();
   } else if (status.state == RecordingState::paused) {
     if (ImGui::MenuItem("Resume recording")) (void)recording.resume();
   }
-  ImGui::BeginDisabled(status.state != RecordingState::recording &&
-                       status.state != RecordingState::paused &&
-                       status.state != RecordingState::failed);
-  if (ImGui::MenuItem(status.state == RecordingState::failed
+  const bool stoppable = status.state == RecordingState::recording ||
+                         status.state == RecordingState::paused ||
+                         status.state == RecordingState::failed;
+  const char* stop_reason = nullptr;
+  if (!stoppable) {
+    stop_reason = status.state == RecordingState::idle ? "没有正在进行的录像"
+                                                       : "录像正在切换";
+  }
+  if (media_menu_item(status.state == RecordingState::failed
                           ? "Reset failed recording"
-                          : "Stop recording"))
+                          : "Stop recording",
+                      stoppable, stop_reason))
     (void)recording.stop();
-  ImGui::EndDisabled();
   if (media.scroll_active && ImGui::MenuItem("Finish scrolling screenshot")) {
     (void)recording.finish_scroll();
     media.scroll_active = false;
@@ -697,7 +807,8 @@ void append_command_menus(UiState& ui, const SessionView& view,
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Target aspect")) {
-      ImGui::BeginDisabled(view.snapshot.input_state != InputState::preview);
+      const bool preview = view.snapshot.input_state == InputState::preview;
+      ImGui::BeginDisabled(!preview);
       const std::pair<const char*, TargetAspect> aspects[] = {
           {"Full frame", TargetAspect::full_frame},
           {"16:9", TargetAspect::ratio_16_9},
@@ -707,6 +818,9 @@ void append_command_menus(UiState& ui, const SessionView& view,
       for (const auto& [label, value] : aspects) {
         if (ImGui::MenuItem(label, nullptr, config.target_aspect == value))
           config.target_aspect = value;
+        if (!preview &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+          ImGui::SetTooltip("%s", "先回到预览再改目标比例");
       }
       ImGui::EndDisabled();
       ImGui::EndMenu();
@@ -722,8 +836,9 @@ void append_command_menus(UiState& ui, const SessionView& view,
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("输入")) {
-    if (ImGui::MenuItem("Type ASCII", nullptr, false,
-                        !ui.connection.capture_only))
+    if (media_menu_item(
+            "Type ASCII", !ui.connection.capture_only,
+            ui.connection.capture_only ? "当前没有控制连接" : nullptr))
       ui.paste.open = true;
     ImGui::EndMenu();
   }
@@ -731,9 +846,10 @@ void append_command_menus(UiState& ui, const SessionView& view,
     append_media_menu(ui, view, actions);
     ImGui::Separator();
     const bool control = !ui.connection.capture_only;
-    if (ImGui::MenuItem("Send Ctrl+Alt+Del", nullptr, false, control))
+    const char* control_reason = control ? nullptr : "当前没有控制连接";
+    if (media_menu_item("Send Ctrl+Alt+Del", control, control_reason))
       queue_special(actions, SpecialKeys::control_alt_delete);
-    if (ImGui::MenuItem("Send Alt+Tab", nullptr, false, control))
+    if (media_menu_item("Send Alt+Tab", control, control_reason))
       queue_special(actions, SpecialKeys::alt_tab);
     if (control &&
         ImGui::MenuItem("Keep target awake", nullptr, &config.keep_alive))
@@ -970,17 +1086,36 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
     empty->AddText({start.x + (video_size.x - text_size.x) * 0.5F, text_y},
                    ImGui::GetColorU32(ImGuiCol_Text), guide);
   }
+  auto* draw = ImGui::GetWindowDrawList();
+  ui.media.region_buttons = false;
+  if (ui.media.saved_region && view.has_texture) {
+    draw_saved_region(draw, ui.media.displayed_video_rect,
+                      *ui.media.saved_region, view.renderer_width,
+                      view.renderer_height);
+  }
   if (ui.media.region_selecting &&
       (ui.media.region_dragging || ui.media.region_ready)) {
     const ImVec2 lo{std::min(ui.media.region_start.x, ui.media.region_end.x),
                     std::min(ui.media.region_start.y, ui.media.region_end.y)};
     const ImVec2 hi{std::max(ui.media.region_start.x, ui.media.region_end.x),
                     std::max(ui.media.region_start.y, ui.media.region_end.y)};
-    auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(lo, hi, theme::packed(theme::accent, 45));
     draw->AddRect(lo, hi, theme::packed(theme::highlight), 0.F, 0, 2.F);
+    if (ui.media.region_ready) {
+      draw_region_actions(draw, ui.media, lo, hi, start.x, start.y,
+                          start.x + video_size.x, start.y + video_size.y);
+    }
   }
-  if (view.captured) {
+  if (ui.media.region_selecting && view.has_texture) {
+    constexpr const char* hint = "拖动选择区域，松开后点“确认”或回车，Esc 取消";
+    const auto hint_size = ImGui::CalcTextSize(hint);
+    const ImVec2 pos{start.x + (video_size.x - hint_size.x) * 0.5F,
+                     start.y + 36.F};
+    draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F},
+                        {pos.x + hint_size.x + 8.F, pos.y + hint_size.y + 4.F},
+                        theme::packed(theme::bg), 4.F);
+    draw->AddText(pos, theme::packed(theme::text), hint);
+  } else if (view.captured) {
     const double now = ImGui::GetTime();
     const float alpha = static_cast<float>(
         std::clamp(3.0 - (now - ui.overlay.captured_at), 0.0, 1.0));
@@ -989,7 +1124,6 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
                            : "Captured - Right Control releases control";
     const auto size = ImGui::CalcTextSize(hint);
     const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
-    auto* draw = ImGui::GetWindowDrawList();
     const auto wash = static_cast<std::uint8_t>(225.F * alpha);
     const auto ink = static_cast<std::uint8_t>(255.F * alpha);
     draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F},
@@ -1003,7 +1137,6 @@ UiActions draw_video(UiState& ui, const SessionView& view) {
                   host_key_name(ui.config->host_scancode));
     const auto size = ImGui::CalcTextSize(hint);
     const ImVec2 pos{start.x + (video_size.x - size.x) * .5F, start.y + 36.F};
-    auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled({pos.x - 8.F, pos.y - 4.F},
                         {pos.x + size.x + 8.F, pos.y + size.y + 4.F},
                         ImGui::GetColorU32(ImGuiCol_WindowBg), 4.F);

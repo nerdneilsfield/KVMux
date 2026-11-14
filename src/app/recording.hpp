@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
@@ -24,6 +26,43 @@ enum class ScrollCaptureState { idle, starting, capturing, finishing, failed };
 struct FrameCrop {
   unsigned x{}, y{}, width{}, height{};
 };
+
+// Maps a window-pixel drag onto source pixels. Near edges keep the pixel
+// under the pointer; far edges keep a pixel the pointer only partly covers.
+// nullopt when the mapped rectangle is empty. Recording still requires even
+// coordinates, including when the crop is the whole frame.
+[[nodiscard]] inline std::optional<FrameCrop> crop_from_display(
+    double video_x, double video_y, double video_width, double video_height,
+    double x0, double y0, double x1, double y1, unsigned source_width,
+    unsigned source_height) {
+  if (!(video_width > 0.0) || !(video_height > 0.0) || source_width == 0 ||
+      source_height == 0) {
+    return std::nullopt;
+  }
+  const double left = std::min(x0, x1);
+  const double top = std::min(y0, y1);
+  const double right = std::max(x0, x1);
+  const double bottom = std::max(y0, y1);
+  const double limit_x = static_cast<double>(source_width);
+  const double limit_y = static_cast<double>(source_height);
+  const auto edge = [](double along, double limit, bool far) {
+    const double scaled = std::clamp(along, 0.0, limit);
+    const double snapped = far ? std::ceil(scaled) : std::floor(scaled);
+    if (snapped <= 0.0) return 0U;
+    if (snapped >= limit) return static_cast<unsigned>(limit);
+    return static_cast<unsigned>(snapped);
+  };
+  const unsigned x =
+      edge((left - video_x) * limit_x / video_width, limit_x, false);
+  const unsigned y =
+      edge((top - video_y) * limit_y / video_height, limit_y, false);
+  const unsigned right_px =
+      edge((right - video_x) * limit_x / video_width, limit_x, true);
+  const unsigned bottom_px =
+      edge((bottom - video_y) * limit_y / video_height, limit_y, true);
+  if (right_px <= x || bottom_px <= y) return std::nullopt;
+  return FrameCrop{x, y, right_px - x, bottom_px - y};
+}
 
 struct RecordingStatus {
   RecordingState state{RecordingState::idle};

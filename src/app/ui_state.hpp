@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <array>
@@ -341,6 +342,9 @@ struct MediaUi {
   bool region_dragging{false};
   bool region_ready{false};
   bool region_confirm_requested{false};
+  bool region_buttons{false};
+  Rect region_confirm_hit{};
+  Rect region_cancel_hit{};
   bool scroll_active{false};
   std::optional<std::pair<std::uint64_t, std::uint64_t>> scroll_sample_after;
   ImVec2 region_start{};
@@ -496,41 +500,76 @@ struct UiActions {
   void add(UiAction action) { items.push_back(std::move(action)); }
 };
 
-// Saves the dragged rectangle into MediaUi. Clears the confirm flag on
-// success; the caller clears it on the double-click path either way.
+// Saves the dragged rectangle into MediaUi. A failed confirm stays in
+// selection so the user can drag again.
 inline void commit_region(MediaUi& media, int width, int height) {
-  const double left = std::min(media.region_start.x, media.region_end.x);
-  const double top = std::min(media.region_start.y, media.region_end.y);
-  const double right = std::max(media.region_start.x, media.region_end.x);
-  const double bottom = std::max(media.region_start.y, media.region_end.y);
-  const auto w = static_cast<unsigned>(width);
-  const auto h = static_cast<unsigned>(height);
-  const unsigned x = static_cast<unsigned>(
-      std::clamp(std::floor((left - media.displayed_video_rect.x) * w /
-                            media.displayed_video_rect.width),
-                 0.0, static_cast<double>(w)));
-  const unsigned y = static_cast<unsigned>(
-      std::clamp(std::floor((top - media.displayed_video_rect.y) * h /
-                            media.displayed_video_rect.height),
-                 0.0, static_cast<double>(h)));
-  const unsigned r = static_cast<unsigned>(
-      std::clamp(std::ceil((right - media.displayed_video_rect.x) * w /
-                           media.displayed_video_rect.width),
-                 0.0, static_cast<double>(w)));
-  const unsigned b = static_cast<unsigned>(
-      std::clamp(std::ceil((bottom - media.displayed_video_rect.y) * h /
-                           media.displayed_video_rect.height),
-                 0.0, static_cast<double>(h)));
-  if (r > x && b > y) {
-    media.saved_region = FrameCrop{x, y, r - x, b - y};
+  const auto crop =
+      width > 0 && height > 0
+          ? crop_from_display(
+                media.displayed_video_rect.x, media.displayed_video_rect.y,
+                media.displayed_video_rect.width,
+                media.displayed_video_rect.height, media.region_start.x,
+                media.region_start.y, media.region_end.x, media.region_end.y,
+                static_cast<unsigned>(width), static_cast<unsigned>(height))
+          : std::nullopt;
+  if (crop) {
+    media.saved_region = crop;
     media.media_message = "Region saved.";
     media.media_is_error = false;
-    media.region_selecting = media.region_ready = false;
+    media.region_selecting = false;
+    media.region_dragging = false;
+    media.region_ready = false;
     media.region_confirm_requested = false;
+    media.region_buttons = false;
   } else {
     media.media_message = "Select a larger region.";
     media.media_is_error = true;
   }
+}
+
+inline void begin_region_selection(MediaUi& media) {
+  media.region_selecting = true;
+  media.region_dragging = false;
+  media.region_ready = false;
+  media.region_confirm_requested = false;
+  media.region_buttons = false;
+  spdlog::debug("region select: enter");
+}
+
+inline void cancel_region_selection(MediaUi& media, const char* reason) {
+  const bool active =
+      media.region_selecting || media.region_dragging || media.region_ready;
+  media.region_selecting = false;
+  media.region_dragging = false;
+  media.region_ready = false;
+  media.region_confirm_requested = false;
+  media.region_buttons = false;
+  if (active) {
+    spdlog::debug("region cancel: reason={}", reason != nullptr ? reason : "-");
+  }
+}
+
+inline bool confirm_region_selection(MediaUi& media, int width, int height) {
+  if (!media.region_selecting) return false;
+  commit_region(media, width, height);
+  if (!media.region_selecting && media.saved_region) {
+    const FrameCrop& crop = *media.saved_region;
+    spdlog::debug("region confirm: x={} y={} width={} height={}", crop.x,
+                  crop.y, crop.width, crop.height);
+    return true;
+  }
+  spdlog::debug("region confirm: rejected");
+  return false;
+}
+
+inline void clear_saved_region(MediaUi& media) {
+  if (!media.saved_region) return;
+  const FrameCrop crop = *media.saved_region;
+  media.saved_region.reset();
+  media.media_message = "Region cleared.";
+  media.media_is_error = false;
+  spdlog::debug("region clear: x={} y={} width={} height={}", crop.x, crop.y,
+                crop.width, crop.height);
 }
 
 inline void set_media_notice(MediaUi& media, std::string text, bool error) {

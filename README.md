@@ -97,24 +97,35 @@ logged. Unicode, Chinese, and Wubi input are not supported yet.
 
 ## Capture screenshots and recordings
 
-Open **Media** from the top menu, or from the floating KVMux logo menu. A
-screenshot saves the native decoded video only—never menus, the mouse pointer,
-or the status overlay—to your system **Downloads** folder as
-`kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix. In Preview, choose **Select
-region screenshot**, drag inside the fitted video, then save. The drag and its
-buttons stay local and the saved JPEG contains only the matching source-frame
-pixels. For a long page, choose **Select scrolling screenshot**, select the region,
-then capture input and scroll downward with the wheel. KVMux samples only the next
-fresh frame after each downward wheel event. Use **Finish scrolling screenshot**
-to save one JPEG, or cancel with Escape or the Media menu. Version 1 supports only
-manual downward vertical scrolling.
+Open **Media** from the top menu **动作**, or from the floating KVMux logo menu.
+A screenshot saves the native decoded video only—never menus, the mouse
+pointer, or the status overlay—to your system **Downloads** folder as
+`kvmux_YYYYMMDD_HHMMSS.jpeg`. If that name already exists, KVMux adds a suffix.
 
-Recording saves the same video as an H.264 MP4 in **Downloads**, with the same
-time-based name and collision suffix. Use **Start**, **Pause**, **Resume**, and
-**Stop**. To record only part of the source video, choose **Select region recording**
-and drag the region. KVMux adjusts region-recording edges inward to even source
-pixels, as required by H.264 YUV420 encoding. **Stop** waits for the file to finish. Screenshots and recordings stay
-local; they are not sent to the target computer.
+**Screenshot: Full screen** saves the whole frame. **Screenshot: Region** saves
+the saved region. **Recording: Full screen** records the whole frame as an
+H.264 MP4 in **Downloads**, with the same time-based name. It does not need a
+region. **Recording: Region** records only the saved region. Both recordings
+use the same crop path. A full-screen recording is the crop
+`{0, 0, width, height}`. H.264 still requires even coordinates and even
+dimensions, so an odd source edge is rejected instead of being shifted.
+
+To save a region, choose **Select region**. The picture tells you to drag,
+then click **确认** or press Enter. Escape or **取消** leaves selection
+without saving. Pointer events during selection stay on this computer. The
+Host key stays local and is never sent to the target. A saved region stays
+outlined on the preview until **Clear region**.
+
+**Start scrolling** still needs a saved region and a control connection. Drag
+the region, then capture input and scroll downward with the wheel. KVMux
+samples only the next fresh frame after each downward wheel event. Use
+**Finish scrolling screenshot** to save one JPEG, or cancel with Escape.
+Version 1 supports only manual downward vertical scrolling. A grey menu item
+explains what is missing, for example that a region has not been saved.
+
+Use **Pause**, **Resume**, and **Stop**. **Stop** waits for the file to
+finish. Screenshots and recordings stay local; they are not sent to the target
+computer.
 
 H.264 MP4 recording requires FFmpeg H.264 support. KVMux shows a clear error if
 it is unavailable. Recording uses a bounded latest-frame writer, so it can drop
