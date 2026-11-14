@@ -173,10 +173,45 @@ only use Release builds when preparing a distribution.
 
 ## CH341 direct serial
 
-`KVMUX_CH341_USB` selects a libusb backend for WCH `1A86:5523`. A port name
-`ch341-usb:<bus>-<port path>` (for example `ch341-usb:1-2.3`) uses that
-backend. Every other name stays on libserialport. The option accepts only
-`AUTO`, `ON`, or `OFF`.
+`KVMUX_CH341_USB` selects a libusb backend for a fixed set of WCH `1A86`
+UART chips. A port name `ch341-usb:<bus>-<port path>` (for example
+`ch341-usb:1-2.3`) uses that backend. Every other name stays on
+libserialport. The option accepts only `AUTO`, `ON`, or `OFF`.
+
+The GUI serial combo and `kvmux-relay --list-serial` both call
+`enumerate_serial_ports()`. That function appends the libusb list to the
+system ports. Debug logs print every `1A86` device, including ones that are
+not offered: VID, PID, `bcdDevice`, the first interface class, and the list
+or skip reason. No clipboard or typed text is included.
+
+| PID | Chip | Direct backend |
+| --- | --- | --- |
+| `7523` | CH340 | Listed. Same vendor-register sequence as CH341. |
+| `7522` | CH340K | Listed. Same sequence as CH341. |
+| `5523` | CH341 serial | Listed. Original sequence. |
+| `55d3` | CH343 | Listed. Single UART, third-generation line request. |
+| `55d4` | CH9102 | Listed. Same third-generation sequence. |
+| `55d8` | CH9101 | Listed. Same third-generation sequence. |
+| `55e9`, `55ea` | CH9111 | Listed. Same sequence for the nine CH9329 baud rates. |
+| `55d2`, `55d5`, `55d7`, `55da`, `55df`, `55e8`, `55ec`, `55ef` | CH342, CH344, CH9103, CH347, CH9104, CH9114, CH346, CH9105 | Skipped. More than one UART. Use the system driver. `55d5` is CH344 and `55d7` is CH9103. |
+| `55d6` | CH9143 | Skipped. Present in the WCH driver table and not opened here. Use the system driver. |
+| `55db`, `55dd`, `55de`, `55e7`, `55eb`, `5610` | CH347, CH339, CH346, CH9433 | Skipped. The WCH driver binds a specific interface number. |
+| any other `1A86` PID | — | Skipped. Protocol was not confirmed. |
+
+CH343, CH9102, CH9101, and CH9111 follow protocol facts read from the WCH
+`ch343` driver: 依据 WCH ch343 驱动确认的协议事实. Those four are
+按官方驱动源码实现，未经硬件验证. CH340, CH340K, and CH341 reuse the
+existing vendor-register sequence and are also unverified on hardware.
+
+A skipped chip is not given a `ch341-usb:` name. Its system serial node, when
+the OS created one, remains in the list. Opening a direct name for a skipped
+chip fails with that chip's skip reason. None of these rows has a hardware
+pass recorded in `docs/hardware-validation.md`.
+
+Linux and Windows auto-select still ignore `ch341-usb:` names. macOS
+auto-select is unchanged and still considers only `1a86:7523`, `1a86:5523`,
+and `1a86:55d3`. A direct name for another PID is used only when it is
+selected explicitly.
 
 | Host | Default | When libusb is missing |
 | --- | --- | --- |
@@ -213,10 +248,10 @@ offer for the libusb version that was linked. See `third_party/INVENTORY.md`.
 These platform prerequisites are documented here. They are not hardware
 acceptance:
 
-- Linux: opening `ch341-usb:` detaches the kernel driver bound to that device,
-  usually `ch341`, and does not fall back to a `/dev/tty*` node. The process
-  needs permission to open the USB device. One udev rule that grants it is
-  `SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="5523", MODE="0660", GROUP="plugdev"`.
+- Linux: opening `ch341-usb:` detaches the kernel driver bound to that device
+  and does not fall back to a `/dev/tty*` node. The process needs permission
+  to open the USB device. One udev rule that grants it for every WCH id is
+  `SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", MODE="0660", GROUP="plugdev"`.
 - Windows: bind the interface to WinUSB with Zadig. A device left on another
   driver fails the open with `设备没有绑定 WinUSB，需用 Zadig 绑定`.
 - macOS: leave the WCH vendor driver `CH34xVCPDriver` uninstalled. If that

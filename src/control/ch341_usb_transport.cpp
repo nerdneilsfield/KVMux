@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -64,11 +65,12 @@ std::string port_path(const Ch341UsbAddress& address) {
   return text;
 }
 
-void log_device_match(const Ch341UsbAddress& address, bool found) {
+void log_device_match(const Ch341UsbAddress& address, std::uint16_t product_id,
+                      bool found) {
   spdlog::debug(
       "CH341 direct match: bus={} path={} vid=0x{:04x} pid=0x{:04x} found={}",
-      address.bus, port_path(address), kCh341DirectVendorId,
-      kCh341DirectProductId, found ? "true" : "false");
+      address.bus, port_path(address), kCh341DirectVendorId, product_id,
+      found ? "true" : "false");
 }
 
 std::string usb_failure(const char* step, int result) {
@@ -128,8 +130,11 @@ class Ch341DirectTransport {
       close();
       return false;
     }
-    spdlog::info("CH341 direct open: path={} baud={} version=0x{:02x}", name,
-                 baud, version_);
+    spdlog::info(
+        "CH341 direct open: path={} pid=0x{:04x} baud={} version=0x{:02x} "
+        "link={}",
+        name, product_id_, baud, version_,
+        link_ == WchLinkKind::ch343 ? "ch343" : "classic");
     return true;
   }
 
@@ -178,9 +183,12 @@ class Ch341DirectTransport {
     ready_offset_ = 0;
     ready_size_ = 0;
     if (interface_claimed_ && handle_) {
-      libusb_release_interface(handle_, 0);
+      libusb_release_interface(handle_, claimed_interface_);
     }
     interface_claimed_ = false;
+    claimed_interface_ = -1;
+    link_ = WchLinkKind::none;
+    product_id_ = 0;
     if (handle_) {
       libusb_close(handle_);
       handle_ = nullptr;
@@ -284,26 +292,36 @@ class Ch341DirectTransport {
     libusb_device** list = nullptr;
     const ssize_t count = libusb_get_device_list(context_, &list);
     if (count < 0) {
-      log_device_match(address, false);
+      log_device_match(address, 0, false);
       error = usb_failure("枚举设备", static_cast<int>(count));
       return false;
     }
     libusb_device* matched = nullptr;
+    WchPortChoice at_path;
+    bool saw_wch = false;
     for (ssize_t index = 0; index < count; ++index) {
       libusb_device_descriptor descriptor{};
-      if (libusb_get_device_descriptor(list[index], &descriptor) != 0) {
+      if (libusb_get_device_descriptor(list[index], &descriptor) != 0 ||
+          !same_path(list[index], address) ||
+          descriptor.idVendor != kCh341DirectVendorId) {
         continue;
       }
-      if (descriptor.idVendor != kCh341DirectVendorId ||
-          descriptor.idProduct != kCh341DirectProductId) {
-        continue;
-      }
-      if (same_path(list[index], address)) {
+      saw_wch = true;
+      product_id_ = descriptor.idProduct;
+      at_path = classify_wch_device({descriptor.idVendor, descriptor.idProduct,
+                                     descriptor.bcdDevice, -1});
+      if (at_path.decision == WchPortDecision::list) {
         matched = list[index];
+        link_ = at_path.link;
         break;
       }
     }
-    log_device_match(address, matched != nullptr);
+    log_device_match(address, product_id_, matched != nullptr);
+    if (!matched && saw_wch) {
+      libusb_free_device_list(list, 1);
+      error = std::string(at_path.reason);
+      return false;
+    }
     int opened = LIBUSB_ERROR_NO_DEVICE;
     if (matched) {
       opened = libusb_open(matched, &handle_);
@@ -346,14 +364,6 @@ class Ch341DirectTransport {
 #else
     spdlog::debug("CH341 direct detach: skipped");
 #endif
-    const int claimed = libusb_claim_interface(handle_, 0);
-    spdlog::debug("CH341 direct claim: result={} ({})", claimed,
-                  libusb_error_name(claimed));
-    if (claimed != 0) {
-      error = open_failure("认领接口", claimed);
-      return false;
-    }
-    interface_claimed_ = true;
     return true;
   }
 
@@ -370,45 +380,81 @@ class Ch341DirectTransport {
     };
     std::unique_ptr<libusb_config_descriptor, decltype(release)> guard(config,
                                                                        release);
-    if (config->bNumInterfaces < 1 || config->interface[0].num_altsetting < 1) {
-      error = "未找到 bulk 端点";
-      return false;
-    }
-    const auto& alternate = config->interface[0].altsetting[0];
+    int bulk_interfaces = 0;
+    int chosen_interface = -1;
+    std::uint8_t chosen_in = 0;
+    std::uint8_t chosen_out = 0;
     int in_packet = 0;
     int out_packet = 0;
-    for (int index = 0; index < alternate.bNumEndpoints; ++index) {
-      const auto& endpoint = alternate.endpoint[index];
-      if ((endpoint.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
-          LIBUSB_TRANSFER_TYPE_BULK) {
+    for (int iface = 0; iface < config->bNumInterfaces; ++iface) {
+      if (config->interface[iface].num_altsetting < 1) {
         continue;
       }
-      const auto packet = static_cast<int>(
-          static_cast<unsigned>(endpoint.wMaxPacketSize) & 0x07ffu);
-      if (packet <= 0 || static_cast<std::size_t>(packet) > kMaxPacketBytes) {
-        spdlog::debug(
-            "CH341 direct endpoints: address=0x{:02x} packet={} rejected",
-            endpoint.bEndpointAddress, packet);
-        error = "端点包长超出 CH341 direct 限制";
+      const auto& alternate = config->interface[iface].altsetting[0];
+      std::uint8_t in_endpoint = 0;
+      std::uint8_t out_endpoint = 0;
+      int in_size = 0;
+      int out_size = 0;
+      bool rejected = false;
+      for (int index = 0; index < alternate.bNumEndpoints; ++index) {
+        const auto& endpoint = alternate.endpoint[index];
+        if ((endpoint.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
+            LIBUSB_TRANSFER_TYPE_BULK) {
+          continue;
+        }
+        const auto packet = static_cast<int>(
+            static_cast<unsigned>(endpoint.wMaxPacketSize) & 0x07ffu);
+        if (packet <= 0 || static_cast<std::size_t>(packet) > kMaxPacketBytes) {
+          spdlog::debug(
+              "CH341 direct endpoints: address=0x{:02x} packet={} rejected",
+              endpoint.bEndpointAddress, packet);
+          error = "端点包长超出 CH341 direct 限制";
+          rejected = true;
+          break;
+        }
+        if ((endpoint.bEndpointAddress & LIBUSB_ENDPOINT_IN) != 0) {
+          in_endpoint = endpoint.bEndpointAddress;
+          in_size = packet;
+        } else {
+          out_endpoint = endpoint.bEndpointAddress;
+          out_size = packet;
+        }
+      }
+      if (rejected) {
         return false;
       }
-      if ((endpoint.bEndpointAddress & LIBUSB_ENDPOINT_IN) != 0) {
-        in_endpoint_ = endpoint.bEndpointAddress;
-        in_packet = packet;
-      } else {
-        out_endpoint_ = endpoint.bEndpointAddress;
-        out_packet = packet;
+      if (in_endpoint == 0 || out_endpoint == 0) {
+        continue;
       }
+      ++bulk_interfaces;
+      chosen_interface = alternate.bInterfaceNumber;
+      chosen_in = in_endpoint;
+      chosen_out = out_endpoint;
+      in_packet = in_size;
+      out_packet = out_size;
     }
-    spdlog::debug(
-        "CH341 direct endpoints: in=0x{:02x} in_packet={} out=0x{:02x} "
-        "out_packet={}",
-        in_endpoint_, in_packet, out_endpoint_, out_packet);
-    if (in_endpoint_ == 0 || out_endpoint_ == 0 || in_packet == 0 ||
-        out_packet == 0) {
-      error = "未找到 bulk 端点";
+    if (bulk_interfaces != 1) {
+      spdlog::debug("CH341 direct endpoints: bulk_interfaces={}",
+                    bulk_interfaces);
+      error = bulk_interfaces == 0 ? "未找到 bulk 端点"
+                                   : "多串口接口，未支持直连，请使用系统驱动";
       return false;
     }
+    const int claimed = libusb_claim_interface(handle_, chosen_interface);
+    spdlog::debug("CH341 direct claim: interface={} result={} ({})",
+                  chosen_interface, claimed, libusb_error_name(claimed));
+    if (claimed != 0) {
+      error = open_failure("认领接口", claimed);
+      return false;
+    }
+    interface_claimed_ = true;
+    claimed_interface_ = chosen_interface;
+    in_endpoint_ = chosen_in;
+    out_endpoint_ = chosen_out;
+    spdlog::debug(
+        "CH341 direct endpoints: interface={} in=0x{:02x} in_packet={} "
+        "out=0x{:02x} out_packet={}",
+        chosen_interface, in_endpoint_, in_packet, out_endpoint_, out_packet);
     in_buffer_.assign(static_cast<std::size_t>(in_packet), 0);
     ready_.assign(in_buffer_.size(), 0);
     out_buffer_.assign(static_cast<std::size_t>(std::min(out_packet, 32)), 0);
@@ -445,7 +491,44 @@ class Ch341DirectTransport {
     return true;
   }
 
+  bool configure_ch343(int baud, std::string& error) {
+    // Interface 0 of a single-UART chip. Vendor OUT 0xA1 carries 8N1 in
+    // wValue and the divider in wIndex. Vendor OUT 0xA4 raises DTR and RTS.
+    unsigned char identity[8]{};
+    const auto vendor_in = static_cast<std::uint8_t>(
+        static_cast<unsigned>(LIBUSB_ENDPOINT_IN) |
+        static_cast<unsigned>(LIBUSB_REQUEST_TYPE_VENDOR) |
+        static_cast<unsigned>(LIBUSB_RECIPIENT_DEVICE));
+    const auto vendor_out = static_cast<std::uint8_t>(
+        static_cast<unsigned>(LIBUSB_ENDPOINT_OUT) |
+        static_cast<unsigned>(LIBUSB_REQUEST_TYPE_VENDOR) |
+        static_cast<unsigned>(LIBUSB_RECIPIENT_DEVICE));
+    if (!control(vendor_in, 0x5f, 0, 0, identity, 8, "读芯片", error)) {
+      return false;
+    }
+    version_ = identity[0];
+    spdlog::debug("WCH identity: version=0x{:02x} type=0x{:02x}", identity[0],
+                  identity[1]);
+    const auto index = ch343_line_index(baud);
+    if (!index) {
+      spdlog::debug("WCH line: baud={} unsupported", baud);
+      error = "CH341 direct 不支持该波特率";
+      return false;
+    }
+    spdlog::debug("WCH line: request=0xa1 value=0x{:04x} index=0x{:04x}",
+                  ch343_line_value_8n1(), *index);
+    if (!control(vendor_out, 0xa1, ch343_line_value_8n1(), *index, nullptr, 0,
+                 "线路", error)) {
+      return false;
+    }
+    return control(vendor_out, 0xa4, ch343_modem_dtr_rts(), 0, nullptr, 0,
+                   "modem 控制", error);
+  }
+
   bool configure_uart(int baud, std::string& error) {
+    if (link_ == WchLinkKind::ch343) {
+      return configure_ch343(baud, error);
+    }
     unsigned char version_bytes[2]{};
     const auto vendor_in = static_cast<std::uint8_t>(
         static_cast<unsigned>(LIBUSB_ENDPOINT_IN) |
@@ -632,6 +715,9 @@ class Ch341DirectTransport {
   std::uint8_t in_endpoint_ = 0;
   std::uint8_t out_endpoint_ = 0;
   std::uint8_t version_ = 0;
+  std::uint16_t product_id_ = 0;
+  WchLinkKind link_ = WchLinkKind::none;
+  int claimed_interface_ = -1;
   bool interface_claimed_ = false;
   bool open_ = false;
   bool closing_ = false;
@@ -642,26 +728,37 @@ class Ch341DirectTransport {
   bool out_completed_ = false;
 };
 
-bool same_device(libusb_device* device, std::string& name) {
-  libusb_device_descriptor descriptor{};
-  if (libusb_get_device_descriptor(device, &descriptor) != 0 ||
-      descriptor.idVendor != kCh341DirectVendorId ||
-      descriptor.idProduct != kCh341DirectProductId) {
-    return false;
+int first_interface_class(libusb_device* device) {
+  libusb_config_descriptor* config = nullptr;
+  if (libusb_get_config_descriptor(device, 0, &config) != 0 ||
+      config == nullptr) {
+    return -1;
   }
-  const int bus = libusb_get_bus_number(device);
-  if (bus < 1 || bus > 255) {
-    return false;
+  int value = -1;
+  if (config->bNumInterfaces > 0 && config->interface[0].num_altsetting > 0) {
+    value = config->interface[0].altsetting[0].bInterfaceClass;
   }
-  std::uint8_t numbers[7]{};
-  const int depth = libusb_get_port_numbers(device, numbers, 7);
-  if (depth < 1) {
-    return false;
+  libusb_free_config_descriptor(config);
+  return value;
+}
+
+void log_wch_device(const WchObservedDevice& device,
+                    const WchPortChoice& choice, std::string_view port) {
+  const auto decision =
+      choice.decision == WchPortDecision::list ? "list" : "skip";
+  if (device.interface_class < 0) {
+    spdlog::debug(
+        "WCH enumerate: vid=0x{:04x} pid=0x{:04x} bcdDevice=0x{:04x} "
+        "class=unavailable decision={} chip={} port={} reason={}",
+        device.vendor_id, device.product_id, device.bcd_device, decision,
+        choice.chip, port, choice.reason);
+    return;
   }
-  name = format_ch341_usb_name(
-      static_cast<std::uint8_t>(bus),
-      std::span<const std::uint8_t>(numbers, static_cast<std::size_t>(depth)));
-  return !name.empty();
+  spdlog::debug(
+      "WCH enumerate: vid=0x{:04x} pid=0x{:04x} bcdDevice=0x{:04x} "
+      "class=0x{:02x} decision={} chip={} port={} reason={}",
+      device.vendor_id, device.product_id, device.bcd_device,
+      device.interface_class, decision, choice.chip, port, choice.reason);
 }
 
 }  // namespace
@@ -686,15 +783,40 @@ std::vector<SerialPortInfo> enumerate_ch341_usb_ports() {
   }
   std::vector<SerialPortInfo> ports;
   for (ssize_t index = 0; index < count; ++index) {
+    libusb_device* device = list[index];
+    libusb_device_descriptor descriptor{};
+    if (libusb_get_device_descriptor(device, &descriptor) != 0 ||
+        descriptor.idVendor != kCh341DirectVendorId) {
+      continue;
+    }
+    const int bus = libusb_get_bus_number(device);
+    std::uint8_t numbers[7]{};
+    const int depth = libusb_get_port_numbers(device, numbers, 7);
     std::string name;
-    if (!same_device(list[index], name)) {
+    if (bus >= 1 && bus <= 255 && depth >= 1) {
+      name =
+          format_ch341_usb_name(static_cast<std::uint8_t>(bus),
+                                std::span<const std::uint8_t>(
+                                    numbers, static_cast<std::size_t>(depth)));
+    }
+    WchObservedDevice observed{descriptor.idVendor, descriptor.idProduct,
+                               descriptor.bcdDevice,
+                               first_interface_class(device)};
+    WchPortChoice choice = classify_wch_device(observed);
+    if (choice.decision == WchPortDecision::list && name.empty()) {
+      choice.decision = WchPortDecision::skip;
+      choice.link = WchLinkKind::none;
+      choice.reason = "端口路径无法命名";
+    }
+    log_wch_device(observed, choice, name);
+    if (choice.decision != WchPortDecision::list) {
       continue;
     }
     SerialPortInfo info;
     info.name = std::move(name);
-    info.description = "CH341 (USB direct)";
-    info.usb_vendor_id = kCh341DirectVendorId;
-    info.usb_product_id = kCh341DirectProductId;
+    info.description = std::string(choice.chip) + " (USB direct)";
+    info.usb_vendor_id = descriptor.idVendor;
+    info.usb_product_id = descriptor.idProduct;
     ports.push_back(std::move(info));
   }
   libusb_free_device_list(list, 1);

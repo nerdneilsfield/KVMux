@@ -97,6 +97,34 @@ CH9329 reached ready. A successful build is not that record. The commands that
 collect it are in the next section. No macOS run of those commands is recorded
 here.
 
+## WCH 直连家族（2026-11-14）
+
+直连后端按 PID 决定列不列出。判定和第三代单串口的 8N1 分频有 CTest
+`ch341_direct`。没有芯片插在这台机器上。CH343、CH9102、CH9101、CH9111
+依据 WCH ch343 驱动确认的协议事实实现，按官方驱动源码实现，未经硬件验证。
+CH340、CH340K、CH341 沿用原有厂商请求，同样未经硬件验证。实现依据写在
+`third_party/INVENTORY.md` 的 “WCH serial protocol”。
+
+| 家族 | PID | 软件 | 硬件 |
+| --- | --- | --- | --- |
+| CH340 | `7523` | 已实现，走原 CH341 厂商请求。CTest 只检查会被列出。 | 未验证 |
+| CH340K | `7522` | 同上。 | 未验证 |
+| CH341 串口 | `5523` | 原实现。端口名和分频有 CTest。 | 未验证。此前记录的 macOS `/dev/cu.usbserial-20110` 没有对应的 `ch341-usb:` 日志，芯片 PID 仍未知。 |
+| CH343 | `55d3` | 已实现。单串口，8N1 分频有 CTest。依据 WCH ch343 驱动确认的协议事实，没有拷贝该驱动。 | 按官方驱动源码实现，未经硬件验证 |
+| CH9102 | `55d4` | 同上。 | 按官方驱动源码实现，未经硬件验证 |
+| CH9101 | `55d8` | 同上。 | 按官方驱动源码实现，未经硬件验证 |
+| CH9111 | `55e9`、`55ea` | 同上。只覆盖 CH9329 的九个波特率。 | 按官方驱动源码实现，未经硬件验证 |
+| CH342、CH344、CH9103、CH347、CH9104、CH9114、CH346、CH9105 | `55d2`、`55d5`、`55d7`、`55da`、`55df`、`55e8`、`55ec`、`55ef` | 枚举会跳过，原因是多串口，未支持，请使用系统驱动。`55d5` 是 CH344，`55d7` 是 CH9103。 | 未实现，未验证 |
+| CH9143 | `55d6` | 枚举会跳过。驱动表里有这个 PID，直连未实现，请使用系统驱动。 | 未实现，未验证 |
+| 需要指定接口号的型号 | `55db`、`55dd`、`55de`、`55e7`、`55eb`、`5610` | 枚举会跳过。 | 未实现，未验证 |
+| 其他 `1A86` PID | — | 枚举会跳过，原因是协议未确认。 | 未实现，未验证 |
+
+`--debug` 日志对每个 `1A86` 设备打一行 `WCH enumerate`，带 VID、PID、
+`bcdDevice`、首个接口类，以及 `decision=list` 或 `decision=skip` 和原因。
+GUI 串口下拉框和 `kvmux-relay --list-serial` 用同一个
+`enumerate_serial_ports()`。被列出的芯片描述是 `<芯片名> (USB direct)`，
+CH341 仍是 `CH341 (USB direct)`。
+
 ## macOS CH341 与分离 relay 自检步骤
 
 本节是 Mac 上的操作步骤，用来检查 CH341 libusb 后端，以及分离后的 control relay 和 video relay。写本节时这台开发机没有 `1A86:5523`，这些命令也没有在 macOS 上运行过。跑完以后，把文末字段的实际输出补进本节。没有这条记录时，对应硬件项保持未验证。

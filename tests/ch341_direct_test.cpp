@@ -97,5 +97,77 @@ int main() {
     expect(!kvmux::parse_ch341_usb_name(name),
            std::string("accepted illegal name ") + std::string(name));
   }
+
+  const auto ignored = kvmux::classify_wch_device({0x0403, 0x6001, 0, 0xff});
+  expect(ignored.decision == kvmux::WchPortDecision::ignore,
+         "other vendor is ignored");
+
+  struct Listed {
+    std::uint16_t product_id = 0;
+    kvmux::WchLinkKind link = kvmux::WchLinkKind::none;
+    std::string_view chip;
+  };
+  constexpr Listed listed[] = {
+      {0x7523, kvmux::WchLinkKind::classic, "CH340"},
+      {0x7522, kvmux::WchLinkKind::classic, "CH340K"},
+      {0x5523, kvmux::WchLinkKind::classic, "CH341"},
+      {0x55d3, kvmux::WchLinkKind::ch343, "CH343"},
+      {0x55d4, kvmux::WchLinkKind::ch343, "CH9102"},
+      {0x55d8, kvmux::WchLinkKind::ch343, "CH9101"},
+      {0x55e9, kvmux::WchLinkKind::ch343, "CH9111"},
+      {0x55ea, kvmux::WchLinkKind::ch343, "CH9111"},
+  };
+  for (const auto& row : listed) {
+    const auto choice =
+        kvmux::classify_wch_device({0x1a86, row.product_id, 0x0263, 0xff});
+    expect(choice.decision == kvmux::WchPortDecision::list &&
+               choice.link == row.link && choice.chip == row.chip &&
+               choice.reason.find("请使用系统驱动") == std::string_view::npos,
+           "listed pid " + std::to_string(row.product_id));
+  }
+
+  struct Skipped {
+    std::uint16_t product_id = 0;
+    std::string_view chip;
+  };
+  constexpr Skipped skipped[] = {
+      {0x55d2, "CH342"}, {0x55d5, "CH344"},  {0x55d7, "CH9103"},
+      {0x55db, "CH347"}, {0x5610, "CH9433"}, {0x7584, "CH340S"},
+      {0x1111, "WCH"},
+  };
+  for (const auto& row : skipped) {
+    const auto low =
+        kvmux::classify_wch_device({0x1a86, row.product_id, 0x0100, -1});
+    const auto high =
+        kvmux::classify_wch_device({0x1a86, row.product_id, 0x0445, 0x02});
+    expect(low.decision == kvmux::WchPortDecision::skip &&
+               high.decision == kvmux::WchPortDecision::skip &&
+               low.chip == row.chip && high.chip == row.chip &&
+               low.link == kvmux::WchLinkKind::none &&
+               low.reason.find("请使用系统驱动") != std::string_view::npos &&
+               low.reason == high.reason,
+           "skipped pid " + std::to_string(row.product_id));
+  }
+
+  struct Line {
+    int baud = 0;
+    std::uint16_t index = 0;
+  };
+  constexpr Line lines[] = {
+      {1200, 0xB201},  {2400, 0xD901},  {4800, 0x6402},
+      {9600, 0xB202},  {14400, 0xCC02}, {19200, 0xD902},
+      {38400, 0x6403}, {57600, 0x9803}, {115200, 0xCC03},
+  };
+  expect(kvmux::ch343_line_value_8n1() == 0xC38C, "8N1 line value");
+  expect(kvmux::ch343_modem_dtr_rts() == 0xFF9F, "DTR RTS modem value");
+  for (const auto& line : lines) {
+    const auto index = kvmux::ch343_line_index(line.baud);
+    expect(index.has_value() && *index == line.index,
+           "ch343 line baud " + std::to_string(line.baud));
+  }
+  for (const int baud : {0, 300, 50, 9601, 230400, -9600, 1000000}) {
+    expect(!kvmux::ch343_line_index(baud),
+           "ch343 rejected baud " + std::to_string(baud));
+  }
   return 0;
 }

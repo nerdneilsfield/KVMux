@@ -231,6 +231,7 @@ std::vector<SerialPortInfo> enumerate_serial_ports() {
     }
   }
 #if KVMUX_HAS_CH341_USB
+  // GUI refresh and kvmux-relay --list-serial both call this function.
   auto direct = enumerate_ch341_usb_ports();
   result.insert(result.end(), std::make_move_iterator(direct.begin()),
                 std::make_move_iterator(direct.end()));

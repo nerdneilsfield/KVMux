@@ -79,3 +79,24 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 - A binary distribution must ship the LGPL notice and a corresponding-source
   offer for the libusb version that was actually linked. A link to upstream
   alone is not that offer.
+
+## WCH serial protocol (not vendored)
+
+KVMux does not vendor the Linux `ch341` driver or WCH's `ch343ser_linux`
+driver. Both are GPL-2.0-or-later. The direct backend does not copy their
+functions, data layout, or comments.
+
+- CH340 (`1a86:7523`), CH340K (`1a86:7522`), and CH341 (`1a86:5523`) use the
+  vendor-register sequence already in this tree. The register facts were
+  checked against the 2026-11-13 CH34x notes, which summarize mainline
+  `drivers/usb/serial/ch341.c`. That file is not in this repository.
+- CH343 (`55d3`), CH9102 (`55d4`), CH9101 (`55d8`), and CH9111 (`55e9`,
+  `55ea`) use a libusb sequence written from protocol facts confirmed in
+  WCHSoftGroup `ch343ser_linux` `driver/ch343.c` and `driver/ch343.h`
+  （依据 WCH ch343 驱动确认的协议事实）: vendor IN `0x5F` reads the
+  identity, vendor OUT `0xA1` on interface 0 writes the 8N1 line word and
+  divider, and vendor OUT `0xA4` writes the inverted DTR/RTS mask. The local
+  tree that was read is not part of KVMux and was not modified. These four
+  chips are 按官方驱动源码实现，未经硬件验证.
+- Multi-port IDs and IDs that the WCH driver binds by interface number are
+  named in the enumerator and are not opened.
