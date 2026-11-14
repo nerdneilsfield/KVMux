@@ -174,7 +174,7 @@ struct RelayServer::Impl {
         }
         if (!sample->raw || sample->mjpeg)
           throw std::runtime_error("H.26x capture is not raw");
-        auto frame = processor.process(*sample);
+        auto frame = processor.process(std::move(*sample));
         if (!frame) throw std::runtime_error(processor.last_error());
         auto input = frame->frame;
         if (input->format != AV_PIX_FMT_NV12 &&

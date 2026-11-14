@@ -74,7 +74,8 @@ std::optional<CaptureSample> CaptureSample::make_mjpeg(
     const std::uint64_t generation, const std::uint64_t sequence,
     const std::chrono::steady_clock::time_point arrival,
     const std::uint32_t width, const std::uint32_t height,
-    const std::span<const std::uint8_t> bytes) {
+    const std::span<const std::uint8_t> bytes,
+    std::vector<std::uint8_t>* const reuse) {
   if (!valid_dimensions(width, height) || bytes.empty() ||
       bytes.size() > kMaxCompressedSampleBytes) {
     return std::nullopt;
@@ -84,6 +85,13 @@ std::optional<CaptureSample> CaptureSample::make_mjpeg(
     return std::nullopt;
   }
 
+  const auto storage = bytes.size() + kInputPaddingBytes;
+  std::vector<std::uint8_t> payload_bytes;
+  if (reuse != nullptr && reuse->capacity() >= storage)
+    payload_bytes = std::move(*reuse);
+  payload_bytes.assign(bytes.begin(), bytes.end());
+  payload_bytes.resize(storage, 0);
+
   CaptureSample sample{};
   sample.generation = generation;
   sample.sequence = sequence;
@@ -92,8 +100,7 @@ std::optional<CaptureSample> CaptureSample::make_mjpeg(
   sample.height = height;
   MjpegPayload payload;
   payload.payload_size = bytes.size();
-  payload.bytes.resize(bytes.size() + kInputPaddingBytes, 0);
-  std::copy(bytes.begin(), bytes.end(), payload.bytes.begin());
+  payload.bytes = std::move(payload_bytes);
   sample.mjpeg = std::move(payload);
   return sample;
 }

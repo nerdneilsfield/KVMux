@@ -77,10 +77,13 @@ struct CaptureSample {
       std::uint32_t height, PixelFormat format,
       std::span<const PlaneLayout> planes, std::span<const std::uint8_t> bytes);
 
+  // reuse keeps its allocation when the capacity already covers the payload
+  // and the decoder padding. A null pointer allocates a new buffer.
   [[nodiscard]] static std::optional<CaptureSample> make_mjpeg(
       std::uint64_t generation, std::uint64_t sequence,
       std::chrono::steady_clock::time_point arrival, std::uint32_t width,
-      std::uint32_t height, std::span<const std::uint8_t> bytes);
+      std::uint32_t height, std::span<const std::uint8_t> bytes,
+      std::vector<std::uint8_t>* reuse = nullptr);
 };
 
 [[nodiscard]] bool valid_dimensions(std::uint32_t width,

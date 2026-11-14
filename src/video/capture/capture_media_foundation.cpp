@@ -177,6 +177,16 @@ class MediaFoundationCapture final : public CaptureSource {
     return result;
   }
 
+  void wait_for_sample(const std::atomic<bool>& stopping) override {
+    std::unique_lock lock(sample_mutex_);
+    sample_cv_.wait(lock, [&] {
+      return stopping.load(std::memory_order_acquire) ||
+             latest_sample_.has_value();
+    });
+  }
+
+  void wake_sample_wait() noexcept override { sample_cv_.notify_one(); }
+
   CaptureSnapshot snapshot() const override {
     std::lock_guard lock(state_mutex_);
     return snapshot_;
@@ -709,6 +719,7 @@ class MediaFoundationCapture final : public CaptureSource {
           }
           latest_sample_ = std::move(copied);
         }
+        sample_cv_.notify_one();
         std::lock_guard lock(state_mutex_);
         ++snapshot_.received_samples;
       }
@@ -763,6 +774,7 @@ class MediaFoundationCapture final : public CaptureSource {
   ColorMatrix color_matrix_{ColorMatrix::unknown};
   std::atomic<std::uint64_t> sequence_{};
   std::mutex sample_mutex_;
+  std::condition_variable sample_cv_;
   std::optional<CaptureSample> latest_sample_;
 };
 

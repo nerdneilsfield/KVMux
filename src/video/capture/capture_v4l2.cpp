@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -263,6 +264,15 @@ class V4l2CaptureSource final : public CaptureSource {
     result.swap(latest_);
     return result;
   }
+
+  void wait_for_sample(const std::atomic<bool>& stopping) override {
+    std::unique_lock lock(mutex_);
+    sample_cv_.wait(lock, [&] {
+      return stopping.load(std::memory_order_acquire) || latest_.has_value();
+    });
+  }
+
+  void wake_sample_wait() noexcept override { sample_cv_.notify_one(); }
 
   CaptureSnapshot snapshot() const override {
     std::lock_guard lock(mutex_);
@@ -532,9 +542,9 @@ class V4l2CaptureSource final : public CaptureSource {
     const auto sequence = next_sequence_++;
     if (mode.device_format == PixelFormat::mjpeg) {
       if (buffer.bytesused > kMaxCompressedSampleBytes) return std::nullopt;
-      sample =
-          CaptureSample::make_mjpeg(generation, sequence, arrival, mode.width,
-                                    mode.height, {bytes, buffer.bytesused});
+      sample = CaptureSample::make_mjpeg(
+          generation, sequence, arrival, mode.width, mode.height,
+          {bytes, buffer.bytesused}, &mjpeg_spare_);
     } else {
       std::vector<PlaneLayout> planes;
       const std::size_t stride = format.bytesperline;
@@ -586,11 +596,18 @@ class V4l2CaptureSource final : public CaptureSource {
       }
       latest_ = std::move(sample);
     }
+    sample_cv_.notify_one();
+    if (discarded && discarded->mjpeg &&
+        discarded->mjpeg->bytes.capacity() > mjpeg_spare_.capacity()) {
+      mjpeg_spare_ = std::move(discarded->mjpeg->bytes);
+    }
   }
 
   mutable std::mutex mutex_;
+  std::condition_variable sample_cv_;
   CaptureSnapshot snapshot_;
   std::optional<CaptureSample> latest_;
+  std::vector<std::uint8_t> mjpeg_spare_;
   std::thread worker_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<int> stop_fd_{-1};

@@ -1,9 +1,12 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "video/capture_sample.hpp"
@@ -68,6 +71,13 @@ class CaptureSource {
   virtual void start(const CaptureMode& mode) = 0;
   virtual void stop() noexcept = 0;
   [[nodiscard]] virtual std::optional<CaptureSample> take_latest_sample() = 0;
+  // Returns when a sample is published or stopping is true. Sources that do
+  // not signal publication keep the previous 1 ms poll.
+  virtual void wait_for_sample(const std::atomic<bool>& stopping) {
+    if (stopping.load(std::memory_order_acquire)) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  virtual void wake_sample_wait() noexcept {}
   [[nodiscard]] virtual CaptureSnapshot snapshot() const = 0;
 };
 

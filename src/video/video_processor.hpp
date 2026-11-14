@@ -18,14 +18,13 @@ class VideoProcessor {
   VideoProcessor(const VideoProcessor&) = delete;
   VideoProcessor& operator=(const VideoProcessor&) = delete;
 
-  [[nodiscard]] std::optional<VideoFrame> process(const CaptureSample& sample);
+  [[nodiscard]] std::optional<VideoFrame> process(CaptureSample sample);
   [[nodiscard]] const std::string& last_error() const noexcept {
     return last_error_;
   }
 
  private:
-  [[nodiscard]] std::optional<VideoFrame> process_raw(
-      const CaptureSample& sample);
+  [[nodiscard]] std::optional<VideoFrame> process_raw(CaptureSample sample);
   [[nodiscard]] std::optional<VideoFrame> process_mjpeg(
       const CaptureSample& sample);
   bool ensure_mjpeg_decoder();

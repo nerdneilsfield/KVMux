@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <utility>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/buffer.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
@@ -43,6 +46,14 @@ AVPixelFormat av_format(const PixelFormat format) {
       return AV_PIX_FMT_NONE;
   }
   return AV_PIX_FMT_NONE;
+}
+
+struct OwnedRawBytes {
+  std::vector<std::uint8_t> bytes;
+};
+
+void free_raw_bytes(void* opaque, std::uint8_t*) {
+  delete static_cast<OwnedRawBytes*>(opaque);
 }
 
 std::string av_error(const int error) {
@@ -84,7 +95,7 @@ VideoProcessor::VideoProcessor() = default;
 
 VideoProcessor::~VideoProcessor() { avcodec_free_context(&decoder_); }
 
-std::optional<VideoFrame> VideoProcessor::process(const CaptureSample& sample) {
+std::optional<VideoFrame> VideoProcessor::process(CaptureSample sample) {
   last_error_.clear();
   if (!valid_dimensions(sample.width, sample.height) ||
       (static_cast<int>(sample.raw.has_value()) +
@@ -136,12 +147,16 @@ std::optional<VideoFrame> VideoProcessor::process(const CaptureSample& sample) {
     }
     return metadata(sample, sample.decoded);
   }
-  return sample.raw ? process_raw(sample) : process_mjpeg(sample);
+  return sample.raw ? process_raw(std::move(sample)) : process_mjpeg(sample);
 }
 
-std::optional<VideoFrame> VideoProcessor::process_raw(
-    const CaptureSample& sample) {
-  const auto& raw = *sample.raw;
+std::optional<VideoFrame> VideoProcessor::process_raw(CaptureSample sample) {
+  if (!sample.raw) {
+    fail("unsupported raw pixel layout");
+    return std::nullopt;
+  }
+  auto raw = std::move(*sample.raw);
+  sample.raw.reset();
   const auto format = av_format(raw.format);
   const int expected_planes =
       raw.format == PixelFormat::nv12
@@ -165,11 +180,44 @@ std::optional<VideoFrame> VideoProcessor::process_raw(
   frame->format = format;
   frame->width = static_cast<int>(sample.width);
   frame->height = static_cast<int>(sample.height);
+
+  const bool adopt = std::all_of(
+      raw.planes.begin(), raw.planes.end(), [](const PlaneLayout& plane) {
+        return plane.stride > 0 &&
+               plane.stride <= std::numeric_limits<int>::max();
+      });
+  if (adopt) {
+    auto owned = std::make_unique<OwnedRawBytes>();
+    owned->bytes = std::move(raw.bytes);
+    // FFmpeg deletes this object from free_raw_bytes. If create fails, we do.
+    OwnedRawBytes* const kept = owned.release();
+    AVBufferRef* buffer = av_buffer_create(
+        kept->bytes.data(), kept->bytes.size(), free_raw_bytes, kept, 0);
+    if (buffer == nullptr) {
+      delete kept;
+      fail("could not retain raw frame");
+      return std::nullopt;
+    }
+    frame->buf[0] = buffer;
+    frame->extended_data = frame->data;
+    for (int plane_index = 0; plane_index < expected_planes; ++plane_index) {
+      const auto& plane = raw.planes[static_cast<std::size_t>(plane_index)];
+      if (plane.offset >= static_cast<std::size_t>(buffer->size)) {
+        fail("raw plane is outside owned storage");
+        return std::nullopt;
+      }
+      frame->data[plane_index] = buffer->data + plane.offset;
+      frame->linesize[plane_index] = static_cast<int>(plane.stride);
+    }
+    return metadata(sample, std::move(frame));
+  }
+
+  // Negative strides are copied into a positive-stride frame. Consumers reject
+  // a negative linesize, and the row reversal is the one remaining copy.
   if (const int result = av_frame_get_buffer(frame.get(), 32); result < 0) {
     fail("could not allocate raw frame: " + av_error(result));
     return std::nullopt;
   }
-
   for (int plane_index = 0; plane_index < expected_planes; ++plane_index) {
     const auto& plane = raw.planes[static_cast<std::size_t>(plane_index)];
     const auto* source = raw.bytes.data() + plane.offset;

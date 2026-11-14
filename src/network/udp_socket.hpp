@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,11 +18,12 @@ class Endpoint {
   [[nodiscard]] bool operator==(const Endpoint& other) const noexcept;
 
  private:
-  struct Address;
-  std::shared_ptr<const Address> address_;
   friend class Socket;
   friend std::optional<Endpoint> resolve(std::string_view, std::uint16_t,
                                          std::string&);
+  bool has_address_{};
+  std::uint32_t address_{};
+  std::uint16_t port_{};
 };
 [[nodiscard]] std::optional<Endpoint> resolve(std::string_view host,
                                               std::uint16_t port,

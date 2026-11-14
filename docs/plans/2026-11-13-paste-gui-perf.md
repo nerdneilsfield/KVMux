@@ -279,6 +279,20 @@ Evidence:
 - relay 接收：设置 `SO_RCVBUF`/`SO_SNDBUF`（例如 4 MB，失败只记 warn），`Address` 复用。
 - 验收：Q21 现有测试全过；效果只在实测后写结论，否则标为未验证。
 
+Status: 完成（2026-11-14）。改动已落地。没有前后对比的耗时或吞吐数据，效果未验证。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。没有 macOS 或 Windows 构建。
+- 采样等待：`VideoPipeline` 在没有样本时调用 `CaptureSource::wait_for_sample`。`stop()` 先置位再 `wake_sample_wait()`，然后 join。V4L2、Media Foundation、AVFoundation 和 `RelayClient` 在发布样本的同一把锁上通知。测试用的采集替身没有覆盖这个函数，仍是 1 ms 轮询。没有把条件变量扩到 relay server 自己的采集轮询。
+- MJPEG：`make_mjpeg` 在容量够时接住调用方给出的 vector，并仍把解码填充清零。V4L2 把被覆盖的那一帧缓冲交回下一帧。没有进程级内存池。
+- raw：正 stride 的样本字节交给 `AVBufferRef`，不再拷进第二块对齐缓冲。负 stride 仍逐行拷进正 linesize 的 AVFrame，编码器和现有契约测试都按正 linesize 读。
+- swscale 回退帧在宽高和 RGBA 不变时复用，不再每帧 `av_frame_alloc`。
+- 发送端先用 `packet_shape` 算出 `40 + length`，令牌不够就不调用 `media_packet`。`next_deadline` 同样不再为了长度去组包。
+- 接收端 `Socket::bind` 成功后请求 4 MB 的 `SO_RCVBUF` 和 `SO_SNDBUF`，失败只 `warn`，不让 bind 失败。`Endpoint` 直接保存 IPv4 地址和端口，`receive` 不再为每个数据报分配 `Address`。
+- 没有加 PBO、多线程 MJPEG 解码或 `recvmmsg`。
+- Q21：`make test` 全过（32/32，Total Test time (real) = 100.51 sec）。没有做性能测量，所以不写加速结论。Media Foundation 和 AVFoundation 的等待没有在对应系统上编译。
+
 ## 顺序
 
 T1 → T2 → T3 → T4 → T5 → T5b → T6。T1、T2 各自独立提交。T1 完成后先请用户在 macOS 上运行 `--probe-control --serial ch341-usb:... --paste` 和 GUI 粘贴，带 `--debug --log-file`，据日志里的取消原因决定 T3 的重点；T4 起不依赖该结果，可继续。每个任务完成后：`make lint`、`make test`，按 AGENTS 要求记录 Evidence。
@@ -301,4 +315,4 @@ Opening、USB not ready、Clearing input、capture Starting 在 error 为空时�
 
 ## 进度
 
-T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 完成。T5b 完成。T6 尚未开始。
+T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 完成。T5b 完成。T6 完成（效果未实测）。

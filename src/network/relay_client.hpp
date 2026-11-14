@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <memory>
 
 #include "control/control_sink.hpp"
@@ -89,6 +90,8 @@ class RelayClient {
   TrafficSnapshot traffic_snapshot() const;
   ClientVideoSnapshot video_snapshot() const;
   std::optional<CaptureSample> take_sample();
+  void wait_for_sample(const std::atomic<bool>& stopping);
+  void wake_sample_wait() noexcept;
 
  private:
   struct Impl;
@@ -104,6 +107,10 @@ class NetworkCaptureSource final : public CaptureSource {
   std::optional<CaptureSample> take_latest_sample() override {
     return client_->take_sample();
   }
+  void wait_for_sample(const std::atomic<bool>& stopping) override {
+    client_->wait_for_sample(stopping);
+  }
+  void wake_sample_wait() noexcept override { client_->wake_sample_wait(); }
   CaptureSnapshot snapshot() const override {
     return client_->capture_snapshot();
   }

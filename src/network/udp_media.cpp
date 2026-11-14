@@ -125,8 +125,14 @@ std::size_t media_wire_bytes(const MediaFrame& f) {
                    packets * 72
              : 0;
 }
-std::optional<std::vector<std::uint8_t>> media_packet(const MediaFrame& f,
-                                                      std::size_t ordinal) {
+struct PacketShape {
+  std::size_t count{};
+  std::size_t index{};
+  std::size_t length{};
+  bool parity{};
+};
+std::optional<PacketShape> packet_shape(const MediaFrame& f,
+                                        std::size_t ordinal) {
   if (ordinal >= media_packet_count(f)) return {};
   const auto count = fragments(f.bytes.size());
   const auto group = ordinal / 9;
@@ -136,6 +142,16 @@ std::optional<std::vector<std::uint8_t>> media_packet(const MediaFrame& f,
   const auto index = parity ? group : group * 8 + within;
   const auto length =
       parity ? payload : std::min(payload, f.bytes.size() - index * payload);
+  return PacketShape{count, index, length, parity};
+}
+std::optional<std::vector<std::uint8_t>> media_packet(const MediaFrame& f,
+                                                      std::size_t ordinal) {
+  const auto shape = packet_shape(f, ordinal);
+  if (!shape) return {};
+  const auto count = shape->count;
+  const auto index = shape->index;
+  const auto length = shape->length;
+  const bool parity = shape->parity;
   std::vector<std::uint8_t> b(40 + length);
   b[0] = 1;
   b[1] = static_cast<std::uint8_t>(f.codec);
@@ -150,8 +166,8 @@ std::optional<std::vector<std::uint8_t>> media_packet(const MediaFrame& f,
   if (!parity)
     std::copy_n(f.bytes.data() + index * payload, length, b.begin() + 40);
   else
-    for (std::size_t i = group * 8 * payload;
-         i < std::min(f.bytes.size(), (group + 1) * 8 * payload); ++i)
+    for (std::size_t i = index * 8 * payload;
+         i < std::min(f.bytes.size(), (index + 1) * 8 * payload); ++i)
       b[40 + i % payload] ^= f.bytes[i];
   return b;
 }
@@ -528,11 +544,14 @@ std::optional<std::vector<std::uint8_t>> MediaPacer::next_datagram(
   poll(now);
   auto& s = *impl_;
   if (!s.active) return {};
-  auto packet = media_packet(*s.active, s.ordinal);
-  const auto charge = packet->size() + 32;
+  const auto shape = packet_shape(*s.active, s.ordinal);
+  if (!shape) return {};
+  const auto charge = 40 + shape->length + 32;
   s.tokens = s.credit(now);
   s.updated = std::max(s.updated, now);
   if (s.tokens < static_cast<double>(charge)) return {};
+  auto packet = media_packet(*s.active, s.ordinal);
+  if (!packet) return {};
   s.tokens -= static_cast<double>(charge);
   s.counters.sent_bytes += charge;
   if (++s.ordinal == media_packet_count(*s.active)) {
@@ -544,8 +563,10 @@ std::optional<std::vector<std::uint8_t>> MediaPacer::next_datagram(
 std::optional<MediaTime> MediaPacer::next_deadline(MediaTime now) const {
   const auto& s = *impl_;
   if (!s.active) return {};
-  const auto packet = media_packet(*s.active, s.ordinal);
-  const double need = static_cast<double>(packet->size() + 32) - s.credit(now);
+  const auto shape = packet_shape(*s.active, s.ordinal);
+  if (!shape) return {};
+  const double need =
+      static_cast<double>(40 + shape->length + 32) - s.credit(now);
   if (need <= 0 || now >= s.deadline) return now;
   if (!s.rate) return s.deadline;
   const auto delay = std::chrono::nanoseconds(static_cast<std::int64_t>(

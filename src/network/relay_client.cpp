@@ -141,6 +141,7 @@ struct RelayClient::Impl {
   std::uint64_t marker{}, generation{};
   // Network owns marker/recovery. Decoder posts only a coalesced reason.
   std::condition_variable decode_wake;
+  std::condition_variable sample_wake;
   struct Compressed {
     EncodedAccessUnit au;
     std::uint64_t marker{};
@@ -293,6 +294,7 @@ struct RelayClient::Impl {
     }
     ++capture.received_samples;
     latest = std::move(sample);
+    sample_wake.notify_one();
   }
   void decoder_loop() {
     std::string error;
@@ -1190,6 +1192,16 @@ TrafficSnapshot RelayClient::traffic_snapshot() const {
 std::optional<CaptureSample> RelayClient::take_sample() {
   std::lock_guard lock(impl_->mutex);
   return std::exchange(impl_->latest, std::nullopt);
+}
+void RelayClient::wait_for_sample(const std::atomic<bool>& stopping) {
+  auto& state = *impl_;
+  std::unique_lock lock(state.mutex);
+  state.sample_wake.wait(lock, [&] {
+    return stopping.load(std::memory_order_acquire) || state.latest.has_value();
+  });
+}
+void RelayClient::wake_sample_wait() noexcept {
+  impl_->sample_wake.notify_one();
 }
 NetworkCaptureSource::NetworkCaptureSource(std::shared_ptr<RelayClient> client)
     : client_(std::move(client)) {

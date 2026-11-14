@@ -279,18 +279,33 @@ bool VideoRenderer::upload(const VideoFrame& input,
                                 static_cast<AVPixelFormat>(frame->format),
                                 frame->width, frame->height, AV_PIX_FMT_RGBA,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
-    AVFrame* converted = av_frame_alloc();
-    fallback_frame_ =
-        AvFramePtr(converted, [](AVFrame* value) { av_frame_free(&value); });
-    if (!sws_ || !converted) {
+    const bool reusable = fallback_frame_ &&
+                          fallback_frame_->width == frame->width &&
+                          fallback_frame_->height == frame->height &&
+                          fallback_frame_->format == AV_PIX_FMT_RGBA &&
+                          fallback_frame_->data[0] != nullptr;
+    if (!reusable) {
+      AVFrame* converted = av_frame_alloc();
+      fallback_frame_ =
+          AvFramePtr(converted, [](AVFrame* value) { av_frame_free(&value); });
+      if (!sws_ || !converted) {
+        snapshot_.error = "Could not create CPU pixel fallback";
+        return false;
+      }
+      converted->format = AV_PIX_FMT_RGBA;
+      converted->width = frame->width;
+      converted->height = frame->height;
+      if (av_frame_get_buffer(converted, 32) < 0) {
+        fallback_frame_.reset();
+        snapshot_.error = "Could not create CPU pixel fallback";
+        return false;
+      }
+    } else if (!sws_) {
       snapshot_.error = "Could not create CPU pixel fallback";
       return false;
     }
-    converted->format = AV_PIX_FMT_RGBA;
-    converted->width = frame->width;
-    converted->height = frame->height;
-    if (av_frame_get_buffer(converted, 32) < 0 ||
-        sws_scale(sws_, frame->data, frame->linesize, 0, frame->height,
+    AVFrame* converted = fallback_frame_.get();
+    if (sws_scale(sws_, frame->data, frame->linesize, 0, frame->height,
                   converted->data, converted->linesize) <= 0) {
       snapshot_.error = "CPU pixel fallback failed";
       return false;

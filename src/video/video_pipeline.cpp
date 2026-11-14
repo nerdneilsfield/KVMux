@@ -24,6 +24,7 @@ void VideoPipeline::set_generation(std::uint64_t generation) {
 
 void VideoPipeline::stop() noexcept {
   stopping_.store(true, std::memory_order_release);
+  source_.wake_sample_wait();
   if (worker_.joinable()) worker_.join();
 }
 
@@ -43,10 +44,10 @@ void VideoPipeline::run() {
   while (!stopping_.load(std::memory_order_acquire)) {
     auto sample = source_.take_latest_sample();
     if (!sample) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      source_.wait_for_sample(stopping_);
       continue;
     }
-    auto frame = processor.process(*sample);
+    auto frame = processor.process(std::move(*sample));
     if (!frame) {
       std::lock_guard lock(mutex_);
       ++snapshot_.rejected_samples;

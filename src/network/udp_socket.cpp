@@ -1,5 +1,7 @@
 #include "network/udp_socket.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -67,14 +69,24 @@ bool initialize(std::string& error) {
 }
 }  // namespace
 
-struct Endpoint::Address {
-  sockaddr_in value{};
-};
+void request_socket_buffers(NativeSocket raw) {
+  const int bytes = 4 * 1024 * 1024;
+#ifdef _WIN32
+  const auto* value = reinterpret_cast<const char*>(&bytes);
+  const int length = static_cast<int>(sizeof(bytes));
+#else
+  const void* value = &bytes;
+  const socklen_t length = sizeof(bytes);
+#endif
+  if (::setsockopt(raw, SOL_SOCKET, SO_RCVBUF, value, length) != 0)
+    spdlog::warn("UDP SO_RCVBUF was not set");
+  if (::setsockopt(raw, SOL_SOCKET, SO_SNDBUF, value, length) != 0)
+    spdlog::warn("UDP SO_SNDBUF was not set");
+}
 bool Endpoint::operator==(const Endpoint& other) const noexcept {
-  if (!address_ || !other.address_) return address_ == other.address_;
-  return address_->value.sin_addr.s_addr ==
-             other.address_->value.sin_addr.s_addr &&
-         address_->value.sin_port == other.address_->value.sin_port;
+  if (!has_address_ || !other.has_address_)
+    return has_address_ == other.has_address_;
+  return address_ == other.address_ && port_ == other.port_;
 }
 std::optional<Endpoint> resolve(std::string_view host, std::uint16_t port,
                                 std::string& error) {
@@ -91,11 +103,13 @@ std::optional<Endpoint> resolve(std::string_view host, std::uint16_t port,
     error = "could not resolve UDP IPv4 endpoint";
     return std::nullopt;
   }
-  auto address = std::make_shared<Endpoint::Address>();
-  address->value = *reinterpret_cast<const sockaddr_in*>(addresses->ai_addr);
-  freeaddrinfo(addresses);
+  const auto* resolved =
+      reinterpret_cast<const sockaddr_in*>(addresses->ai_addr);
   Endpoint endpoint;
-  endpoint.address_ = std::move(address);
+  endpoint.has_address_ = true;
+  endpoint.address_ = resolved->sin_addr.s_addr;
+  endpoint.port_ = resolved->sin_port;
+  freeaddrinfo(addresses);
   return endpoint;
 }
 Socket::~Socket() { close(); }
@@ -134,12 +148,17 @@ std::optional<Socket> Socket::bind(std::string_view host, std::uint16_t port,
     return std::nullopt;
   }
 #endif
+  sockaddr_in bound{};
+  bound.sin_family = AF_INET;
+  bound.sin_addr.s_addr = endpoint->address_;
+  bound.sin_port = endpoint->port_;
   if (!nonblocking(raw) ||
-      ::bind(raw, reinterpret_cast<const sockaddr*>(&endpoint->address_->value),
-             sizeof(sockaddr_in)) != 0) {
+      ::bind(raw, reinterpret_cast<const sockaddr*>(&bound), sizeof(bound)) !=
+          0) {
     error = "could not configure/bind UDP socket";
     return std::nullopt;
   }
+  request_socket_buffers(raw);
   return socket;
 }
 std::optional<std::uint16_t> Socket::local_port() const {
@@ -153,16 +172,19 @@ std::optional<std::uint16_t> Socket::local_port() const {
 }
 SendStatus Socket::send_to(const Endpoint& endpoint,
                            std::span<const std::uint8_t> bytes) const {
-  if (!endpoint.address_ || bytes.size() > max_payload)
+  if (!endpoint.has_address_ || bytes.size() > max_payload)
     return SendStatus::invalid;
   if (native(handle_) == invalid_socket) return SendStatus::error;
   // Nonblocking: a caller may drop an unsent datagram; never retry a partial
   // one.
-  const auto count =
-      ::sendto(native(handle_), reinterpret_cast<const char*>(bytes.data()),
-               static_cast<BufferLength>(bytes.size()), 0,
-               reinterpret_cast<const sockaddr*>(&endpoint.address_->value),
-               sizeof(sockaddr_in));
+  sockaddr_in destination{};
+  destination.sin_family = AF_INET;
+  destination.sin_addr.s_addr = endpoint.address_;
+  destination.sin_port = endpoint.port_;
+  const auto count = ::sendto(
+      native(handle_), reinterpret_cast<const char*>(bytes.data()),
+      static_cast<BufferLength>(bytes.size()), 0,
+      reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
   if (count >= 0 && static_cast<std::size_t>(count) == bytes.size())
     return SendStatus::sent;
   if (count < 0 && (would_block(last_error()) || interrupted(last_error())))
@@ -196,12 +218,12 @@ ReceiveResult Socket::receive(std::chrono::milliseconds timeout) const {
       // One spare byte identifies over-limit datagrams even if recvfrom
       // truncates.
       std::array<std::uint8_t, max_payload + 1> bytes{};
-      auto address = std::make_shared<Endpoint::Address>();
-      SocketLength length = sizeof(address->value);
+      sockaddr_in address{};
+      SocketLength length = sizeof(address);
       const auto count =
           ::recvfrom(native(handle_), reinterpret_cast<char*>(bytes.data()),
                      static_cast<BufferLength>(bytes.size()), 0,
-                     reinterpret_cast<sockaddr*>(&address->value), &length);
+                     reinterpret_cast<sockaddr*>(&address), &length);
 #ifdef _WIN32
       if (count < 0 && last_error() == WSAEMSGSIZE)
         return {ReceiveStatus::oversized, {}};
@@ -210,9 +232,11 @@ ReceiveResult Socket::receive(std::chrono::milliseconds timeout) const {
         return {ReceiveStatus::oversized, {}};
       if (count >= 0) {
         Endpoint source;
-        source.address_ = std::move(address);
+        source.has_address_ = true;
+        source.address_ = address.sin_addr.s_addr;
+        source.port_ = address.sin_port;
         return {ReceiveStatus::datagram,
-                {std::move(source), {bytes.begin(), bytes.begin() + count}}};
+                {source, {bytes.begin(), bytes.begin() + count}}};
       }
       if (!would_block(last_error()) && !interrupted(last_error())) return {};
     }

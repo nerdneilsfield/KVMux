@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -69,6 +70,7 @@ static PixelFormat pixel_format(OSType code) {
 
 struct AvfState {
   mutable std::mutex mutex;
+  std::condition_variable sample_wake;
   CaptureSnapshot snapshot;
   std::optional<CaptureSample> latest;
   std::uint64_t next_sequence{};
@@ -215,6 +217,7 @@ static ColorMatrix color_matrix(CVImageBufferRef image) {
       state->latest.emplace(std::move(*result));
       ++state->snapshot.received_samples;
       if (replaced) ++state->snapshot.overwritten_samples;
+      state->sample_wake.notify_one();
     }
   }
 }
@@ -529,6 +532,15 @@ class AvfoundationCaptureSource final : public CaptureSource {
     result.swap(state_->latest);
     return result;
   }
+
+  void wait_for_sample(const std::atomic<bool>& stopping) override {
+    std::unique_lock lock(state_->mutex);
+    state_->sample_wake.wait(lock, [&] {
+      return stopping.load(std::memory_order_acquire) || state_->latest.has_value();
+    });
+  }
+
+  void wake_sample_wait() noexcept override { state_->sample_wake.notify_one(); }
 
   CaptureSnapshot snapshot() const override {
     std::lock_guard lock(state_->mutex);
