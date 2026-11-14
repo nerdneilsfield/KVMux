@@ -72,3 +72,6 @@ Testing/
 # macOS Finder metadata
 .DS_Store
 /.cw
+
+# Dear ImGui window state written by stray runs
+imgui.ini
