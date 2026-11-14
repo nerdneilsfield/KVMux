@@ -23,6 +23,22 @@ enum class RecordingState {
   failed
 };
 enum class ScrollCaptureState { idle, starting, capturing, finishing, failed };
+
+[[nodiscard]] inline const char* scroll_state_name(ScrollCaptureState state) {
+  switch (state) {
+    case ScrollCaptureState::idle:
+      return "idle";
+    case ScrollCaptureState::starting:
+      return "starting";
+    case ScrollCaptureState::capturing:
+      return "capturing";
+    case ScrollCaptureState::finishing:
+      return "finishing";
+    case ScrollCaptureState::failed:
+      return "failed";
+  }
+  return "unknown";
+}
 struct FrameCrop {
   unsigned x{}, y{}, width{}, height{};
 };
@@ -64,6 +80,38 @@ struct FrameCrop {
   return FrameCrop{x, y, right_px - x, bottom_px - y};
 }
 
+// Snaps a crop onto even pixels for 4:2:0. Left and top move down to an even
+// pixel. Right and bottom move up to an even pixel, then stop at the largest
+// even frame size. Empty, out of range, and results smaller than 2x2 are
+// nullopt. The arithmetic is the saved region used by screenshot, recording,
+// and scrolling capture.
+[[nodiscard]] inline std::optional<FrameCrop> align_even_crop(
+    FrameCrop crop, unsigned source_width, unsigned source_height) {
+  if (source_width < 2 || source_height < 2 || crop.width == 0 ||
+      crop.height == 0 || crop.x >= source_width || crop.y >= source_height)
+    return std::nullopt;
+  const auto right_raw = static_cast<unsigned long long>(crop.x) + crop.width;
+  const auto bottom_raw = static_cast<unsigned long long>(crop.y) + crop.height;
+  if (right_raw > source_width || bottom_raw > source_height)
+    return std::nullopt;
+  const unsigned limit_x = source_width & ~1U;
+  const unsigned limit_y = source_height & ~1U;
+  const unsigned x = crop.x & ~1U;
+  const unsigned y = crop.y & ~1U;
+  if (x >= limit_x || y >= limit_y) return std::nullopt;
+  const auto snap_up = [](unsigned long long edge, unsigned limit) {
+    const unsigned long long even = edge + (edge & 1ULL);
+    return even > limit ? limit : static_cast<unsigned>(even);
+  };
+  const unsigned right = snap_up(right_raw, limit_x);
+  const unsigned bottom = snap_up(bottom_raw, limit_y);
+  if (right <= x || bottom <= y) return std::nullopt;
+  const unsigned width = right - x;
+  const unsigned height = bottom - y;
+  if (width < 2 || height < 2) return std::nullopt;
+  return FrameCrop{x, y, width, height};
+}
+
 struct RecordingStatus {
   RecordingState state{RecordingState::idle};
   std::filesystem::path output_path;
@@ -93,7 +141,7 @@ class Recording final {
                                   FrameCrop crop);
   [[nodiscard]] bool sample_scroll(const VideoFrame& frame);
   [[nodiscard]] bool finish_scroll();
-  void cancel_scroll();
+  void cancel_scroll(const char* reason);
   [[nodiscard]] bool start(const VideoFrame& first_frame,
                            std::optional<FrameCrop> crop = std::nullopt);
   [[nodiscard]] bool append(const VideoFrame& frame);

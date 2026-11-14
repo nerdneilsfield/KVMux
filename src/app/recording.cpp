@@ -69,6 +69,34 @@ void log_recording_result(const char* event, const char* result,
                 event, result, encoder.empty() ? "-" : encoder, path_text(path),
                 frames, error.empty() ? "-" : error);
 }
+const char* stitch_result_name(StitchResult result) {
+  switch (result) {
+    case StitchResult::started:
+      return "started";
+    case StitchResult::appended:
+      return "appended";
+    case StitchResult::unchanged:
+      return "unchanged";
+    case StitchResult::bad_match:
+      return "bad-match";
+    case StitchResult::reverse:
+      return "reverse";
+    case StitchResult::stale:
+      return "stale";
+    case StitchResult::size_limit:
+      return "size-limit";
+    case StitchResult::invalid:
+      return "invalid";
+  }
+  return "unknown";
+}
+bool even_crop_inside(const FrameCrop& crop, unsigned source_width,
+                      unsigned source_height) {
+  return crop.width && crop.height && crop.x < source_width &&
+         crop.y < source_height && crop.width <= source_width - crop.x &&
+         crop.height <= source_height - crop.y &&
+         (crop.x | crop.y | crop.width | crop.height) % 2 == 0;
+}
 std::filesystem::path downloads_directory() {
   const char* path = SDL_GetUserFolder(SDL_FOLDER_DOWNLOADS);
   if (!path) return {};
@@ -652,15 +680,49 @@ bool Recording::snapshot(const VideoFrame& input,
   return true;
 }
 bool Recording::start_scroll(const VideoFrame& input, FrameCrop crop) {
-  if (!valid_frame(input)) return false;
+  const unsigned source_width =
+      input.frame ? static_cast<unsigned>(input.frame->width) : 0;
+  const unsigned source_height =
+      input.frame ? static_cast<unsigned>(input.frame->height) : 0;
+  spdlog::debug(
+      "scroll start request: crop={}x{}+{},{} source={}x{} format={} range={}",
+      crop.width, crop.height, crop.x, crop.y, source_width, source_height,
+      pixel_format_name(input), range_name(input.color_range));
+  const auto reject = [this](const char* message) {
+    {
+      std::lock_guard lock(mutex_);
+      if (status_.scroll_state == ScrollCaptureState::idle)
+        status_.scroll_error = message;
+    }
+    spdlog::debug("scroll start: result=rejected error={}", message);
+    return false;
+  };
+  if (!valid_frame(input))
+    return reject("scrolling capture requires a valid CPU VideoFrame");
+  if (!even_crop_inside(crop, source_width, source_height))
+    return reject(
+        "scrolling crop must be inside the source frame with even "
+        "coordinates and dimensions");
+  const char* busy = nullptr;
+  {
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state != ScrollCaptureState::idle) {
+      busy = scroll_state_name(status_.scroll_state);
+    } else {
+      status_.scroll_state = ScrollCaptureState::starting;
+      status_.scroll_error.clear();
+      status_.last_scroll_path.clear();
+      status_.scroll_width = status_.scroll_height = 0;
+      scroll_start_ = ScrollRequest{input, crop};
+    }
+  }
+  if (busy) {
+    spdlog::debug("scroll start: result=rejected error=busy state={}", busy);
+    return false;
+  }
+  spdlog::debug("scroll state: starting crop={}x{}+{},{}", crop.width,
+                crop.height, crop.x, crop.y);
   ensure_worker();
-  std::lock_guard lock(mutex_);
-  if (status_.scroll_state != ScrollCaptureState::idle) return false;
-  status_.scroll_state = ScrollCaptureState::starting;
-  status_.scroll_error.clear();
-  status_.last_scroll_path.clear();
-  status_.scroll_width = status_.scroll_height = 0;
-  scroll_start_ = ScrollRequest{input, crop};
   wake_.notify_one();
   return true;
 }
@@ -673,19 +735,37 @@ bool Recording::sample_scroll(const VideoFrame& input) {
   return true;
 }
 bool Recording::finish_scroll() {
-  std::lock_guard lock(mutex_);
-  if (status_.scroll_state != ScrollCaptureState::capturing) return false;
-  status_.scroll_state = ScrollCaptureState::finishing;
-  scroll_finish_ = true;
+  const char* state = nullptr;
+  bool accepted = false;
+  {
+    std::lock_guard lock(mutex_);
+    state = scroll_state_name(status_.scroll_state);
+    if (status_.scroll_state == ScrollCaptureState::capturing) {
+      status_.scroll_state = ScrollCaptureState::finishing;
+      scroll_finish_ = true;
+      accepted = true;
+    }
+  }
+  if (!accepted) {
+    spdlog::debug("scroll finish: result=rejected state={}", state);
+    return false;
+  }
   wake_.notify_one();
+  spdlog::debug("scroll state: finishing");
   return true;
 }
-void Recording::cancel_scroll() {
-  std::lock_guard lock(mutex_);
-  if (status_.scroll_state == ScrollCaptureState::idle) return;
-  scroll_cancel_ = true;
-  scroll_start_.reset();
-  scroll_latest_.reset();
+void Recording::cancel_scroll(const char* reason) {
+  bool requested = false;
+  {
+    std::lock_guard lock(mutex_);
+    if (status_.scroll_state == ScrollCaptureState::idle) return;
+    scroll_cancel_ = true;
+    scroll_start_.reset();
+    scroll_latest_.reset();
+    requested = true;
+  }
+  if (!requested) return;
+  spdlog::debug("scroll cancel: reason={}", reason != nullptr ? reason : "-");
   wake_.notify_one();
 }
 bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
@@ -713,13 +793,7 @@ bool Recording::start(const VideoFrame& input, std::optional<FrameCrop> crop) {
     log_recording_result("start", "rejected", {}, {}, 0, message);
     return false;
   }
-  if (crop &&
-      (!crop->width || !crop->height ||
-       crop->x >= static_cast<unsigned>(input.frame->width) ||
-       crop->y >= static_cast<unsigned>(input.frame->height) ||
-       crop->width > static_cast<unsigned>(input.frame->width) - crop->x ||
-       crop->height > static_cast<unsigned>(input.frame->height) - crop->y ||
-       (crop->x | crop->y | crop->width | crop->height) & 1U)) {
+  if (crop && !even_crop_inside(*crop, source_width, source_height)) {
     constexpr char message[] =
         "recording crop must be inside the source frame with even coordinates "
         "and dimensions";
@@ -851,54 +925,106 @@ void Recording::worker(std::stop_token token) {
     if (shot) (void)snapshot_now(shot->first, shot->second);
     if (scroll_cancel) {
       scroll_stitcher_.reset();
-      std::lock_guard lock(mutex_);
-      status_.scroll_state = ScrollCaptureState::idle;
+      {
+        std::lock_guard lock(mutex_);
+        status_.scroll_state = ScrollCaptureState::idle;
+      }
+      spdlog::debug("scroll state: idle reason=cancel");
     }
     if (scroll_begin) {
       auto pixels = crop_rgb(scroll_begin->frame, scroll_begin->crop);
       scroll_stitcher_.emplace();
       scroll_crop_ = scroll_begin->crop;
       scroll_sequence_ = 1;
-      const auto update =
-          scroll_stitcher_->add(pixels, scroll_begin->crop.width,
-                                scroll_begin->crop.height, scroll_sequence_);
-      std::lock_guard lock(mutex_);
-      if (update.result == StitchResult::started) {
-        status_.scroll_state = ScrollCaptureState::capturing;
-        status_.scroll_width = scroll_begin->crop.width;
-        status_.scroll_height = scroll_begin->crop.height;
+      StitchUpdate update{StitchResult::invalid, 0};
+      if (!pixels.empty()) {
+        update =
+            scroll_stitcher_->add(pixels, scroll_begin->crop.width,
+                                  scroll_begin->crop.height, scroll_sequence_);
+      }
+      std::string error;
+      bool capturing = false;
+      {
+        std::lock_guard lock(mutex_);
+        if (update.result == StitchResult::started) {
+          status_.scroll_state = ScrollCaptureState::capturing;
+          status_.scroll_width = scroll_begin->crop.width;
+          status_.scroll_height = scroll_begin->crop.height;
+          capturing = true;
+        } else {
+          status_.scroll_state = ScrollCaptureState::failed;
+          error = pixels.empty()
+                      ? "Scrolling crop is outside the source frame."
+                      : std::string("Invalid scrolling capture region (") +
+                            stitch_result_name(update.result) + ").";
+          status_.scroll_error = error;
+          scroll_stitcher_.reset();
+        }
+      }
+      if (capturing) {
+        spdlog::debug("scroll state: capturing size={}x{}",
+                      scroll_begin->crop.width, scroll_begin->crop.height);
       } else {
-        status_.scroll_state = ScrollCaptureState::failed;
-        status_.scroll_error = "Invalid scrolling capture region.";
+        spdlog::debug("scroll state: failed error={}", error);
       }
     }
     if (scroll_next && scroll_stitcher_) {
       auto pixels = crop_rgb(*scroll_next, scroll_crop_);
-      auto update = scroll_stitcher_->add(
-          pixels, scroll_crop_.width, scroll_crop_.height, ++scroll_sequence_);
-      std::lock_guard lock(mutex_);
-      status_.scroll_height = scroll_stitcher_->height();
-      if (update.result == StitchResult::size_limit) {
-        status_.scroll_state = ScrollCaptureState::failed;
-        status_.scroll_error = "Scrolling screenshot reached its size limit.";
+      const auto sequence = ++scroll_sequence_;
+      StitchUpdate update{StitchResult::invalid, 0};
+      if (!pixels.empty()) {
+        update = scroll_stitcher_->add(pixels, scroll_crop_.width,
+                                       scroll_crop_.height, sequence);
       }
+      bool limited = false;
+      unsigned height = 0;
+      {
+        std::lock_guard lock(mutex_);
+        if (scroll_stitcher_) height = scroll_stitcher_->height();
+        status_.scroll_height = height;
+        if (update.result == StitchResult::size_limit) {
+          status_.scroll_state = ScrollCaptureState::failed;
+          status_.scroll_error = "Scrolling screenshot reached its size limit.";
+          limited = true;
+        }
+      }
+      spdlog::debug(
+          "scroll sample: result={} offset={} sequence={} size={}x{}",
+          pixels.empty() ? "empty-crop" : stitch_result_name(update.result),
+          update.displacement, sequence, scroll_crop_.width, height);
+      if (limited)
+        spdlog::debug(
+            "scroll state: failed error=Scrolling screenshot reached its "
+            "size limit.");
     }
     if (scroll_finish && scroll_stitcher_) {
       const auto dir = downloads_directory();
       std::error_code ec;
       std::filesystem::create_directories(dir, ec);
       const auto path = timestamped(dir, ".jpeg");
-      const bool ok = !ec && write_rgb_jpeg(scroll_stitcher_->pixels(),
-                                            scroll_stitcher_->width(),
-                                            scroll_stitcher_->height(), path);
+      const unsigned width = scroll_stitcher_->width();
+      const unsigned height = scroll_stitcher_->height();
+      const bool ok = !ec && write_rgb_jpeg(scroll_stitcher_->pixels(), width,
+                                            height, path);
+      const std::string failure =
+          ec ? "create Downloads directory: " + ec.message()
+             : "Could not write scrolling JPEG.";
       scroll_stitcher_.reset();
-      std::lock_guard lock(mutex_);
-      status_.scroll_state =
-          ok ? ScrollCaptureState::idle : ScrollCaptureState::failed;
-      if (ok)
-        status_.last_scroll_path = path;
-      else
-        status_.scroll_error = "Could not write scrolling JPEG.";
+      {
+        std::lock_guard lock(mutex_);
+        status_.scroll_state =
+            ok ? ScrollCaptureState::idle : ScrollCaptureState::failed;
+        if (ok)
+          status_.last_scroll_path = path;
+        else
+          status_.scroll_error = failure;
+      }
+      if (ok) {
+        spdlog::debug("scroll saved: path={} width={} height={}",
+                      path_text(path), width, height);
+      } else {
+        spdlog::debug("scroll state: failed error={}", failure);
+      }
     }
     if (stop && impl_) {
       int result = avcodec_send_frame(impl_->codec, nullptr);

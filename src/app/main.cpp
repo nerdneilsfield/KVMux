@@ -462,7 +462,7 @@ int main(int argc, char** argv) {
   const auto rebuild_local_session = [&] {
     (void)recording.stop();
     if (ui.media.scroll_active) {
-      recording.cancel_scroll();
+      recording.cancel_scroll("session-rebuild");
       ui.media.scroll_active = false;
       ui.media.scroll_sample_after.reset();
     }
@@ -940,7 +940,8 @@ int main(int argc, char** argv) {
     const auto snapshot = session->snapshot();
     if (ui.media.scroll_active &&
         (!snapshot.video_fresh || snapshot.input_state == InputState::fault)) {
-      recording.cancel_scroll();
+      recording.cancel_scroll(!snapshot.video_fresh ? "stale-video"
+                                                    : "input-fault");
       ui.media.scroll_active = false;
       ui.media.scroll_sample_after.reset();
     }

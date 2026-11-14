@@ -220,6 +220,65 @@ static void require_region_confirm_mapping() {
   require_crop(covered, 0, 0, 64, 48, "drag covering the fitted video");
 }
 
+static kvmux::RecordingStatus wait_scroll(kvmux::Recording& recording,
+                                          kvmux::ScrollCaptureState desired) {
+  for (int i = 0; i < 200; ++i) {
+    auto status = recording.status();
+    if (status.scroll_state == desired ||
+        status.scroll_state == kvmux::ScrollCaptureState::failed)
+      return status;
+    std::this_thread::sleep_for(10ms);
+  }
+  return recording.status();
+}
+
+// Edges below are the pixels the drag covers. Expected crops are those edges
+// snapped by hand: left/top to the even pixel at or before, right/bottom to
+// the even pixel at or after, then clipped to the even frame size.
+static void require_even_region_alignment() {
+  // 316+551 = 867, next even edge 868. 387+261 = 648, already even.
+  // Top moves 387 -> 386. Width 868-316 = 552. Height 648-386 = 262.
+  require_crop(kvmux::align_even_crop({316, 387, 551, 261}, 1920, 1080), 316,
+               386, 552, 262, "logged region");
+  // Pixel (100,100) ends at 101. Both ends move to 102, so the crop is 2x2.
+  require_crop(kvmux::align_even_crop({100, 100, 1, 1}, 1920, 1080), 100, 100,
+               2, 2, "one pixel");
+  // Last column of a 1920-wide frame. Left becomes 1918 and right stays 1920.
+  require_crop(kvmux::align_even_crop({1919, 0, 1, 10}, 1920, 1080), 1918, 0, 2,
+               10, "right edge");
+  // 101x81 frame has an even limit of 100x80. Crop ends at 101 and 81.
+  require_crop(kvmux::align_even_crop({98, 78, 3, 3}, 101, 81), 98, 78, 2, 2,
+               "odd frame clamp");
+  require(!kvmux::align_even_crop({100, 80, 1, 1}, 101, 81),
+          "odd frame last pixel");
+  require(!kvmux::align_even_crop({0, 0, 0, 4}, 1920, 1080), "empty crop");
+  require(!kvmux::align_even_crop({10, 10, 20, 20}, 16, 16), "outside frame");
+}
+
+static void require_scroll_even_crop(const std::filesystem::path& directory) {
+  kvmux::Recording recording(directory);
+  auto source = frame(64, 48);
+  require(!recording.start_scroll(source, kvmux::FrameCrop{0, 0, 63, 48}),
+          "odd scroll crop rejected");
+  const auto rejected = recording.status();
+  require(rejected.scroll_state == kvmux::ScrollCaptureState::idle,
+          "odd scroll stays idle");
+  require(!rejected.scroll_error.empty(), "odd scroll error");
+  require(recording.start_scroll(source, kvmux::FrameCrop{0, 0, 64, 48}),
+          "even scroll crop accepted");
+  const auto started =
+      wait_scroll(recording, kvmux::ScrollCaptureState::capturing);
+  require(started.scroll_state == kvmux::ScrollCaptureState::capturing,
+          started.scroll_error.c_str());
+  require(started.scroll_width == 64 && started.scroll_height == 48,
+          "scroll crop size");
+  recording.cancel_scroll("test");
+  const auto idle = wait_scroll(recording, kvmux::ScrollCaptureState::idle);
+  require(idle.scroll_state == kvmux::ScrollCaptureState::idle,
+          "scroll cancel returns idle");
+  recording.shutdown();
+}
+
 static void require_full_frame_recording(
     const std::filesystem::path& directory) {
   const auto crop =
@@ -255,6 +314,8 @@ int main() {
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   require_region_confirm_mapping();
+  require_even_region_alignment();
+  require_scroll_even_crop(directory);
   require_full_frame_recording(directory);
   kvmux::Recording recording(directory);
   auto first = frame();

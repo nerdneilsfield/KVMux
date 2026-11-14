@@ -287,6 +287,11 @@ const char* recording_reason(bool frame, bool region_required, bool region,
   return nullptr;
 }
 
+void notice_failure(MediaUi& media, const std::string& error,
+                    const char* fallback) {
+  set_media_notice(media, error.empty() ? fallback : error, true);
+}
+
 void queue_screenshot(MediaUi& media, bool queued) {
   if (queued) {
     media.snapshot_queued = true;
@@ -330,17 +335,21 @@ void append_media_menu(UiState& ui, const SessionView& view,
     const bool started = recording.start(
         *view.frame, FrameCrop{0, 0, static_cast<unsigned>(picture->width),
                                static_cast<unsigned>(picture->height)});
-    set_media_notice(
-        media, started ? "Recording started." : "Could not start recording.",
-        !started);
+    if (started)
+      set_media_notice(media, "Recording started.", false);
+    else
+      notice_failure(media, recording.status().error,
+                     "A recording is already active.");
     ImGui::CloseCurrentPopup();
   }
   if (media_menu_item("Recording: Region", frame && region && idle,
                       recording_reason(frame, true, region, status.state))) {
     const bool started = recording.start(*view.frame, media.saved_region);
-    set_media_notice(
-        media, started ? "Recording started." : "Could not start recording.",
-        !started);
+    if (started)
+      set_media_notice(media, "Recording started.", false);
+    else
+      notice_failure(media, recording.status().error,
+                     "A recording is already active.");
     ImGui::CloseCurrentPopup();
   }
   const char* scroll_reason = region_reason(frame, region);
@@ -348,13 +357,21 @@ void append_media_menu(UiState& ui, const SessionView& view,
     scroll_reason = "滚动截图需要控制连接";
   if (media_menu_item("Start scrolling", scroll_reason == nullptr,
                       scroll_reason)) {
-    if (recording.start_scroll(*view.frame, *media.saved_region)) {
+    const FrameCrop scroll_crop = media.saved_region.value_or(FrameCrop{});
+    if (recording.start_scroll(*view.frame, scroll_crop)) {
       media.scroll_active = true;
       actions.add(action(UiActionKind::activate_control));
       set_media_notice(media, "Scrolling capture started.", false);
       ImGui::CloseCurrentPopup();
     } else {
-      set_media_notice(media, "Could not start scrolling capture.", true);
+      const auto scroll = recording.status();
+      const std::string busy = std::string("Scrolling capture is ") +
+                               scroll_state_name(scroll.scroll_state);
+      notice_failure(media,
+                     scroll.scroll_state == ScrollCaptureState::idle
+                         ? scroll.scroll_error
+                         : busy,
+                     "Could not start scrolling capture.");
     }
   }
   if (ImGui::MenuItem("Select region")) {
@@ -382,8 +399,13 @@ void append_media_menu(UiState& ui, const SessionView& view,
                       stoppable, stop_reason))
     (void)recording.stop();
   if (media.scroll_active && ImGui::MenuItem("Finish scrolling screenshot")) {
-    (void)recording.finish_scroll();
-    media.scroll_active = false;
+    if (recording.finish_scroll())
+      media.scroll_active = false;
+    else
+      notice_failure(media,
+                     std::string("Scrolling capture is ") +
+                         scroll_state_name(recording.status().scroll_state),
+                     "Scrolling capture is not ready to finish.");
   }
 }
 
@@ -882,7 +904,7 @@ void sync_media_feedback(UiState& ui, const RecordingStatus& media_status) {
           true);
       media.scroll_active = false;
       media.scroll_sample_after.reset();
-      ui.recording->cancel_scroll();
+      ui.recording->cancel_scroll("error");
     }
   }
   if (media_status.last_scroll_path != media.displayed_scroll_path) {
@@ -941,6 +963,7 @@ void log_debug_session(UiState& ui, const SessionView& view,
       std::to_string(paste.planned_gestures) + " media=snapshot-" +
       snapshot_status +
       " recording=" + debug_recording_state(view.recording.state) +
+      " scroll=" + scroll_state_name(view.recording.scroll_state) +
       " session-error=" +
       (view.snapshot.session_error.empty() ? "none" : "present");
   if (status != ui.last_debug_status) {

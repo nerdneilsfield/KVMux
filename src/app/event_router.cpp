@@ -172,7 +172,15 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
                               event.type == SDL_EVENT_WINDOW_HIDDEN ||
                               (event.type == SDL_EVENT_KEY_DOWN &&
                                event.key.scancode == SDL_SCANCODE_ESCAPE))) {
-    ui.recording->cancel_scroll();
+    const char* reason = "focus";
+    if (event.type == SDL_EVENT_KEY_DOWN &&
+        event.key.scancode == SDL_SCANCODE_ESCAPE)
+      reason = "escape";
+    else if (event.type == SDL_EVENT_WINDOW_MINIMIZED)
+      reason = "minimized";
+    else if (event.type == SDL_EVENT_WINDOW_HIDDEN)
+      reason = "hidden";
+    ui.recording->cancel_scroll(reason);
     media.scroll_active = false;
     media.scroll_sample_after.reset();
   }

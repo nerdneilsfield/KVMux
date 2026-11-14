@@ -503,7 +503,7 @@ struct UiActions {
 // Saves the dragged rectangle into MediaUi. A failed confirm stays in
 // selection so the user can drag again.
 inline void commit_region(MediaUi& media, int width, int height) {
-  const auto crop =
+  const auto mapped =
       width > 0 && height > 0
           ? crop_from_display(
                 media.displayed_video_rect.x, media.displayed_video_rect.y,
@@ -512,7 +512,14 @@ inline void commit_region(MediaUi& media, int width, int height) {
                 media.region_start.y, media.region_end.x, media.region_end.y,
                 static_cast<unsigned>(width), static_cast<unsigned>(height))
           : std::nullopt;
-  if (crop) {
+  const FrameCrop raw = mapped.value_or(FrameCrop{});
+  const auto crop = mapped ? align_even_crop(raw, static_cast<unsigned>(width),
+                                             static_cast<unsigned>(height))
+                           : std::nullopt;
+  if (mapped && crop) {
+    spdlog::debug("region align: raw={}x{}+{},{} aligned={}x{}+{},{}",
+                  mapped->width, mapped->height, mapped->x, mapped->y,
+                  crop->width, crop->height, crop->x, crop->y);
     media.saved_region = crop;
     media.media_message = "Region saved.";
     media.media_is_error = false;
@@ -522,7 +529,8 @@ inline void commit_region(MediaUi& media, int width, int height) {
     media.region_confirm_requested = false;
     media.region_buttons = false;
   } else {
-    media.media_message = "Select a larger region.";
+    media.media_message = mapped ? "Region must be at least 2x2 pixels."
+                                 : "Select a larger region.";
     media.media_is_error = true;
   }
 }
@@ -558,7 +566,7 @@ inline bool confirm_region_selection(MediaUi& media, int width, int height) {
                   crop.y, crop.width, crop.height);
     return true;
   }
-  spdlog::debug("region confirm: rejected");
+  spdlog::debug("region confirm: rejected message={}", media.media_message);
   return false;
 }
 

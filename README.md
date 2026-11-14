@@ -107,8 +107,13 @@ the saved region. **Recording: Full screen** records the whole frame as an
 H.264 MP4 in **Downloads**, with the same time-based name. It does not need a
 region. **Recording: Region** records only the saved region. Both recordings
 use the same crop path. A full-screen recording is the crop
-`{0, 0, width, height}`. H.264 still requires even coordinates and even
-dimensions, so an odd source edge is rejected instead of being shifted.
+`{0, 0, width, height}`. Confirming a region snaps it to even pixels: left
+and top move to the even pixel at or before the selection, and right and
+bottom move to the even pixel at or after it, staying inside the even-sized
+frame. The outline, the region screenshot, region recording, and scrolling
+capture all use that aligned region. A result smaller than 2×2 pixels is not
+saved, and the notice says so. A crop that is still odd when recording or
+scrolling starts is rejected, and the notice shows that reason.
 
 To save a region, choose **Select region**. The picture tells you to drag,
 then click **确认** or press Enter. Escape or **取消** leaves selection

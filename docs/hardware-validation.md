@@ -153,6 +153,16 @@ VID、PID、`bcdDevice`、首个接口类、`decision=list` 或 `decision=skip`�
 
 没有根据这份日志改像素转换。Linux 上的 `recording` CTest 用 stride 大于宽度的 limited-range NV12 走截图和录像。通过时只说明这条软件路径能写出可打开的 JPEG（亮度不全是同一值）和尺寸正确的 MP4，不能代替 macOS 上的文件。
 
+## macOS 区域录像日志（2026-11-15）
+
+日志文件是 `kvmux_log_20261115.txt`。读到的事实：
+
+- `region confirm: x=316 y=387 width=551 height=261` 之后，`recording start request` 的裁剪是 `551x261+316,387`，源是 1920x1080 NV12 limited。
+- 紧接着的结果是 `rejected`，原因是 `recording crop must be inside the source frame with even coordinates and dimensions`。
+- 这份日志没有 `scroll start request`，Session 行里当时也没有 scroll 字段。不能从这份日志判断滚动截图有没有被点到。
+
+这次改动在确认区域时把裁剪对齐到偶数。上面这组数应对齐成 `316,386,552x262`。滚动截图的启动、采样、结束和取消现在有 debug 行，Session 行里有 `scroll=`。这份日志本身仍然没有滚动截图的文件或失败原因。
+
 ## macOS CH341 与分离 relay 自检步骤
 
 本节是 Mac 上的操作步骤，用来检查 CH341 libusb 后端，以及分离后的 control relay 和 video relay。写本节时这台开发机没有 `1A86:5523`，这些命令也没有在 macOS 上运行过。跑完以后，把文末字段的实际输出补进本节。没有这条记录时，对应硬件项保持未验证。
