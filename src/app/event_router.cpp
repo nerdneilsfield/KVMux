@@ -229,9 +229,17 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
                     event.type == SDL_EVENT_MOUSE_WHEEL))
       return;
   }
-  if (overlay.menu_icon.consume(event, icon_enabled,
-                                static_cast<float>(event_width),
-                                static_cast<float>(event_height))) {
+  auto& icon = overlay.menu_icon;
+  icon.clamp(static_cast<float>(event_width), static_cast<float>(event_height));
+  const ImVec2 stored_icon = icon.pos;
+  icon.pos = menu_icon_shown_pos(overlay, ui.connection,
+                                 static_cast<float>(event_width),
+                                 static_cast<float>(event_height));
+  const bool icon_hit =
+      icon.consume(event, icon_enabled, static_cast<float>(event_width),
+                   static_cast<float>(event_height));
+  icon.pos = stored_icon;
+  if (icon_hit) {
     if (overlay.menu_icon.clicked) {
       if (session->text_paste_active())
         log_unknown_paste_cancel("floating_menu");

@@ -224,6 +224,18 @@ Targets：T4 的文件、`src/support/config.hpp`、`src/support/config.cpp`、`
 - 状态栏去掉 `P:/H:/d:/V:/C:` 缩写，移入 Diagnostics。
 - 验收：Q17 Config 新字段往返单测，旧配置文件（缺新字段）能加载为默认值。其余 UX 项在 macOS 上手动检查，逐项记入 `docs/hardware-validation.md`，之前标为未验证。
 
+Status: 完成（2026-11-14）。T5b 尚未开始。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。这台机器没有采集设备，也没有打开 macOS GUI。
+- 持久化字段、Apply、引导、错误横幅、置灰原因、端口校验、链路一行状态、9 档波特率、菜单分组、预览提示和状态栏粘贴进度在这次之前已经在界面里。Q17 仍由 `tests/config_test.cpp` 覆盖：新字段往返，缺 `connection` 时用默认值。这次没有改 schema。
+- 连接窗口改成两列。设备、采集模式、串口和波特率的下拉框都占满右侧列，串口路径不再挤在 1 倍拉伸的窄列里。采集模式的预览字符串活过整个 `BeginCombo`。
+- 启动后若保存的串口还在列表里，下拉框选中它；不在列表里才用 `select_serial`。选不中时 debug 记 `Serial scan:`，不记文本。用户已经选过的端口不会被每秒扫描换掉。只在勾选启动连接时才自动 `connect_control`。
+- 保存的采集模式仍按宽、高、帧率、设备格式和交付格式精确匹配。匹配时选中该项并 `select_capture`，debug 记 `Capture restore: mode index=`。对不上时打开连接窗口，列表非空则停在第 0 项，不开始预览。
+- 连接窗口画出后，浮动图标若与窗口矩形相交，就改画到窗口右侧、下方或角落。`menu_icon.pos` 不改。命中测试用同一位置，避免图标继续吃掉 Video source 上的点击。窗口没画出来时图标留在原位。
+- `make test` 31/31 通过，实测 100.09 s。`make lint` 停在已知基线：`tests/codec_startup_fallback_test.cpp:21` 的 format-check。单独的 cppcheck 只报已知的 `src/network/relay_server.cpp:566`。单独的 clang-tidy 退出码 0。原有的按位运算和空 catch 没有当作本次缺陷改掉。macOS 上的图标、串口全文、采集模式恢复和其余 UX 清单没有实机截图，记在 `docs/hardware-validation.md`，保持未验证。
+
 ### T5b：视觉美化（依赖 T4，可与 T5 合并提交）
 
 颜色规范：`assets/branding/README.md` 的 Palette——Midnight `#0B1823`、Charcoal `#202A33`、Silver `#BFC5C9`、Warm white `#F3F1EB`、Connection orange `#C45F3C`、highlight `#ED9464`。
@@ -275,4 +287,4 @@ Opening、USB not ready、Clearing input、capture Starting 在 error 为空时�
 
 ## 进度
 
-T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 尚未开始。
+T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 完成。T5b 尚未开始。

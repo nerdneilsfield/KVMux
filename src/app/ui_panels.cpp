@@ -392,21 +392,18 @@ void append_connections(UiState& ui, const SessionView& view,
   ImGui::EndDisabled();
   if (shown_video == VideoSource::local ||
       shown_control == ControlTarget::local_serial) {
-    if (ImGui::BeginTable("connections", 4,
+    if (ImGui::BeginTable("connections", 2,
                           ImGuiTableFlags_SizingStretchProp)) {
       ImGui::TableSetupColumn("setting", ImGuiTableColumnFlags_WidthFixed,
                               120.F);
       ImGui::TableSetupColumn("choice", ImGuiTableColumnFlags_WidthStretch,
-                              2.F);
-      ImGui::TableSetupColumn("setting2", ImGuiTableColumnFlags_WidthFixed,
-                              100.F);
-      ImGui::TableSetupColumn("choice2", ImGuiTableColumnFlags_WidthStretch,
                               1.F);
-      ImGui::TableNextRow();
       if (shown_video == VideoSource::local) {
+        ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         ImGui::TextUnformatted("Capture device");
         ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-1.F);
         if (ImGui::BeginCombo("##capture_device",
                               form.selected_device >= 0 &&
                                       form.selected_device <
@@ -431,17 +428,41 @@ void append_connections(UiState& ui, const SessionView& view,
           ImGui::EndCombo();
         }
       }
+      if (shown_video == VideoSource::local) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("Capture mode");
+        ImGui::TableSetColumnIndex(1);
+        const std::string mode_preview =
+            form.selected_mode >= 0 &&
+                    form.selected_mode < static_cast<int>(form.modes.size())
+                ? mode_text(
+                      form.modes[static_cast<std::size_t>(form.selected_mode)])
+                : std::string("Select mode");
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::BeginCombo("##capture_mode", mode_preview.c_str())) {
+          for (int i = 0; i < static_cast<int>(form.modes.size()); ++i) {
+            const std::string label =
+                mode_text(form.modes[static_cast<std::size_t>(i)]);
+            if (ImGui::Selectable(label.c_str(), i == form.selected_mode))
+              form.selected_mode = i;
+          }
+          ImGui::EndCombo();
+        }
+      }
       if (shown_control == ControlTarget::local_serial) {
-        ImGui::TableSetColumnIndex(2);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
         ImGui::TextUnformatted("Serial port");
-        ImGui::TableSetColumnIndex(3);
-        if (ImGui::BeginCombo(
-                "##serial_port",
-                form.selected_port >= 0 &&
-                        form.selected_port < static_cast<int>(form.ports.size())
-                    ? form.ports[static_cast<std::size_t>(form.selected_port)]
-                          .name.c_str()
-                    : "Select port")) {
+        ImGui::TableSetColumnIndex(1);
+        const char* port_preview = "Select port";
+        if (form.selected_port >= 0 &&
+            form.selected_port < static_cast<int>(form.ports.size()))
+          port_preview =
+              form.ports[static_cast<std::size_t>(form.selected_port)]
+                  .name.c_str();
+        ImGui::SetNextItemWidth(-1.F);
+        if (ImGui::BeginCombo("##serial_port", port_preview)) {
           for (int i = 0; i < static_cast<int>(form.ports.size()); ++i) {
             const auto& port = form.ports[static_cast<std::size_t>(i)];
             const std::string label =
@@ -453,32 +474,11 @@ void append_connections(UiState& ui, const SessionView& view,
           }
           ImGui::EndCombo();
         }
-      }
-      ImGui::TableNextRow();
-      if (shown_video == VideoSource::local) {
+        ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
-        ImGui::TextUnformatted("Capture mode");
-        ImGui::TableSetColumnIndex(1);
-        if (ImGui::BeginCombo(
-                "##capture_mode",
-                form.selected_mode >= 0 &&
-                        form.selected_mode < static_cast<int>(form.modes.size())
-                    ? mode_text(form.modes[static_cast<std::size_t>(
-                                    form.selected_mode)])
-                          .c_str()
-                    : "Select mode")) {
-          for (int i = 0; i < static_cast<int>(form.modes.size()); ++i)
-            if (ImGui::Selectable(
-                    mode_text(form.modes[static_cast<std::size_t>(i)]).c_str(),
-                    i == form.selected_mode))
-              form.selected_mode = i;
-          ImGui::EndCombo();
-        }
-      }
-      if (shown_control == ControlTarget::local_serial) {
-        ImGui::TableSetColumnIndex(2);
         ImGui::TextUnformatted("Baud rate");
-        ImGui::TableSetColumnIndex(3);
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-1.F);
         baud_combo(config.serial_baud_rate);
       }
       ImGui::EndTable();
@@ -646,6 +646,13 @@ void append_connections(UiState& ui, const SessionView& view,
   host_key.usage = config.host_scancode;
   actions.add(std::move(host_key));
   ImGui::EndDisabled();
+  const auto window_pos = ImGui::GetWindowPos();
+  const auto window_size = ImGui::GetWindowSize();
+  form.panel_shown = true;
+  form.panel_x = window_pos.x - viewport->Pos.x;
+  form.panel_y = window_pos.y - viewport->Pos.y;
+  form.panel_w = window_size.x;
+  form.panel_h = window_size.y;
   ImGui::End();
 }
 
@@ -841,6 +848,9 @@ void prepare_overlay_frame(UiState& ui, const SessionView& view) {
 UiActions draw_chrome(UiState& ui, const SessionView& view) {
   UiActions actions;
   const auto* viewport = ImGui::GetMainViewport();
+  const ImVec2 floating_menu_at = menu_icon_shown_pos(
+      ui.overlay, ui.connection, viewport->Size.x, viewport->Size.y);
+  ui.connection.panel_shown = false;
   const double now = ImGui::GetTime();
   const auto mouse = ImGui::GetIO().MousePos;
   const bool at_top = mouse.x >= viewport->Pos.x &&
@@ -875,10 +885,10 @@ UiActions draw_chrome(UiState& ui, const SessionView& view) {
         ui.overlay.open_floating_menu = false;
       }
       append_command_menus(ui, view, actions);
-      ImGui::SetNextWindowPos({viewport->Pos.x + ui.overlay.menu_icon.pos.x,
-                               viewport->Pos.y + ui.overlay.menu_icon.pos.y +
-                                   FloatingMenuIcon::size},
-                              ImGuiCond_Appearing);
+      ImGui::SetNextWindowPos(
+          {viewport->Pos.x + floating_menu_at.x,
+           viewport->Pos.y + floating_menu_at.y + FloatingMenuIcon::size},
+          ImGuiCond_Appearing);
       if (ImGui::BeginPopup("Floating menu")) {
         record_local_region(ui);
         append_command_menus(ui, view, actions);
@@ -900,6 +910,10 @@ UiActions draw_chrome(UiState& ui, const SessionView& view) {
       ImGui::EndMenuBar();
     }
     ImGui::End();
+  }
+  if (!ui.connection.panel_shown) {
+    ui.connection.panel_w = 0.F;
+    ui.connection.panel_h = 0.F;
   }
   return actions;
 }
@@ -1296,13 +1310,15 @@ void draw_menu_icon(UiState& ui, const SessionView& view) {
   if (view.relative_capture ||
       ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
     return;
-  const ImVec2 pos{viewport->Pos.x + icon.pos.x, viewport->Pos.y + icon.pos.y};
+  const ImVec2 shown = menu_icon_shown_pos(ui.overlay, ui.connection,
+                                           viewport->Size.x, viewport->Size.y);
+  const ImVec2 pos{viewport->Pos.x + shown.x, viewport->Pos.y + shown.y};
   auto* draw = ImGui::GetForegroundDrawList();
   const ImVec2 end{pos.x + FloatingMenuIcon::size,
                    pos.y + FloatingMenuIcon::size};
   const ImVec2 mouse = ImGui::GetMousePos();
-  const bool hovered =
-      icon.contains(mouse.x - viewport->Pos.x, mouse.y - viewport->Pos.y);
+  const bool hovered = mouse.x >= pos.x && mouse.x < end.x &&
+                       mouse.y >= pos.y && mouse.y < end.y;
   draw->AddRectFilled(pos, end,
                       ImGui::GetColorU32(icon.buttons ? ImGuiCol_ButtonActive
                                          : hovered    ? ImGuiCol_ButtonHovered

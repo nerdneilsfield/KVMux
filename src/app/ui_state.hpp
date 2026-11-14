@@ -318,6 +318,13 @@ struct ConnectionForm {
   bool open_connections{false};
   bool capture_only{false};
   bool screen2_open{false};
+  // Last drawn Connections window, viewport-relative. Zero means it was not
+  // drawn, so the floating icon keeps its stored position.
+  bool panel_shown{false};
+  float panel_x{};
+  float panel_y{};
+  float panel_w{};
+  float panel_h{};
   std::chrono::steady_clock::time_point next_serial_scan{};
 };
 
@@ -370,6 +377,40 @@ struct OverlayFlags {
   FloatingMenuIcon menu_icon{};
   std::vector<ImVec4> local_regions;
 };
+
+// Drawn and hit-tested position. Does not write menu_icon.pos.
+inline ImVec2 menu_icon_shown_pos(const OverlayFlags& overlay,
+                                  const ConnectionForm& form, float width,
+                                  float height) {
+  const float size = FloatingMenuIcon::size;
+  const auto fits = [&](ImVec2 candidate) {
+    candidate.x = std::clamp(candidate.x, 0.F, std::max(0.F, width - size));
+    candidate.y = std::clamp(candidate.y, 0.F, std::max(0.F, height - size));
+    return candidate;
+  };
+  const ImVec2 stored = fits(overlay.menu_icon.pos);
+  if (!form.panel_shown) return stored;
+  if (form.panel_w <= 0.F || form.panel_h <= 0.F)
+    return fits({width - size - 16.F, height - size - 48.F});
+  const auto overlaps = [&](ImVec2 candidate) {
+    return candidate.x < form.panel_x + form.panel_w &&
+           candidate.x + size > form.panel_x &&
+           candidate.y < form.panel_y + form.panel_h &&
+           candidate.y + size > form.panel_y;
+  };
+  if (!overlaps(stored)) return stored;
+  const ImVec2 candidates[] = {
+      {form.panel_x + form.panel_w + 8.F, stored.y},
+      {stored.x, form.panel_y + form.panel_h + 8.F},
+      {width - size - 16.F, 16.F},
+      {16.F, height - size - 48.F},
+  };
+  for (ImVec2 candidate : candidates) {
+    candidate = fits(candidate);
+    if (!overlaps(candidate)) return candidate;
+  }
+  return fits(candidates[3]);
+}
 
 // Panels mutate these groups. config, recording, and the window are the
 // objects the draw code already wrote; they are not session calls.

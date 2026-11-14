@@ -440,6 +440,7 @@ int main(int argc, char** argv) {
       session->enumerate_capture_devices();
   std::optional<std::future<std::vector<CaptureMode>>> modes_future;
   std::string primary_modes_queried;
+  std::string serial_scan_note;
   std::optional<VideoFrame> current_frame;
   std::optional<std::pair<std::uint64_t, std::uint64_t>> recorded_frame;
   const auto rebuild_local_session = [&] {
@@ -766,6 +767,11 @@ int main(int argc, char** argv) {
         const auto device_index =
             static_cast<std::size_t>(form.selected_device);
         form.primary_device_id = form.devices[device_index].stable_id;
+        spdlog::debug("Capture restore: mode index={} {}x{} @ {}/{}",
+                      matched_mode, config.capture_mode.width,
+                      config.capture_mode.height,
+                      config.capture_mode.frame_rate.numerator,
+                      config.capture_mode.frame_rate.denominator);
         (void)session->select_capture(
             form.devices[device_index],
             form.modes[static_cast<std::size_t>(matched_mode)]);
@@ -815,16 +821,27 @@ int main(int argc, char** argv) {
               : std::string{};
       form.ports = enumerate_serial_ports();
       form.selected_port = -1;
-      std::string wanted = previous;
-      if (wanted.empty()) {
+      const auto match_port = [&](const std::string& name) {
+        if (name.empty()) return;
+        for (int i = 0; i < static_cast<int>(form.ports.size()); ++i) {
+          if (form.ports[static_cast<std::size_t>(i)].name == name) {
+            form.selected_port = i;
+            return;
+          }
+        }
+      };
+      match_port(previous.empty() ? config.serial_port : previous);
+      if (form.selected_port < 0 && previous.empty()) {
         try {
-          wanted = relay::select_serial(form.ports);
-        } catch (const std::exception&) {
+          match_port(relay::select_serial(form.ports));
+          serial_scan_note.clear();
+        } catch (const std::exception& error) {
+          if (serial_scan_note != error.what()) {
+            serial_scan_note = error.what();
+            spdlog::debug("Serial scan: {}", serial_scan_note);
+          }
         }
       }
-      for (int i = 0; i < static_cast<int>(form.ports.size()); ++i)
-        if (form.ports[static_cast<std::size_t>(i)].name == wanted)
-          form.selected_port = i;
       form.next_serial_scan =
           std::chrono::steady_clock::now() + std::chrono::seconds(1);
     }
