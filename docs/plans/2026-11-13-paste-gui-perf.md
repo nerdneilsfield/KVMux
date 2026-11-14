@@ -256,6 +256,20 @@ Evidence:
   - Q20：字体许可随 `install` 产物出现（检查 install 目录）。
   - 视觉效果、HiDPI 在 macOS 上截图记录，之前标为未验证。
 
+Status: 完成（2026-11-14）。T6 尚未开始。
+
+Evidence:
+
+- 环境：linux-debug GUI preset，`CMAKE_PREFIX_PATH=/tmp/ffmpeg-dev/prefix/usr:/tmp/x11-dev/prefix/usr`，`CPATH=/tmp/x11-dev/prefix/usr/include`。未使用 `HEADLESS=1`。没有打开 macOS 界面。
+- 色板、8px 网格、状态栏左侧状态点和右侧分辨率/fps、空视频区 `#08121B` 的居中 logo 与引导、错误横幅的 Charcoal 底加左侧 error 色条，这次之前已经接在 `ui_theme` 上。
+- 字体只收 Inter 4.1 Regular 静态字和 OFL。SHA-256 在 `third_party/INVENTORY.md`。没有收 `Inter.ttc`。CMake 不下载字体。界面用 `AddFontFromMemoryTTF` 载入，图集不释放这块内存。中文仍合并系统字体里界面实际用到的字形。
+- HiDPI：`content_scale` 是显示缩放除以 framebuffer scale。Retina 上两者都是 2，结果是 1，不乘 `ScaleAllSizes`，也不把 `FontScaleDpi` 设成 framebuffer scale。样式每次从 `apply()` 之后保存的那份重算。清晰度仍靠 ImGui 1.92 用 framebuffer scale 做栅格密度。
+- Q18：`make lint` 的 `tools/check_color_literals.py` 检查 `src/app/` 除 `ui_theme.*` 外不出现 `IM_COL32(`、`ImColor(`、`brand_color(`、`ImVec4(` 或 `ImVec4{` 后接数字、`glClearColor(` 后接数字。这次没有放宽这个匹配。
+- Q19：`tests/ui_theme_contrast_test.cpp` 用 WCAG 相对亮度自己算对比度，不调用界面里的对比度函数。正文、按钮三态、ok/warn/error 对 bg 和 surface ≥ 4.5；铜橙对 bg 和 surface ≥ 3；暖白对铜橙 < 4.5。2/2 的内容缩放是 1，1.5/1 是 1.5。
+- Q20：`cmake --install build/linux-debug --prefix /tmp/kvmux-t5b-install` 退出码 0。安装树里有 `share/kvmux/licenses/fonts/LICENSE.txt`。
+- `make test` 32/32 通过，实测 99.88 s，其中 `ui_theme_contrast` 通过。`make lint` 停在已知基线：`tests/codec_startup_fallback_test.cpp:21` 的 format-check。单独的 cppcheck 只报已知的 `src/network/relay_server.cpp:566`。单独的 clang-tidy 退出码 0。
+- 视觉效果和 HiDPI 截图没有在 macOS 上做，记在 `docs/hardware-validation.md`，保持未验证。没有做断网 configure。
+
 ## 阶段四：性能剩余项（T6，低优先级）
 
 - 采样等待从 1 ms sleep 轮询改为条件变量通知（`video_pipeline.cpp:44`）。
@@ -287,4 +301,4 @@ Opening、USB not ready、Clearing input、capture Starting 在 error 为空时�
 
 ## 进度
 
-T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 完成。T5b 尚未开始。
+T1 完成。T2 完成。T3 跳过（等待 macOS 粘贴诊断）。T4 完成。Connect 超时排查完成（只加日志）。T5 完成。T5b 完成。T6 尚未开始。

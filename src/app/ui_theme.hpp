@@ -131,4 +131,32 @@ inline void apply() {
   c[ImGuiCol_TableBorderLight] = raised;
 }
 
+inline ImGuiStyle& unscaled_style() {
+  static ImGuiStyle style{};
+  return style;
+}
+
+inline void capture_unscaled_style() { unscaled_style() = ImGui::GetStyle(); }
+
+// Display scale divided by framebuffer scale. Retina reports both as 2, so
+// the result is 1. A Windows 150% desktop whose window is still in pixels
+// reports about 1.5 over 1.
+[[nodiscard]] inline float content_scale(float display_scale,
+                                         float framebuffer_scale) {
+  if (!(display_scale > 0.F) || !(framebuffer_scale > 0.F)) return 1.F;
+  return display_scale / framebuffer_scale;
+}
+
+// Framebuffer scale is already ImGui's font rasterizer density. Multiplying
+// FontScaleDpi or ScaleAllSizes by it would enlarge a Retina layout twice.
+// Only content scale changes the style, and each call starts from the style
+// captured after apply().
+inline void apply_content_scale(float scale) {
+  ImGuiStyle& style = ImGui::GetStyle();
+  style = unscaled_style();
+  if (!(scale > 1.F)) return;
+  style.ScaleAllSizes(scale);
+  style.FontScaleDpi = scale;
+}
+
 }  // namespace kvmux::theme

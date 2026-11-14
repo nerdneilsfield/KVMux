@@ -21,6 +21,7 @@
 
 #include "app/capture_mode_query.hpp"
 #include "app/event_router.hpp"
+#include "app/inter_font.hpp"
 #include "app/kvm_session.hpp"
 #include "app/recording.hpp"
 #include "app/ui_panels.hpp"
@@ -238,6 +239,19 @@ const ImWchar* ui_chinese_ranges() {
   return published;
 }
 
+void load_ui_font() {
+  ImGuiIO& io = ImGui::GetIO();
+  ImFontConfig config;
+  config.FontDataOwnedByAtlas = false;
+  if (io.Fonts->AddFontFromMemoryTTF(
+          const_cast<std::uint8_t*>(font::kInterRegular),
+          static_cast<int>(font::kInterRegularSize), 13.F,
+          &config) == nullptr) {
+    spdlog::warn("UI font failed to load; using the built-in font");
+    io.Fonts->AddFontDefault();
+  }
+}
+
 void attach_cjk_fallback() {
   const ImWchar* ranges = ui_chinese_ranges();
   if (ranges == nullptr || ranges[0] == 0) return;
@@ -356,6 +370,8 @@ int main(int argc, char** argv) {
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;
   theme::apply();
+  theme::capture_unscaled_style();
+  load_ui_font();
   attach_cjk_fallback();
   const GLuint brand_texture = load_brand_texture();
   ImGui_ImplSDL3_InitForOpenGL(window, context);
@@ -1014,6 +1030,9 @@ int main(int argc, char** argv) {
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
+    theme::apply_content_scale(
+        theme::content_scale(SDL_GetWindowDisplayScale(window),
+                             ImGui::GetIO().DisplayFramebufferScale.x));
     ImGui::NewFrame();
     ui.overlay.local_regions.clear();
     prepare_overlay_frame(ui, view);

@@ -44,6 +44,19 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
   license obligations depend on the host package. No FFmpeg sources are modified
   by KVMux, and configure does not download FFmpeg.
 
+## Inter
+
+- Version: `4.1`, released 2024-11-15.
+- Upstream archive: `https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip`
+- Retained subset: `fonts/Inter-Regular.ttf` and `fonts/LICENSE.txt`. The
+  variable fonts and `Inter.ttc` are not vendored.
+- SHA-256:
+  - `fonts/Inter-Regular.ttf`: `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82`
+  - `fonts/LICENSE.txt`: `262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a`
+- License: SIL Open Font License 1.1, retained as `fonts/LICENSE.txt`.
+- Local changes: none. The GUI embeds the TTF with `AddFontFromMemoryTTF`.
+  CMake does not download the font. CJK glyphs stay on a system font.
+
 ## libusb runtime (not vendored)
 
 - Not downloaded by CMake and not stored under `third_party/`.

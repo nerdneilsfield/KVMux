@@ -202,6 +202,16 @@ if(KVMUX_BUILD_GUI)
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
     endif()
     target_link_libraries(kvmux PRIVATE kvmux::core kvmux::capture kvmux::renderer kvmux::imgui kvmux::glad SDL3::SDL3 ${KVMUX_OPENGL_LIBRARY})
+    set(kvmux_inter_cpp "${CMAKE_CURRENT_BINARY_DIR}/inter_regular.cpp")
+    add_custom_command(
+        OUTPUT "${kvmux_inter_cpp}"
+        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_font.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/Inter-Regular.ttf"
+            "${kvmux_inter_cpp}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_font.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/Inter-Regular.ttf"
+        VERBATIM)
+    target_sources(kvmux PRIVATE "${kvmux_inter_cpp}")
 endif()
 
 if(BUILD_TESTING)
@@ -383,6 +393,14 @@ if(BUILD_TESTING)
     add_test(NAME frame_upload COMMAND kvmux_frame_upload_test
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg")
     set_tests_properties(frame_upload PROPERTIES TIMEOUT 30)
+
+    if(KVMUX_BUILD_GUI)
+        add_executable(kvmux_ui_theme_contrast_test
+            tests/ui_theme_contrast_test.cpp)
+        target_link_libraries(kvmux_ui_theme_contrast_test PRIVATE kvmux::core
+            kvmux::imgui)
+        add_test(NAME ui_theme_contrast COMMAND kvmux_ui_theme_contrast_test)
+    endif()
 endif()
 
 include(GNUInstallDirs)
@@ -465,7 +483,7 @@ if(KVMUX_BUILD_GUI)
     endif()
 endif()
 install(FILES third_party/INVENTORY.md DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux")
-foreach(dependency IN ITEMS SDL imgui libserialport glad nlohmann_json spdlog)
+foreach(dependency IN ITEMS SDL imgui libserialport glad nlohmann_json spdlog fonts)
     file(GLOB dependency_notices
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dependency}/LICENSE*"
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dependency}/COPYING*")
