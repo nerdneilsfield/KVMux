@@ -90,54 +90,42 @@ Enter characters. Choose **Type** again after removing them. Keep the target
 focused and using a US keyboard layout, because the target interprets the
 simulated key presses.
 
-Typing is paced and bounded. Cancel it or release input with the usual Host-key,
-focus-loss, or connection-release path; KVMux releases active keys and stops
-remaining text. Clipboard content stays local and is neither persisted nor
-logged. **Type ASCII** still rejects every non-ASCII character. Wubi input is
-not implemented.
+Typing is paced and bounded. Cancel, a key press (including the Host key),
+stale video, a lost link, and shutdown stop the rest and release keys held for
+the paste. Focus loss and minimize do not. Clipboard content stays local and
+is neither persisted nor logged. **Type ASCII** rejects every non-ASCII
+character. Wubi input is not implemented.
 
 ## Type Chinese text on a Windows target
 
-Choose **输入 → Chinese paste (Windows hex)**. This is a separate explicit
-action. It does not run when you choose **Type ASCII**, and KVMux does not
-change the target computer.
+Choose **输入 → Chinese paste (Windows hex)**. **Type ASCII** does not use
+this path.
 
-Before you start, on the Windows computer that receives the keys:
+On the Windows computer that receives the keys, for the signed-in user, then
+sign out and sign in:
 
-1. For the signed-in user, set `EnableHexNumpad` to `1`, then sign out and
-   sign in again. If it still has no effect, restart Windows.
+```text
+reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
+```
 
-   ```text
-   reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
-   ```
+Turn NumLock on. If the registry value has no effect, restart Windows. The
+input method must pass these keys. KVMux does not edit the registry or press
+NumLock. Focus Notepad++ or a plain Win32 edit. The Windows 11 Notepad with
+the Markdown toolbar opens its insert-link window on this sequence.
 
-2. Turn NumLock on. If it is off, or KVMux has not read that LED yet, the
-   action does not send keys.
-3. Focus Notepad++ or another plain Win32 edit. Do not use the Windows 11
-   Notepad that has the Markdown toolbar: the start of this sequence opens
-   its insert-link window.
-4. Leave the input method in a mode that passes these keys. One manual trial
-   in Notepad++ printed two BMP characters in both English and Chinese modes.
-   That trial is not a platform pass.
+Control must be **Local serial** and Ready. Relay control refuses this paste.
+NumLock off, or not yet read, sends no keys. The character limit is 65536.
 
-Control must be **Local serial** and Ready. Relay control does not send this
-paste. The dialog states these conditions and shows an estimate: about 12
-frames per character times the latest ACK round trip. The label says it is an
-estimate. A long paste is still sent one key edge per ACK, with the same
-65536-character bound as ASCII paste.
+Tab, Enter, and printable US ASCII use the ASCII keys. Other characters in the
+Basic Multilingual Plane use the Windows hex sequence. Invalid UTF-8, a
+surrogate, a character above that plane, or a control other than Tab and Enter
+rejects the whole paste. The dialog shows the counts and does not show the
+text.
 
-Tab, Enter, and printable US ASCII use the ASCII key mapping. Other characters
-inside the Basic Multilingual Plane use the Windows hex sequence. A character
-outside that plane, a surrogate, or a control character other than Tab and
-Enter rejects the whole paste. The dialog shows how many were rejected and
-why. That message does not contain the text. KVMux does not skip those
-characters and continue.
-
-Cancel, focus loss, stale video, a lost control link, and an ACK timeout use
-the same release path as other input, including Left Alt. After the link is
-lost, KVMux does not report that release as confirmed. Logs record counts,
-phase, and the cancel reason. They do not record the text, the code points, or
-the hex strings.
+Focus loss and minimize do not cancel a running paste. Cancel, a key press,
+stale video, a lost link, an ACK timeout, a device fault, shutdown, and sleep
+still cancel it and release Left Alt. A lost link is not reported as a
+confirmed release. Logs record counts, phase, and the cancel reason only.
 
 ## Capture screenshots and recordings
 
@@ -148,38 +136,25 @@ pointer, or the status overlay—to your system **Downloads** folder as
 
 **Screenshot: Full screen** saves the whole frame. **Screenshot: Region** saves
 the saved region. **Recording: Full screen** records the whole frame as an
-H.264 MP4 in **Downloads**, with the same time-based name. It does not need a
-region. **Recording: Region** records only the saved region. Both recordings
-use the same crop path. A full-screen recording is the crop
-`{0, 0, width, height}`. Confirming a region snaps it to even pixels: left
-and top move to the even pixel at or before the selection, and right and
-bottom move to the even pixel at or after it, staying inside the even-sized
-frame. The outline, the region screenshot, region recording, and scrolling
-capture all use that aligned region. A result smaller than 2×2 pixels is not
-saved, and the notice says so. A crop that is still odd when recording or
-scrolling starts is rejected, and the notice shows that reason.
+H.264 MP4 in **Downloads**, with the same time-based name, and does not need a
+region. **Recording: Region** records the saved region. Confirming a region
+snaps each edge to an even pixel. A result under 2×2 pixels is not saved.
+A grey menu item says what is missing.
 
-To save a region, choose **Select region**. The picture tells you to drag,
-then click **确认** or press Enter. Escape or **取消** leaves selection
-without saving. Pointer events during selection stay on this computer. The
-Host key stays local and is never sent to the target. A saved region stays
-outlined on the preview until **Clear region**.
+Choose **Select region**, then drag. Click **确认** or press Enter to save.
+Escape or **取消** leaves without saving. Pointer events during selection stay
+on this computer. The Host key stays local. The outline stays until **Clear
+region**.
 
-**Start scrolling** still needs a saved region and a control connection. Drag
-the region, then capture input and scroll downward with the wheel. KVMux
-samples only the next fresh frame after each downward wheel event. Use
-**Finish scrolling screenshot** to save one JPEG, or cancel with Escape.
-Version 1 supports only manual downward vertical scrolling. A grey menu item
-explains what is missing, for example that a region has not been saved.
+**Start scrolling** needs a saved region and a control connection, and only
+scrolls downward. Each downward wheel step uses the next fresh frame.
+**Finish scrolling screenshot** saves one JPEG. Escape cancels.
 
-Use **Pause**, **Resume**, and **Stop**. **Stop** waits for the file to
-finish. Screenshots and recordings stay local; they are not sent to the target
-computer.
+**Pause**, **Resume**, and **Stop** remain. **Stop** waits for the file.
+Screenshots and recordings stay on this computer.
 
-H.264 MP4 recording requires FFmpeg H.264 support. KVMux shows a clear error if
-it is unavailable. Recording uses a bounded latest-frame writer, so it can drop
-frames when the computer cannot keep up. This feature has not yet been validated
-with physical hardware.
+H.264 MP4 recording needs FFmpeg H.264. KVMux shows the error if it is missing.
+The writer keeps the latest frame and can drop frames under load.
 
 ## Connect over LAN
 

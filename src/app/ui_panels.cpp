@@ -32,12 +32,6 @@ UiAction action(UiActionKind kind) {
   return out;
 }
 
-constexpr const char* kWindowsHexPasteNote =
-    "前提：在目标机当前用户下把 EnableHexNumpad 设为 1，然后重新登录。"
-    "焦点放在 Notepad++ 或普通 Win32 编辑框上，不要用会抢走 Alt 快捷键的 "
-    "Win11 新版记事本。输入法需要放行这些按键。KVMux 不修改目标机。"
-    "只有按下 Chinese paste (Windows hex) 才会发送。";
-
 void show_paste_progress(const TextPasteSnapshot& paste,
                          const ControlSnapshot& control) {
   const char* background = paste.window_background ? " · 窗口不在前台" : "";
@@ -49,14 +43,13 @@ void show_paste_progress(const TextPasteSnapshot& paste,
   const auto estimate = estimate_windows_hex_paste(paste.normalized_characters,
                                                    control.last_ack_rtt);
   if (estimate.microseconds > 0) {
-    ImGui::Text("Typing: %zu/%zu  ·  估算约 %.1f 秒（%zu 帧 × ACK，估算）%s",
+    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧，约 %.1f 秒%s",
                 paste.scheduled_gestures, paste.planned_gestures,
-                static_cast<double>(estimate.microseconds) / 1.0e6,
-                estimate.frames, background);
+                estimate.frames,
+                static_cast<double>(estimate.microseconds) / 1.0e6, background);
   } else {
-    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧（约每字 12 帧 × ACK）%s",
-                paste.scheduled_gestures, paste.planned_gestures,
-                estimate.frames, background);
+    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧%s", paste.scheduled_gestures,
+                paste.planned_gestures, estimate.frames, background);
   }
 }
 
@@ -322,7 +315,6 @@ void append_windows_hex_paste(UiState& ui, const SessionView& view,
     }
     return;
   }
-  ImGui::TextWrapped("%s", kWindowsHexPasteNote);
   ImGui::InputTextMultiline("##windows-hex-text", paste_ui.buffer.data(),
                             paste_ui.buffer.size(),
                             {-1.F, ImGui::GetTextLineHeight() * 6.F});
@@ -352,26 +344,39 @@ void append_windows_hex_paste(UiState& ui, const SessionView& view,
   if (prepared) {
     const auto estimate = estimate_windows_hex_paste(
         prepared.normalized_characters, view.snapshot.control.last_ack_rtt);
-    ImGui::Text("准备 %zu 个码点，估算 %zu 帧（约每字 12 帧 × ACK）。",
-                prepared.normalized_characters, estimate.frames);
     if (estimate.microseconds > 0) {
-      ImGui::Text("按最近一次 ACK 往返，估算约 %.1f 秒。这是估算，不是实测。",
+      ImGui::Text("准备 %zu 个码点，估算 %zu 帧，约 %.1f 秒。",
+                  prepared.normalized_characters, estimate.frames,
                   static_cast<double>(estimate.microseconds) / 1.0e6);
     } else {
-      ImGui::TextUnformatted("还没有 ACK 往返时间，不换算秒数。这是估算。");
+      ImGui::Text("准备 %zu 个码点，估算 %zu 帧。",
+                  prepared.normalized_characters, estimate.frames);
     }
   }
   const bool can_start = static_cast<bool>(prepared) && ready && num_lock &&
                          !relay && !ui.connection.capture_only &&
                          view.snapshot.input_state == InputState::preview;
-  if (action_button("Chinese paste (Windows hex)", can_start,
-                    kWindowsHexPasteNote, true)) {
+  const char* start_reason = nullptr;
+  if (!can_start) {
+    if (ui.connection.capture_only)
+      start_reason = "当前没有控制连接";
+    else if (!ready)
+      start_reason = "控制未就绪，未发送。";
+    else if (!num_lock)
+      start_reason = "目标机 NumLock 关闭或尚未读到，未发送。";
+    else if (relay)
+      start_reason = "这条控制链路不发送 Windows 十六进制粘贴。";
+    else if (view.snapshot.input_state != InputState::preview)
+      start_reason = "先回到预览再粘贴。";
+    else
+      start_reason = text_paste_error_label(prepared.error);
+  }
+  if (action_button("Chinese paste (Windows hex)", can_start, start_reason,
+                    true)) {
     auto start = action(UiActionKind::start_windows_hex_paste);
     start.text = paste_ui.buffer.data();
     actions.add(std::move(start));
   }
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-    ImGui::SetTooltip("%s", kWindowsHexPasteNote);
   ImGui::SameLine();
   if (ImGui::Button("Cancel")) {
     paste_ui.buffer.fill('\0');
@@ -1003,8 +1008,6 @@ void append_command_menus(UiState& ui, const SessionView& view,
             "Chinese paste (Windows hex)", !ui.connection.capture_only,
             ui.connection.capture_only ? "当前没有控制连接" : nullptr))
       ui.paste.hex_open = true;
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-      ImGui::SetTooltip("%s", kWindowsHexPasteNote);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("动作")) {
