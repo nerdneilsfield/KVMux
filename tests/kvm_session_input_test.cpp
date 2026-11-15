@@ -85,6 +85,9 @@ struct SinkState {
   std::vector<Recorded> events;
   int releases{};
   bool hold{};  // While set, submit() records the event and then blocks.
+  bool control_active{};
+  bool paste_active{};
+  std::size_t paste_total{};
 
   std::size_t count() {
     std::lock_guard lock(mutex);
@@ -112,6 +115,25 @@ class RecordingSink final : public ControlSink {
   void release_all() noexcept override {
     std::lock_guard lock(state_->mutex);
     ++state_->releases;
+  }
+  void set_control_active(bool active) noexcept override {
+    std::lock_guard lock(state_->mutex);
+    state_->control_active = active;
+  }
+  SubmitResult start_ascii_paste(AsciiPasteJob job) override {
+    std::lock_guard lock(state_->mutex);
+    state_->paste_active = true;
+    state_->paste_total = job.gestures.size();
+    return SubmitResult::accepted;
+  }
+  void cancel_ascii_paste() noexcept override {
+    std::lock_guard lock(state_->mutex);
+    state_->paste_active = false;
+  }
+  AsciiPasteSnapshot ascii_paste_snapshot() const override {
+    std::lock_guard lock(state_->mutex);
+    if (!state_->paste_active) return {};
+    return {AsciiPasteState::active, state_->paste_total, 0};
   }
   ControlSnapshot snapshot() const override {
     ControlSnapshot value;
@@ -185,6 +207,10 @@ struct Fixture {
   int releases() {
     std::lock_guard lock(sink->mutex);
     return sink->releases;
+  }
+  bool control_active() {
+    std::lock_guard lock(sink->mutex);
+    return sink->control_active;
   }
 };
 
@@ -371,6 +397,45 @@ int main() {
             "enabling capture only walked the common release path");
     require(f.session->input_state() == InputState::preview,
             "capture only keeps the session in preview");
+  }
+
+  {
+    Fixture f;
+    f.session->handle_input({InputKey{0x04, true, false}});
+    f.session->handle_input(left_down());
+    const auto before = f.releases();
+    f.session->focus_lost();
+    require(f.releases() > before &&
+                f.session->input_state() == InputState::releasing,
+            "focus loss still releases captured keyboard and mouse");
+  }
+
+  {
+    Fixture f;
+    f.session->release_control(PasteCancelReason::user);
+    require(eventually([&] {
+              f.session->tick();
+              return f.session->input_state() == InputState::preview;
+            }),
+            "release returns preview");
+    const auto before = f.releases();
+    const auto started = f.session->start_text_paste("ab");
+    require(static_cast<bool>(started) && f.session->text_paste_active() &&
+                f.control_active(),
+            "ASCII paste starts with control active");
+    f.session->focus_lost();
+    f.session->minimized();
+    require(f.session->text_paste_active() && f.releases() == before &&
+                f.control_active() &&
+                f.session->text_paste_progress().window_background,
+            "focus loss and minimize leave the paste and its control lease");
+    f.session->focus_returned();
+    require(f.session->text_paste_active() &&
+                !f.session->text_paste_progress().window_background,
+            "focus return clears the background mark");
+    f.session->suspended();
+    require(!f.session->text_paste_active() && f.releases() > before,
+            "sleep still cancels the paste and releases");
   }
   return EXIT_SUCCESS;
 }

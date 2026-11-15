@@ -30,6 +30,14 @@ std::optional<std::uint16_t> usb_usage_from_sdl(const SDL_Scancode scancode) {
   return table[index];
 }
 
+void minimize_window(EventHost& host) {
+  host.remote_buttons = 0;
+  host.session->minimized();
+  if (host.session->text_paste_active() &&
+      (host.main_focused || host.second_focused))
+    host.session->focus_returned();
+}
+
 SDL_WindowID event_window_id(const SDL_Event& event) {
   switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
@@ -116,6 +124,8 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
       host.main_focused = gained;
     else if (wid == host.second_window_id)
       host.second_focused = gained;
+    if (gained && (wid == host.main_window_id || wid == host.second_window_id))
+      host.session->focus_returned();
     if (!gained) host.focus_release_pending = true;
   }
   const bool paste_cancel_event =
@@ -129,8 +139,7 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
       host.close_second_requested = true;
     } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
                event.type == SDL_EVENT_WINDOW_HIDDEN) {
-      host.remote_buttons = 0;
-      session->minimized();
+      minimize_window(host);
     } else if (is_injectable_input(event) &&
                config.mouse_mode == MouseMode::relative &&
                (remote_input || paste_cancel_event ||
@@ -309,7 +318,7 @@ void route_sdl_event(const SDL_Event& event, EventHost& host, UiState& ui) {
   }
   if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
       event.type == SDL_EVENT_WINDOW_HIDDEN)
-    session->minimized();
+    minimize_window(host);
   const bool injectable_event = event.type == SDL_EVENT_KEY_DOWN ||
                                 event.type == SDL_EVENT_KEY_UP ||
                                 event.type == SDL_EVENT_MOUSE_MOTION ||
@@ -354,6 +363,8 @@ void settle_window_focus(EventHost& host) {
       (!host.window2 || focus != host.window2)) {
     host.session->focus_lost();
     host.remote_buttons = 0;
+  } else {
+    host.session->focus_returned();
   }
 }
 

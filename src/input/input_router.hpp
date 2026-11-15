@@ -88,6 +88,8 @@ struct TextPasteSnapshot {
   bool pending{};
   PasteCancelReason cancel_reason{PasteCancelReason::none};
   bool windows_hex{};
+  // Set while a paste keeps running after the window leaves the foreground.
+  bool window_background{};
 };
 
 struct InputPointerSnapshot {
@@ -159,6 +161,7 @@ class InputRouter {
   void tick(Clock::time_point now = Clock::now());
   void focus_lost() noexcept;
   void minimized() noexcept;
+  void focus_returned() noexcept;
   void video_stale(
       PasteCancelReason reason = PasteCancelReason::video_stale) noexcept;
   void release(PasteCancelReason reason) noexcept;
@@ -188,6 +191,9 @@ class InputRouter {
   void handle_button(const InputButton& button);
   void handle_wheel(const InputWheel& wheel);
   void begin_release(PasteCancelReason reason) noexcept;
+  // Focus loss and minimize. A running paste stays up; captured keys do not.
+  void leave_foreground() noexcept;
+  void release_residual_keys() noexcept;
   [[nodiscard]] PasteCancelReason paste_stop_reason(
       const ControlSnapshot& snapshot) const;
   void end_paste(PasteCancelReason reason) noexcept;
@@ -252,6 +258,7 @@ class InputRouter {
   Clock::time_point paste_started_at_{};
   std::size_t paste_total_bytes_{};
   bool windows_hex_{};
+  bool window_background_{};
   WindowsHexPasteCounts hex_rejected_{};
 };
 

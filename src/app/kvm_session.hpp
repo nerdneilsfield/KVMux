@@ -100,6 +100,7 @@ class KvmSession {
   void update_ui_heartbeat() noexcept;
   void focus_lost() noexcept;
   void minimized() noexcept;
+  void focus_returned() noexcept;
   void suspended() noexcept;
   void release_control(PasteCancelReason reason) noexcept;
 

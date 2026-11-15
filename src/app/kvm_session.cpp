@@ -479,14 +479,29 @@ void KvmSession::request_release(const PasteCancelReason reason) noexcept {
 void KvmSession::focus_lost() noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
+  // request_release_locked() drops control and ReleaseAll. That cancels a
+  // paste and releases Alt. Leave the paste's control lease and keyboard
+  // report alone; focus_lost() releases only keys the router had forwarded.
+  if (input_.text_active()) {
+    input_.focus_lost();
+    return;
+  }
   request_release_locked(PasteCancelReason::focus_lost);
   input_.focus_lost();
 }
 void KvmSession::minimized() noexcept {
   discard_motion();
   std::lock_guard lock(input_mutex_);
+  if (input_.text_active()) {
+    input_.minimized();
+    return;
+  }
   request_release_locked(PasteCancelReason::focus_lost);
   input_.minimized();
+}
+void KvmSession::focus_returned() noexcept {
+  std::lock_guard lock(input_mutex_);
+  input_.focus_returned();
 }
 void KvmSession::suspended() noexcept {
   discard_motion();

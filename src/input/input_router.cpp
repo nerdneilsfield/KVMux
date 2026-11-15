@@ -666,6 +666,7 @@ void InputRouter::end_paste(PasteCancelReason reason) noexcept {
   text_inflight_epoch_ = text_inflight_sequence_ = 0;
   temporary_intent_ = false;
   windows_hex_ = false;
+  window_background_ = false;
 }
 
 void InputRouter::begin_release(const PasteCancelReason reason) noexcept {
@@ -690,12 +691,44 @@ void InputRouter::begin_release(const PasteCancelReason reason) noexcept {
 void InputRouter::release(const PasteCancelReason reason) noexcept {
   if (state_ != InputState::preview || injected_active()) begin_release(reason);
 }
-void InputRouter::focus_lost() noexcept {
+
+void InputRouter::release_residual_keys() noexcept {
+  // InputRouter::submit() treats rejection as a fault and would cancel the
+  // paste. ReleaseAll would zero the report the paste worker is building,
+  // including Alt. These ups are only the keys this router already forwarded.
+  const auto modifiers = held_.modifiers();
+  const auto keys = held_.keys();
+  const bool down = modifiers != 0 || std::any_of(keys.begin(), keys.end(),
+                                                  [](const std::uint8_t key) {
+                                                    return key != 0;
+                                                  });
+  if (!down) return;
+  const auto send_up = [this](const std::uint8_t usage) {
+    if (usage == 0) return;
+    const auto snapshot = sink_.snapshot();
+    (void)sink_.submit(
+        {snapshot.epoch, ++sequence_, Clock::now(), KeyEdge{usage, false}, {}});
+  };
+  for (unsigned bit = 0; bit < 8; ++bit) {
+    if ((modifiers & (1U << bit)) != 0)
+      send_up(static_cast<std::uint8_t>(0xe0U + bit));
+  }
+  for (const auto usage : keys) send_up(usage);
+  held_.clear();
+}
+
+void InputRouter::leave_foreground() noexcept {
+  if (text_active_ || direct_ascii_paste_ || remote_ascii_paste_) {
+    window_background_ = true;
+    release_residual_keys();
+    return;
+  }
   begin_release(PasteCancelReason::focus_lost);
 }
-void InputRouter::minimized() noexcept {
-  begin_release(PasteCancelReason::focus_lost);
-}
+
+void InputRouter::focus_lost() noexcept { leave_foreground(); }
+void InputRouter::minimized() noexcept { leave_foreground(); }
+void InputRouter::focus_returned() noexcept { window_background_ = false; }
 void InputRouter::video_stale(const PasteCancelReason reason) noexcept {
   video_fresh_ = false;
   if (sink_.snapshot().recoverable_transport)
@@ -915,7 +948,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
             paste.active(),
             false,
             text_result_.cancel_reason,
-            windows_hex_};
+            windows_hex_,
+            window_background_};
   }
   return {text_result_.error,
           text_result_.source_bytes,
@@ -925,7 +959,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
           text_active_,
           text_active_ && !special_steps_.empty(),
           text_result_.cancel_reason,
-          windows_hex_};
+          windows_hex_,
+          window_background_};
 }
 
 void InputRouter::schedule_text(const Clock::time_point now) {

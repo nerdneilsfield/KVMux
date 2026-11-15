@@ -45,23 +45,28 @@ decision in the relevant documentation.
   by the design. `ReleaseAll` must bypass ordinary queue saturation and stale
   control epochs must never replay.
 - The UI must never wait for capture or serial transactions. ACK timeout,
-  overload, stale video, focus loss, device changes, sleep, and shutdown all
-  use the common release path. Never report release as confirmed after the
-  communication link is lost.
+  overload, stale video, device changes, sleep, and shutdown all use the
+  common release path. Never report release as confirmed after the
+  communication link is lost. Focus loss and minimize still release captured
+  keyboard and mouse; a running ASCII or Windows-hex paste keeps sending when
+  the window leaves the foreground, because a long paste must survive that,
+  and the status line only marks that the window is not in front.
 - Use SDL scancodes as physical USB keyboard usages. Do not route SDL text input
   as remote keystrokes. The only exception is an explicit opt-in, controlled
   ASCII simulated typing engine: it accepts US-layout printable ASCII plus Tab
   and Enter, starts only on an explicit user action, and sends paced, bounded
   events through the existing `InputRouter`/`ControlSink`. It must use the
-  common cancel/release path and must not persist or log clipboard/text data.
+  common cancel/release path, except focus loss and minimize do not cancel
+  it, and must not persist or log clipboard/text data.
   Chinese text is in scope (decision 2026-11-15, after the first version
   shipped) only as a second explicit opt-in engine that types Unicode code
   points as ordinary scancodes using the target OS's hexadecimal code-point
   entry (Windows first: Alt, keypad plus, hex digits, with `EnableHexNumpad`
   set on the target). Wubi stays a documented fallback and is not implemented.
   It follows the same rules: user-started, paced, bounded, through
-  `InputRouter`/`ControlSink`, common cancel/release path, and no logging or
-  persistence of text or its code points. Its design and prerequisites live in
+  `InputRouter`/`ControlSink`, the common cancel/release path except focus
+  loss and minimize, and no logging or persistence of text or its code
+  points. Its design and prerequisites live in
   `docs/plans/2026-11-15-chinese-paste.md`. Other Unicode input stays out of
   scope. The Host key is local-only and must never reach the target.
 - Keep platform capture code in the three native adapters: Media Foundation on

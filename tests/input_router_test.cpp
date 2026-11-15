@@ -140,15 +140,33 @@ int main() {
     router.set_video_fresh(true);
     capture(router, sink);
 
+    router.handle({InputKey{0x04, true, false}});
+    router.handle({InputButton{InputMouseButton::left, true, 40, 40}});
+    require(!sink.events.empty(), "captured key and button were forwarded");
+    router.focus_lost();
+    require(router.state() == InputState::releasing && sink.releases == 1 &&
+                !router.text_active(),
+            "focus loss still releases captured keyboard and mouse");
+    sink.snapshot_value.release_confirmed = true;
+    router.tick();
+    require(router.state() == InputState::preview, "release returns preview");
+    sink.events.clear();
+    capture(router, sink);
     router.handle({InputKey{0xe4, true, false}});
     require(router.state() == InputState::releasing && sink.events.empty() &&
-                sink.releases == 1,
+                sink.releases == 2,
             "Host key releases without leaking");
     router.handle({InputKey{0xe4, false, false}});
     sink.snapshot_value.release_confirmed = true;
     router.tick();
     require(router.state() == InputState::preview,
             "confirmed release returns preview");
+    sink.events.clear();
+    capture(router, sink);
+    router.handle({InputKey{0x05, true, false}});
+    router.minimized();
+    require(router.state() == InputState::releasing && sink.releases == 3,
+            "minimize still releases captured keys");
   }
 
   {
@@ -528,6 +546,32 @@ int main() {
     FakeSink sink;
     InputRouter router(sink);
     router.set_video_fresh(true);
+    router.handle({InputKey{0x28, true, false}});
+    require(static_cast<bool>(router.start_text("ab")),
+            "ASCII paste starts while Enter is held");
+    const auto events = sink.events.size();
+    const auto releases = sink.releases;
+    router.focus_lost();
+    router.minimized();
+    require(router.text_active() && sink.releases == releases &&
+                sink.events.size() == events &&
+                router.text_paste_snapshot().window_background,
+            "ASCII paste keeps running and does not release Alt");
+    router.focus_returned();
+    require(!router.text_paste_snapshot().window_background,
+            "ASCII paste clears the background mark on focus return");
+    router.set_video_fresh(false);
+    router.tick();
+    require(
+        !router.text_active() && router.text_paste_snapshot().cancel_reason ==
+                                     PasteCancelReason::video_stale,
+        "stale video still cancels ASCII paste");
+  }
+
+  {
+    FakeSink sink;
+    InputRouter router(sink);
+    router.set_video_fresh(true);
     require(static_cast<bool>(router.start_text("ab")), "paste starts");
     router.set_video_fresh(false);
     router.tick();
@@ -801,16 +845,27 @@ int main() {
     require(static_cast<bool>(router.start_windows_hex_text(han)),
             "second hex paste starts");
     router.focus_lost();
-    require(sink.releases == 2, "focus loss releases the hex paste");
+    router.minimized();
+    require(sink.releases == 1 && router.text_active() &&
+                router.text_paste_snapshot().window_background,
+            "focus loss and minimize keep the hex paste running");
+    router.focus_returned();
+    require(
+        router.text_active() && !router.text_paste_snapshot().window_background,
+        "focus return clears the background mark");
+    router.cancel_text(PasteCancelReason::user);
+    require(
+        sink.releases == 2 && !router.text_active(),
+        "user cancel still releases after the window was in the background");
 
     std::string logs;
     for (const auto& line : captured->lines) logs += line;
     require(logs.find("phase=refused") != std::string::npos &&
                 logs.find("result=num_lock") != std::string::npos &&
                 logs.find("reason=user") != std::string::npos &&
-                logs.find("reason=focus_lost") != std::string::npos &&
+                logs.find("reason=focus_lost") == std::string::npos &&
                 logs.find("code_points=2") != std::string::npos,
-            "hex paste log records phase, counts, and cancel reason");
+            "hex paste log records phase and counts, not a focus-loss cancel");
     require(logs.find(han) == std::string::npos &&
                 logs.find("4e2d") == std::string::npos &&
                 logs.find("4E2D") == std::string::npos &&

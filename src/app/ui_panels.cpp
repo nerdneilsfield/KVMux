@@ -40,22 +40,23 @@ constexpr const char* kWindowsHexPasteNote =
 
 void show_paste_progress(const TextPasteSnapshot& paste,
                          const ControlSnapshot& control) {
+  const char* background = paste.window_background ? " · 窗口不在前台" : "";
   if (!paste.windows_hex) {
-    ImGui::Text("Typing ASCII: %zu/%zu scheduled", paste.scheduled_gestures,
-                paste.planned_gestures);
+    ImGui::Text("Typing ASCII: %zu/%zu scheduled%s", paste.scheduled_gestures,
+                paste.planned_gestures, background);
     return;
   }
   const auto estimate = estimate_windows_hex_paste(paste.normalized_characters,
                                                    control.last_ack_rtt);
   if (estimate.microseconds > 0) {
-    ImGui::Text("Typing: %zu/%zu  ·  估算约 %.1f 秒（%zu 帧 × ACK，估算）",
+    ImGui::Text("Typing: %zu/%zu  ·  估算约 %.1f 秒（%zu 帧 × ACK，估算）%s",
                 paste.scheduled_gestures, paste.planned_gestures,
                 static_cast<double>(estimate.microseconds) / 1.0e6,
-                estimate.frames);
+                estimate.frames, background);
   } else {
-    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧（约每字 12 帧 × ACK）",
+    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧（约每字 12 帧 × ACK）%s",
                 paste.scheduled_gestures, paste.planned_gestures,
-                estimate.frames);
+                estimate.frames, background);
   }
 }
 
