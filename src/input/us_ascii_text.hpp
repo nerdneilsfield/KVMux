@@ -70,6 +70,11 @@ enum class TextPasteError {
   bare_carriage_return,
   non_ascii,
   unsupported,
+  invalid_utf8,
+  surrogate,
+  above_bmp,
+  control,
+  num_lock,
   too_long,
   canceled
 };

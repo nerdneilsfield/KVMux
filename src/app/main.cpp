@@ -701,6 +701,16 @@ int main(int argc, char** argv) {
           }
           break;
         }
+        case UiActionKind::start_windows_hex_paste: {
+          const auto result = session->start_windows_hex_paste(item.text);
+          ui.paste.error = result.error;
+          ui.paste.cancel_reason = result.cancel_reason;
+          if (result) {
+            ui.paste.buffer.fill('\0');
+            ui.paste.removed = 0;
+          }
+          break;
+        }
         case UiActionKind::activate_control:
           session->activate_control();
           break;

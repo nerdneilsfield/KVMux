@@ -611,6 +611,14 @@ void InputRouter::finish_paste_log(const Clock::time_point now,
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            now - paste_started_at_)
                            .count();
+  if (windows_hex_) {
+    log_windows_hex_paste(
+        "finished",
+        text_result_.error == TextPasteError::none ? "completed" : "canceled",
+        paste_cancel_reason_name(text_result_.cancel_reason),
+        paste_total_bytes_, sent, elapsed, hex_rejected_);
+    return;
+  }
   try {
     spdlog::info(
         "paste finished result={} reason={} sent_bytes={} total_bytes={} "
@@ -657,6 +665,7 @@ void InputRouter::end_paste(PasteCancelReason reason) noexcept {
   text_edge_inflight_ = false;
   text_inflight_epoch_ = text_inflight_sequence_ = 0;
   temporary_intent_ = false;
+  windows_hex_ = false;
 }
 
 void InputRouter::begin_release(const PasteCancelReason reason) noexcept {
@@ -779,6 +788,7 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
   scheduled_text_gestures_ = 0;
   text_active_ = true;
   temporary_intent_ = true;
+  windows_hex_ = false;
   direct_ascii_paste_ = false;
   remote_ascii_paste_ = sink_.snapshot().recoverable_transport;
   direct_paste_snapshot_ = {};
@@ -816,6 +826,79 @@ TextMappingResult InputRouter::start_text(const std::string_view text,
   return text_result_;
 }
 
+TextMappingResult InputRouter::start_windows_hex_text(
+    const std::string_view text, const Clock::time_point now) {
+  const auto plan = map_windows_hex_paste(text);
+  hex_rejected_ = plan.rejected;
+  text_result_ = {};
+  text_result_.error = plan.error;
+  text_result_.source_bytes = plan.source_bytes;
+  text_result_.normalized_characters = plan.normalized_characters;
+  text_result_.gestures = plan.gestures;
+  const auto refuse = [&](const TextPasteError error,
+                          const PasteCancelReason reason) {
+    text_result_.error = error;
+    text_result_.cancel_reason = reason;
+    text_result_.gestures.clear();
+    if (error != TextPasteError::num_lock &&
+        reason != PasteCancelReason::not_ready &&
+        reason != PasteCancelReason::link_lost) {
+      text_result_.normalized_characters = 0;
+    }
+    log_windows_hex_paste("refused", windows_hex_paste_error_name(error),
+                          paste_cancel_reason_name(reason),
+                          text_result_.normalized_characters, 0, 0,
+                          hex_rejected_);
+    return text_result_;
+  };
+  if (!plan) return refuse(plan.error, PasteCancelReason::none);
+  if (state_ != InputState::preview || special_active() || text_active_)
+    return refuse(TextPasteError::canceled, PasteCancelReason::not_ready);
+  if (!sink_ready_released())
+    return refuse(TextPasteError::canceled, PasteCancelReason::link_lost);
+  if ((sink_.snapshot().keyboard_leds & 1U) == 0)
+    return refuse(TextPasteError::num_lock, PasteCancelReason::none);
+  if (sink_.snapshot().recoverable_transport)
+    return refuse(TextPasteError::canceled, PasteCancelReason::not_ready);
+
+  text_gestures_ = text_result_.gestures;
+  next_text_gesture_ = 0;
+  next_text_edge_ = 0;
+  text_edge_inflight_ = false;
+  text_inflight_epoch_ = text_inflight_sequence_ = 0;
+  text_completion_pending_ = false;
+  scheduled_text_gestures_ = 0;
+  text_active_ = true;
+  temporary_intent_ = true;
+  windows_hex_ = true;
+  direct_ascii_paste_ = false;
+  remote_ascii_paste_ = false;
+  direct_paste_snapshot_ = {};
+  paste_log_pending_ = true;
+  paste_started_at_ = now;
+  paste_total_bytes_ = text_result_.normalized_characters;
+  text_result_.cancel_reason = PasteCancelReason::none;
+  AsciiPasteJob job;
+  job.gestures.reserve(text_gestures_.size());
+  for (auto& gesture : text_gestures_)
+    job.gestures.push_back(std::move(gesture.edges));
+  text_gestures_.clear();
+  if (sink_.start_ascii_paste(std::move(job)) != SubmitResult::accepted) {
+    note_paste_cancel(PasteCancelReason::link_lost);
+    text_active_ = false;
+    temporary_intent_ = false;
+    finish_paste_log(now, 0);
+    windows_hex_ = false;
+  } else {
+    direct_ascii_paste_ = true;
+    direct_paste_snapshot_ = sink_.ascii_paste_snapshot();
+    log_windows_hex_paste("start", "accepted",
+                          paste_cancel_reason_name(PasteCancelReason::none),
+                          paste_total_bytes_, 0, 0, hex_rejected_);
+  }
+  return text_result_;
+}
+
 void InputRouter::cancel_text(const PasteCancelReason reason) noexcept {
   if (text_active_) begin_release(reason);
 }
@@ -831,7 +914,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
             paste.completed_gestures,
             paste.active(),
             false,
-            text_result_.cancel_reason};
+            text_result_.cancel_reason,
+            windows_hex_};
   }
   return {text_result_.error,
           text_result_.source_bytes,
@@ -840,7 +924,8 @@ TextPasteSnapshot InputRouter::text_paste_snapshot() const noexcept {
           scheduled_text_gestures_,
           text_active_,
           text_active_ && !special_steps_.empty(),
-          text_result_.cancel_reason};
+          text_result_.cancel_reason,
+          windows_hex_};
 }
 
 void InputRouter::schedule_text(const Clock::time_point now) {

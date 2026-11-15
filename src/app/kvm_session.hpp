@@ -87,6 +87,8 @@ class KvmSession {
   void set_keep_alive(bool enabled) noexcept;
   [[nodiscard]] bool send_special(SpecialKeys keys);
   [[nodiscard]] TextMappingResult start_text_paste(std::string_view text);
+  [[nodiscard]] TextMappingResult start_windows_hex_paste(
+      std::string_view text);
   void cancel_text_paste() noexcept;
   [[nodiscard]] TextMappingResult text_paste_snapshot() const;
   [[nodiscard]] TextPasteSnapshot text_paste_progress() const noexcept;

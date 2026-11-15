@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "control/ch9329_protocol.hpp"
+#include "input/windows_hex_text.hpp"
 #include "support/diagnostics.hpp"
 
 namespace {
@@ -26,6 +27,8 @@ struct FakeSerial {
   bool opened{};
   std::size_t write_limit{3};
   bool answer{true};
+  // Negative means every keyboard frame is ACKed. Zero holds the next one.
+  int keyboard_acks_remaining{-1};
   std::deque<std::uint8_t> incoming;
   kvmux::ch9329::Parser requests;
   std::vector<kvmux::ch9329::Frame> received;
@@ -57,7 +60,16 @@ struct FakeSerial {
           auto frames = requests.feed(bytes.first(count));
           for (const auto& request : frames) {
             received.push_back(request);
-            if (!answer) {
+            bool ack_frame = answer;
+            if (ack_frame && request.command == 0x02U &&
+                keyboard_acks_remaining >= 0) {
+              if (keyboard_acks_remaining == 0) {
+                ack_frame = false;
+              } else {
+                --keyboard_acks_remaining;
+              }
+            }
+            if (!ack_frame) {
               continue;
             }
             kvmux::ch9329::Frame response{
@@ -467,5 +479,127 @@ int main() {
   require(dropped_paste.cancel_reason != PasteCancelReason::user &&
               dropped_paste.cancel_reason == PasteCancelReason::link_lost,
           "disconnect cancels paste as link_lost");
+
+  // Cancel inside a Windows hex sequence. The first edge is ACKed. The next
+  // edge stays in flight, then cancel takes the common clear path.
+  FakeSerial hex_serial;
+  Ch9329ControlSink hex_sink(hex_serial.io());
+  hex_sink.connect("fake", 57600);
+  require(eventually([&] {
+            return hex_sink.snapshot().state == ControlConnectionState::ready;
+          }),
+          "hex paste sink ready");
+  hex_sink.set_control_active(true);
+  {
+    std::lock_guard lock(hex_serial.mutex);
+    hex_serial.keyboard_acks_remaining = 1;
+  }
+  const auto hex_edges = map_windows_hex_scalar(0x4e2d);
+  require(static_cast<bool>(hex_edges) && hex_edges.edges.size() == 12,
+          "hex fixture has the twelve-edge sequence");
+  AsciiPasteJob hex_job;
+  hex_job.gestures.push_back(hex_edges.edges);
+  require(
+      hex_sink.start_ascii_paste(std::move(hex_job)) == SubmitResult::accepted,
+      "hex paste accepted");
+  require(eventually([&] {
+            std::lock_guard lock(hex_serial.mutex);
+            std::size_t keyboards = 0;
+            for (const auto& frame : hex_serial.received) {
+              if (frame.command == 0x02U) ++keyboards;
+            }
+            // Handshake clear plus Alt down and the held keypad-plus frame.
+            return keyboards >= 3;
+          }),
+          "hex paste holds the second keyboard frame");
+  hex_sink.cancel_ascii_paste();
+  {
+    std::lock_guard lock(hex_serial.mutex);
+    hex_serial.keyboard_acks_remaining = -1;
+  }
+  hex_serial.ack(0x02);
+  require(eventually([&] {
+            return hex_sink.snapshot().release_confirmed &&
+                   hex_sink.snapshot().state == ControlConnectionState::ready;
+          }),
+          "cancel releases Alt through the common clear path");
+  {
+    std::lock_guard lock(hex_serial.mutex);
+    std::vector<ch9329::Frame> keys;
+    for (const auto& frame : hex_serial.received) {
+      if (frame.command == 0x02U) keys.push_back(frame);
+    }
+    require(keys.size() >= 4, "clear adds a zero keyboard report");
+    require(keys[1].data.size() == 8 && keys[1].data[0] == 0x04 &&
+                keys[1].data[2] == 0,
+            "first paste frame is Left Alt alone");
+    require(keys[2].data.size() == 8 && keys[2].data[0] == 0x04 &&
+                keys[2].data[2] == 0x57,
+            "second paste frame is Left Alt and keypad plus");
+    const auto zero = [](const ch9329::Frame& frame) {
+      return frame.data.size() == 8 &&
+             std::ranges::all_of(frame.data,
+                                 [](const auto byte) { return byte == 0; });
+    };
+    require(zero(keys.back()), "last keyboard report releases every key");
+    bool saw_plus = false;
+    bool saw_clear = false;
+    for (std::size_t index = 1; index < keys.size(); ++index) {
+      if (!saw_plus) {
+        saw_plus = keys[index].data.size() == 8 && keys[index].data[2] == 0x57;
+        continue;
+      }
+      if (!saw_clear) {
+        saw_clear = zero(keys[index]);
+        require(saw_clear, "Alt is released before another paste edge");
+        continue;
+      }
+      require(zero(keys[index]), "no hex edge follows the release report");
+    }
+    require(saw_clear, "release report follows the in-flight Alt chord");
+    for (const auto& frame : keys) {
+      require(frame.data.size() < 3 || frame.data[2] != 0x5c,
+              "cancel does not continue the hex digits");
+    }
+  }
+  require(hex_sink.ascii_paste_snapshot().state == AsciiPasteState::canceled &&
+              hex_sink.ascii_paste_snapshot().completed_gestures == 0,
+          "canceled hex paste does not finish the scalar");
+
+  FakeSerial stalled_hex;
+  Ch9329ControlSink stalled_sink(stalled_hex.io());
+  stalled_sink.connect("fake", 57600);
+  require(eventually([&] {
+            return stalled_sink.snapshot().state ==
+                   ControlConnectionState::ready;
+          }),
+          "stalled hex sink ready");
+  stalled_sink.set_control_active(true);
+  {
+    std::lock_guard lock(stalled_hex.mutex);
+    stalled_hex.keyboard_acks_remaining = 1;
+  }
+  AsciiPasteJob stalled_job;
+  stalled_job.gestures.push_back(map_windows_hex_scalar(0x4e2d).edges);
+  require(stalled_sink.start_ascii_paste(std::move(stalled_job)) ==
+              SubmitResult::accepted,
+          "stalled hex paste accepted");
+  require(eventually([&] {
+            std::lock_guard lock(stalled_hex.mutex);
+            return stalled_hex.keyboard_acks_remaining == 0;
+          }),
+          "stalled hex paste is waiting on an ACK");
+  require(eventually(
+              [&] {
+                const auto state = stalled_sink.snapshot();
+                return !state.release_confirmed &&
+                       (state.state == ControlConnectionState::fault ||
+                        state.state == ControlConnectionState::reconnecting);
+              },
+              1500ms),
+          "ACK timeout does not confirm release");
+  require(stalled_sink.ascii_paste_snapshot().cancel_reason ==
+              PasteCancelReason::ack_timeout,
+          "ACK timeout is the paste cancel reason");
   return EXIT_SUCCESS;
 }

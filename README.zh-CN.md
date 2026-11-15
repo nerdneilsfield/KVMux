@@ -69,7 +69,38 @@ macOS Developer ID 签名和公证尚未完成。Windows/Linux 硬件覆盖、�
 
 输入有固定节奏和上限。可取消输入，或通过通常的 Host 键、焦点丢失或连接释放路径中止；
 KVMux 会释放已按下的按键并停止剩余文本。剪贴板内容只留在本机，不会持久化或记录日志。
-暂不支持 Unicode、中文或五笔输入。
+**Type ASCII** 仍会拒绝任何非 ASCII 字符。五笔输入没有实现。
+
+## 向 Windows 目标输入中文
+
+选择 **输入 → Chinese paste (Windows hex)**。这是另一个需要明确发起的动作。
+选择 **Type ASCII** 时不会走这条路径。KVMux 不修改被控电脑。
+
+开始之前，在接收按键的那台 Windows 上：
+
+1. 为当前登录用户把 `EnableHexNumpad` 设为 `1`，然后注销并重新登录。仍无效果时再重启。
+
+   ```text
+   reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
+   ```
+
+2. 打开 NumLock。NumLock 关闭，或 KVMux 还没有读到这个灯时，这次动作不发送按键。
+3. 把焦点放在 Notepad++ 或普通 Win32 编辑框上。不要用带 Markdown 工具栏的
+   Win11 新版记事本：这个序列一开头会打开它的「插入链接」窗口。
+4. 输入法需要放行这些按键。Notepad++ 里有过一次人工观察：英文模式和中文模式都打出了两个
+   BMP 汉字。那一次观察不是平台验收。
+
+控制目标必须是 **Local serial**，并且控制已经 Ready。Relay 不发送这种粘贴。
+对话框会写明这些前提，并给出估算：大约每个字符 12 帧，再乘最近一次 ACK 往返。
+界面标明这是估算。长文本仍然每个按键边等一次 ACK，字符上限与 ASCII 粘贴相同，为 65536。
+
+Tab、Enter 和可打印的美式 ASCII 走原来的 ASCII 按键。BMP 内的其他字符走 Windows
+十六进制序列。BMP 以外的字符、代理项，以及 Tab 和 Enter 以外的控制字符，会拒绝整段。
+对话框显示拒绝了多少个以及原因，这段说明里不出现文本。KVMux 不会跳过它们后继续发送。
+
+取消、失焦、画面过期、控制链路丢失和 ACK 超时都走与其他输入相同的释放路径，包括松开左 Alt。
+链路已经丢失时，KVMux 不会把这次释放报成已确认。日志只记录计数、阶段和取消原因，
+不记录文本、码点或十六进制串。
 
 ## 截图与录制
 

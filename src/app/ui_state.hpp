@@ -120,6 +120,16 @@ inline const char* text_paste_error_label(TextPasteError error) {
       return "Non-ASCII text is not supported.";
     case TextPasteError::unsupported:
       return "Unsupported characters found.";
+    case TextPasteError::invalid_utf8:
+      return "非法 UTF-8，整段未发送。";
+    case TextPasteError::surrogate:
+      return "有代理项，整段未发送。";
+    case TextPasteError::above_bmp:
+      return "有 BMP 以外的码点，整段未发送。";
+    case TextPasteError::control:
+      return "有控制字符，整段未发送。";
+    case TextPasteError::num_lock:
+      return "目标机 NumLock 关闭或尚未读到，未发送按键。";
     case TextPasteError::too_long:
       return "Text is limited to 65536 characters.";
     case TextPasteError::canceled:
@@ -167,6 +177,16 @@ inline const char* debug_text_paste_error(TextPasteError error) {
       return "error-non-ascii";
     case TextPasteError::unsupported:
       return "error-unsupported";
+    case TextPasteError::invalid_utf8:
+      return "error-invalid-utf8";
+    case TextPasteError::surrogate:
+      return "error-surrogate";
+    case TextPasteError::above_bmp:
+      return "error-above-bmp";
+    case TextPasteError::control:
+      return "error-control";
+    case TextPasteError::num_lock:
+      return "error-num-lock";
     case TextPasteError::too_long:
       return "error-too-long";
     case TextPasteError::canceled:
@@ -360,6 +380,7 @@ struct PasteUi {
   std::size_t clipboard_loaded_bytes{0};
   std::size_t clipboard_loaded_characters{0};
   bool open{false};
+  bool hex_open{false};
   bool was_active{false};
   bool cancelled{false};
   bool seen_active{false};
@@ -478,6 +499,7 @@ enum class UiActionKind {
   set_host_key,
   cancel_text_paste,
   start_text_paste,
+  start_windows_hex_paste,
   activate_control,
   set_video_rect,
 };

@@ -1,9 +1,13 @@
 #include "input/input_router.hpp"
 
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -737,6 +741,82 @@ int main() {
             "mapper accepts the relay transaction limit");
     require(map_us_ascii_text(text + 'a').error == TextPasteError::too_long,
             "mapper rejects text beyond the relay transaction limit");
+  }
+
+  {
+    class CaptureSink : public spdlog::sinks::base_sink<std::mutex> {
+     public:
+      std::vector<std::string> lines;
+
+     protected:
+      void sink_it_(const spdlog::details::log_msg& message) override {
+        lines.emplace_back(message.payload.begin(), message.payload.end());
+      }
+      void flush_() override {}
+    };
+    auto captured = std::make_shared<CaptureSink>();
+    auto logger = std::make_shared<spdlog::logger>("hex-paste", captured);
+    logger->set_level(spdlog::level::info);
+    const auto previous = spdlog::default_logger();
+    spdlog::set_default_logger(logger);
+
+    const std::string han = "\xE4\xB8\xAD";
+    const std::string mixed = std::string("a") + han;
+    FakeSink sink;
+    InputRouter router(sink);
+    const auto refused = router.start_windows_hex_text(han);
+    require(refused.error == TextPasteError::num_lock && sink.paste_starts == 0,
+            "NumLock off refuses Windows hex paste before any key");
+    sink.snapshot_value.keyboard_leds = 0x01;
+    sink.snapshot_value.recoverable_transport = true;
+    const auto relay = router.start_windows_hex_text(han);
+    require(relay.error == TextPasteError::canceled &&
+                relay.cancel_reason == PasteCancelReason::not_ready &&
+                sink.paste_starts == 0,
+            "relay control does not start a local hex job");
+    sink.snapshot_value.recoverable_transport = false;
+    const auto ascii = router.start_text(han);
+    require(ascii.error == TextPasteError::non_ascii && sink.paste_starts == 0,
+            "ASCII paste still rejects non-ASCII");
+    const auto started = router.start_windows_hex_text(mixed);
+    require(started && sink.paste_starts == 1 &&
+                sink.paste_job.gestures.size() == 2 &&
+                router.text_paste_snapshot().windows_hex,
+            "Windows hex paste submits one gesture per scalar");
+    require(sink.paste_job.gestures[0].size() == 2 &&
+                sink.paste_job.gestures[0][0].usage == 0x04 &&
+                sink.paste_job.gestures[1].size() == 12 &&
+                sink.paste_job.gestures[1].front().usage == 0xe2 &&
+                sink.paste_job.gestures[1].front().pressed &&
+                sink.paste_job.gestures[1][1].usage == 0x57 &&
+                sink.paste_job.gestures[1].back().usage == 0xe2 &&
+                !sink.paste_job.gestures[1].back().pressed,
+            "mixed paste keeps ASCII edges and the hex Alt sequence");
+    router.cancel_text(PasteCancelReason::user);
+    require(sink.releases == 1 && !router.text_active(),
+            "cancel takes the common release path");
+    sink.snapshot_value.release_confirmed = true;
+    router.tick();
+    require(router.state() == InputState::preview, "release returns preview");
+    require(static_cast<bool>(router.start_windows_hex_text(han)),
+            "second hex paste starts");
+    router.focus_lost();
+    require(sink.releases == 2, "focus loss releases the hex paste");
+
+    std::string logs;
+    for (const auto& line : captured->lines) logs += line;
+    require(logs.find("phase=refused") != std::string::npos &&
+                logs.find("result=num_lock") != std::string::npos &&
+                logs.find("reason=user") != std::string::npos &&
+                logs.find("reason=focus_lost") != std::string::npos &&
+                logs.find("code_points=2") != std::string::npos,
+            "hex paste log records phase, counts, and cancel reason");
+    require(logs.find(han) == std::string::npos &&
+                logs.find("4e2d") == std::string::npos &&
+                logs.find("4E2D") == std::string::npos &&
+                logs.find("7684") == std::string::npos,
+            "hex paste log does not record text or code-point values");
+    spdlog::set_default_logger(previous);
   }
 
   return EXIT_SUCCESS;

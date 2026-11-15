@@ -1,5 +1,9 @@
 #include "input/windows_hex_text.hpp"
 
+#include <spdlog/spdlog.h>
+
+#include <string>
+
 #include "control/hid_keyboard.hpp"
 
 namespace kvmux {
@@ -56,6 +60,80 @@ WindowsHexSequence map_windows_hex_scalar(const std::uint32_t scalar) {
   return result;
 }
 
+namespace {
+
+constexpr std::size_t kMaxScalars = 65536;
+
+enum class UnitKind { scalar, invalid_utf8, surrogate, above_bmp };
+
+struct Unit {
+  UnitKind kind{UnitKind::invalid_utf8};
+  char32_t scalar{};
+  std::size_t size{1};
+};
+
+Unit decode_utf8(const std::string_view text, const std::size_t index) {
+  const auto lead = static_cast<unsigned char>(text[index]);
+  if (lead <= 0x7FU) return {UnitKind::scalar, lead, 1};
+  if (lead < 0xC2U || lead > 0xF4U) return {UnitKind::invalid_utf8, 0, 1};
+  const int need = lead < 0xE0U ? 2 : lead < 0xF0U ? 3 : 4;
+  std::size_t taken = 1;
+  for (int extra = 1; extra < need; ++extra) {
+    if (index + static_cast<std::size_t>(extra) >= text.size()) break;
+    const auto next = static_cast<unsigned char>(
+        text[index + static_cast<std::size_t>(extra)]);
+    if ((next & 0xC0U) != 0x80U) break;
+    ++taken;
+  }
+  if (taken != static_cast<std::size_t>(need))
+    return {UnitKind::invalid_utf8, 0, taken};
+  const auto b1 = static_cast<unsigned char>(text[index + 1]);
+  if (need == 2) {
+    const char32_t scalar =
+        (static_cast<char32_t>(lead & 0x1FU) << 6U) | (b1 & 0x3FU);
+    return {UnitKind::scalar, scalar, 2};
+  }
+  const auto b2 = static_cast<unsigned char>(text[index + 2]);
+  if (need == 3) {
+    if (lead == 0xE0U && b1 < 0xA0U) return {UnitKind::invalid_utf8, 0, 3};
+    if (lead == 0xEDU && b1 >= 0xA0U) return {UnitKind::surrogate, 0, 3};
+    const char32_t scalar = (static_cast<char32_t>(lead & 0x0FU) << 12U) |
+                            (static_cast<char32_t>(b1 & 0x3FU) << 6U) |
+                            (b2 & 0x3FU);
+    return {UnitKind::scalar, scalar, 3};
+  }
+  if ((lead == 0xF0U && b1 < 0x90U) || (lead == 0xF4U && b1 > 0x8FU))
+    return {UnitKind::invalid_utf8, 0, 4};
+  return {UnitKind::above_bmp, 0, 4};
+}
+
+bool is_paste_control(const char32_t scalar) noexcept {
+  if (scalar == '\t' || scalar == '\n') return false;
+  if (scalar < 0x20U || scalar == 0x7FU) return true;
+  return scalar >= 0x80U && scalar <= 0x9FU;
+}
+
+bool is_ascii_paste_scalar(const char32_t scalar) noexcept {
+  return scalar == '\t' || scalar == '\n' ||
+         (scalar >= 0x20U && scalar <= 0x7EU);
+}
+
+TextPasteError primary_rejection(const WindowsHexPasteCounts& counts) {
+  if (counts.invalid_utf8 != 0) return TextPasteError::invalid_utf8;
+  if (counts.surrogate != 0) return TextPasteError::surrogate;
+  if (counts.above_bmp != 0) return TextPasteError::above_bmp;
+  if (counts.control != 0) return TextPasteError::control;
+  if (counts.bare_carriage_return != 0)
+    return TextPasteError::bare_carriage_return;
+  return TextPasteError::none;
+}
+
+const char* text_or_none(const char* value) noexcept {
+  return value != nullptr && value[0] != '\0' ? value : "none";
+}
+
+}  // namespace
+
 std::vector<WindowsHexReport> windows_hex_reports(
     const std::span<const KeyEdge> edges) {
   HidKeyboardState keyboard;
@@ -73,6 +151,178 @@ std::vector<WindowsHexReport> windows_hex_reports(
     reports.push_back(report);
   }
   return reports;
+}
+
+WindowsHexPasteResult map_windows_hex_paste(const std::string_view text) {
+  WindowsHexPasteResult result;
+  result.source_bytes = text.size();
+  std::vector<char32_t> scalars;
+  bool too_long = false;
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const Unit unit = decode_utf8(text, index);
+    index += unit.size;
+    if (unit.kind == UnitKind::invalid_utf8) {
+      ++result.rejected.invalid_utf8;
+      scalars.clear();
+      continue;
+    }
+    if (unit.kind == UnitKind::surrogate) {
+      ++result.rejected.surrogate;
+      scalars.clear();
+      continue;
+    }
+    if (unit.kind == UnitKind::above_bmp) {
+      ++result.rejected.above_bmp;
+      scalars.clear();
+      continue;
+    }
+    if (unit.scalar == '\r') {
+      if (index < text.size()) {
+        const Unit next = decode_utf8(text, index);
+        if (next.kind == UnitKind::scalar && next.scalar == '\n') {
+          index += next.size;
+          if (result.rejected.rejected() == 0 && !too_long) {
+            if (scalars.size() >= kMaxScalars) {
+              too_long = true;
+              scalars.clear();
+            } else {
+              scalars.push_back('\n');
+            }
+          }
+          continue;
+        }
+      }
+      ++result.rejected.bare_carriage_return;
+      scalars.clear();
+      continue;
+    }
+    if (is_paste_control(unit.scalar)) {
+      ++result.rejected.control;
+      scalars.clear();
+      continue;
+    }
+    if (result.rejected.rejected() != 0 || too_long) continue;
+    if (scalars.size() >= kMaxScalars) {
+      too_long = true;
+      scalars.clear();
+      continue;
+    }
+    scalars.push_back(unit.scalar);
+  }
+
+  if (const auto reason = primary_rejection(result.rejected);
+      reason != TextPasteError::none) {
+    result.error = reason;
+    return result;
+  }
+  if (too_long) {
+    result.error = TextPasteError::too_long;
+    return result;
+  }
+  if (scalars.empty()) {
+    result.error = TextPasteError::empty;
+    return result;
+  }
+
+  std::string ascii_run;
+  const auto flush_ascii = [&] {
+    if (ascii_run.empty()) return true;
+    const auto mapped = map_us_ascii_text(ascii_run);
+    ascii_run.clear();
+    if (!mapped) return false;
+    result.gestures.insert(result.gestures.end(), mapped.gestures.begin(),
+                           mapped.gestures.end());
+    return true;
+  };
+  for (const char32_t scalar : scalars) {
+    if (is_ascii_paste_scalar(scalar)) {
+      ascii_run.push_back(static_cast<char>(scalar));
+      continue;
+    }
+    if (!flush_ascii()) {
+      result.gestures.clear();
+      result.error = TextPasteError::unsupported;
+      return result;
+    }
+    auto sequence = map_windows_hex_scalar(static_cast<std::uint32_t>(scalar));
+    if (!sequence || sequence.edges.empty()) {
+      result.gestures.clear();
+      result.error = TextPasteError::unsupported;
+      return result;
+    }
+    TextGesture gesture;
+    gesture.edges = std::move(sequence.edges);
+    result.gestures.push_back(std::move(gesture));
+  }
+  if (!flush_ascii()) {
+    result.gestures.clear();
+    result.error = TextPasteError::unsupported;
+    return result;
+  }
+  result.normalized_characters = scalars.size();
+  return result;
+}
+
+const char* windows_hex_paste_error_name(const TextPasteError error) noexcept {
+  switch (error) {
+    case TextPasteError::none:
+      return "none";
+    case TextPasteError::empty:
+      return "empty";
+    case TextPasteError::bare_carriage_return:
+      return "bare_carriage_return";
+    case TextPasteError::non_ascii:
+      return "non_ascii";
+    case TextPasteError::unsupported:
+      return "unsupported";
+    case TextPasteError::invalid_utf8:
+      return "invalid_utf8";
+    case TextPasteError::surrogate:
+      return "surrogate";
+    case TextPasteError::above_bmp:
+      return "above_bmp";
+    case TextPasteError::control:
+      return "control";
+    case TextPasteError::num_lock:
+      return "num_lock";
+    case TextPasteError::too_long:
+      return "too_long";
+    case TextPasteError::canceled:
+      return "canceled";
+  }
+  return "unknown";
+}
+
+std::string format_windows_hex_paste_log(
+    const char* const phase, const char* const result, const char* const reason,
+    const std::size_t code_points, const std::size_t sent,
+    const std::int64_t elapsed_ms, const WindowsHexPasteCounts& rejected) {
+  return std::string("paste phase=") + text_or_none(phase) +
+         " result=" + text_or_none(result) + " reason=" + text_or_none(reason) +
+         " code_points=" + std::to_string(code_points) +
+         " sent=" + std::to_string(sent) +
+         " elapsed_ms=" + std::to_string(elapsed_ms) +
+         " rejected=" + std::to_string(rejected.rejected()) +
+         " invalid_utf8=" + std::to_string(rejected.invalid_utf8) +
+         " surrogate=" + std::to_string(rejected.surrogate) +
+         " above_bmp=" + std::to_string(rejected.above_bmp) +
+         " control=" + std::to_string(rejected.control) +
+         " bare_cr=" + std::to_string(rejected.bare_carriage_return);
+}
+
+void log_windows_hex_paste(const char* const phase, const char* const result,
+                           const char* const reason,
+                           const std::size_t code_points,
+                           const std::size_t sent,
+                           const std::int64_t elapsed_ms,
+                           const WindowsHexPasteCounts& rejected) noexcept {
+  try {
+    spdlog::info(
+        "{}", format_windows_hex_paste_log(phase, result, reason, code_points,
+                                           sent, elapsed_ms, rejected));
+  } catch (const std::exception&) {
+  }
 }
 
 }  // namespace kvmux

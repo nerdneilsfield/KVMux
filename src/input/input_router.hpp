@@ -11,6 +11,7 @@
 #include "control/control_sink.hpp"
 #include "control/hid_keyboard.hpp"
 #include "input/us_ascii_text.hpp"
+#include "input/windows_hex_text.hpp"
 
 namespace kvmux {
 
@@ -86,6 +87,7 @@ struct TextPasteSnapshot {
   bool active{};
   bool pending{};
   PasteCancelReason cancel_reason{PasteCancelReason::none};
+  bool windows_hex{};
 };
 
 struct InputPointerSnapshot {
@@ -126,6 +128,10 @@ class InputRouter {
   }
   [[nodiscard]] bool text_active() const noexcept { return text_active_; }
   [[nodiscard]] TextMappingResult start_text(
+      std::string_view text, Clock::time_point now = Clock::now());
+  // Windows hex paste. ASCII paste stays on start_text and still rejects
+  // non-ASCII. This checks Ready and NumLock before any key is sent.
+  [[nodiscard]] TextMappingResult start_windows_hex_text(
       std::string_view text, Clock::time_point now = Clock::now());
   void cancel_text(PasteCancelReason reason) noexcept;
   [[nodiscard]] TextMappingResult text_snapshot() const { return text_result_; }
@@ -245,6 +251,8 @@ class InputRouter {
   bool paste_log_pending_{};
   Clock::time_point paste_started_at_{};
   std::size_t paste_total_bytes_{};
+  bool windows_hex_{};
+  WindowsHexPasteCounts hex_rejected_{};
 };
 
 }  // namespace kvmux

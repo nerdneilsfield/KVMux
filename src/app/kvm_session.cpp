@@ -304,6 +304,31 @@ TextMappingResult KvmSession::start_text_paste(const std::string_view text) {
   if (!result) control_->set_control_active(false);
   return result;
 }
+TextMappingResult KvmSession::start_windows_hex_paste(
+    const std::string_view text) {
+  std::lock_guard lock(input_mutex_);
+  if (control_blocked()) {
+    const auto plan = map_windows_hex_paste(text);
+    TextMappingResult blocked;
+    blocked.error = plan.error;
+    blocked.source_bytes = plan.source_bytes;
+    blocked.normalized_characters = plan.normalized_characters;
+    if (blocked) {
+      blocked.error = TextPasteError::canceled;
+      blocked.cancel_reason = PasteCancelReason::not_ready;
+    }
+    log_windows_hex_paste("refused",
+                          windows_hex_paste_error_name(blocked.error),
+                          paste_cancel_reason_name(blocked.cancel_reason),
+                          blocked.normalized_characters, 0, 0, plan.rejected);
+    return blocked;
+  }
+  drain_motion_locked();
+  control_->set_control_active(true);
+  auto result = input_.start_windows_hex_text(text);
+  if (!result) control_->set_control_active(false);
+  return result;
+}
 void KvmSession::cancel_text_paste() noexcept {
   std::lock_guard lock(input_mutex_);
   input_.cancel_text(PasteCancelReason::user);

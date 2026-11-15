@@ -1,17 +1,24 @@
 #include "input/windows_hex_text.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "control/control_sink.hpp"
+#include "input/us_ascii_text.hpp"
 
 using kvmux::KeyEdge;
+using kvmux::map_us_ascii_text;
+using kvmux::map_windows_hex_paste;
 using kvmux::map_windows_hex_scalar;
 using kvmux::TracedKeyReport;
 using kvmux::windows_hex_reports;
 using kvmux::WindowsHexError;
+using kvmux::WindowsHexPasteCounts;
 
 void check(bool ok) {
   if (!ok) throw std::runtime_error("failed");
@@ -159,5 +166,98 @@ int main() {
   plus.keys[0] = 0x57;
   check(kvmux::format_traced_key_report(plus) ==
         "seq=1 t_ms=27 mods=04 keys=57");
+
+  const auto expect_edges = [](const std::vector<KeyEdge>& got,
+                               const std::vector<KeyEdge>& edges) {
+    check(got.size() == edges.size());
+    for (std::size_t index = 0; index < edges.size(); ++index) {
+      check(got[index].usage == edges[index].usage);
+      check(got[index].pressed == edges[index].pressed);
+    }
+  };
+  const std::vector<KeyEdge> zhong_edges = {
+      {0xe2, true},  {0x57, true}, {0x57, false}, {0x5c, true},
+      {0x5c, false}, {0x08, true}, {0x08, false}, {0x5a, true},
+      {0x5a, false}, {0x07, true}, {0x07, false}, {0xe2, false}};
+  const std::vector<KeyEdge> de_edges = {
+      {0xe2, true},  {0x57, true}, {0x57, false}, {0x5f, true},
+      {0x5f, false}, {0x5e, true}, {0x5e, false}, {0x60, true},
+      {0x60, false}, {0x5c, true}, {0x5c, false}, {0xe2, false}};
+  const std::vector<KeyEdge> nobreak_edges = {
+      {0xe2, true},  {0x57, true}, {0x57, false}, {0x04, true},
+      {0x04, false}, {0x62, true}, {0x62, false}, {0xe2, false}};
+
+  const auto ascii = map_windows_hex_paste("a\t\n");
+  check(ascii && ascii.normalized_characters == 3 &&
+        ascii.gestures.size() == 3);
+  expect_edges(ascii.gestures[0].edges, {{0x04, true}, {0x04, false}});
+  expect_edges(ascii.gestures[1].edges, {{0x2b, true}, {0x2b, false}});
+  expect_edges(ascii.gestures[2].edges, {{0x28, true}, {0x28, false}});
+  const auto shifted = map_windows_hex_paste("A");
+  check(shifted && shifted.gestures.size() == 1);
+  expect_edges(shifted.gestures[0].edges,
+               {{0xe1, true}, {0x04, true}, {0x04, false}, {0xe1, false}});
+
+  const auto han = map_windows_hex_paste("\xE4\xB8\xAD\xE7\x9A\x84");
+  check(han && han.normalized_characters == 2 && han.gestures.size() == 2);
+  expect_edges(han.gestures[0].edges, zhong_edges);
+  expect_edges(han.gestures[1].edges, de_edges);
+  check(map_us_ascii_text("\xE4\xB8\xAD\xE7\x9A\x84").error ==
+        kvmux::TextPasteError::non_ascii);
+
+  const auto mixed = map_windows_hex_paste("a\r\n\xE4\xB8\xAD");
+  check(mixed && mixed.normalized_characters == 3 &&
+        mixed.gestures.size() == 3);
+  expect_edges(mixed.gestures[0].edges, {{0x04, true}, {0x04, false}});
+  expect_edges(mixed.gestures[1].edges, {{0x28, true}, {0x28, false}});
+  expect_edges(mixed.gestures[2].edges, zhong_edges);
+
+  const auto nbsp = map_windows_hex_paste("\xC2\xA0");
+  check(nbsp && nbsp.gestures.size() == 1);
+  expect_edges(nbsp.gestures[0].edges, nobreak_edges);
+
+  const auto above = map_windows_hex_paste("\xF0\x9F\x98\x80");
+  check(!above && above.error == kvmux::TextPasteError::above_bmp &&
+        above.rejected.above_bmp == 1 && above.gestures.empty());
+  const auto surrogate_text = map_windows_hex_paste("\xED\xA0\x80");
+  check(!surrogate_text &&
+        surrogate_text.error == kvmux::TextPasteError::surrogate &&
+        surrogate_text.rejected.surrogate == 1 &&
+        surrogate_text.gestures.empty());
+  const auto control = map_windows_hex_paste("ab\x01c");
+  check(!control && control.error == kvmux::TextPasteError::control &&
+        control.rejected.control == 1 && control.gestures.empty());
+  const auto invalid = map_windows_hex_paste("\xff");
+  check(!invalid && invalid.error == kvmux::TextPasteError::invalid_utf8 &&
+        invalid.rejected.invalid_utf8 == 1 && invalid.gestures.empty());
+  const auto bare = map_windows_hex_paste("\r\xE4\xB8\xAD");
+  check(!bare && bare.error == kvmux::TextPasteError::bare_carriage_return &&
+        bare.rejected.bare_carriage_return == 1 && bare.gestures.empty());
+  const auto several = map_windows_hex_paste("\x01\xF0\x9F\x98\x80");
+  check(!several && several.error == kvmux::TextPasteError::above_bmp &&
+        several.rejected.control == 1 && several.rejected.above_bmp == 1 &&
+        several.gestures.empty());
+  check(map_windows_hex_paste("").error == kvmux::TextPasteError::empty);
+  check(map_windows_hex_paste(std::string(65537, 'a')).error ==
+        kvmux::TextPasteError::too_long);
+
+  const auto estimate =
+      kvmux::estimate_windows_hex_paste(2, std::chrono::microseconds(1000));
+  check(estimate.frames == 24 && estimate.microseconds == 24000);
+  const auto unknown =
+      kvmux::estimate_windows_hex_paste(1, std::chrono::microseconds(0));
+  check(unknown.frames == 12 && unknown.microseconds == 0);
+
+  WindowsHexPasteCounts counts;
+  check(kvmux::format_windows_hex_paste_log("refused", "num_lock", "none", 1, 0,
+                                            0, counts) ==
+        "paste phase=refused result=num_lock reason=none code_points=1 "
+        "sent=0 elapsed_ms=0 rejected=0 invalid_utf8=0 surrogate=0 "
+        "above_bmp=0 control=0 bare_cr=0");
+  const auto logged = kvmux::format_windows_hex_paste_log(
+      "finished", "canceled", "user", 2, 0, 0, counts);
+  check(logged.find("4e2d") == std::string::npos);
+  check(logged.find("7684") == std::string::npos);
+  check(logged.find("\xE4\xB8\xAD") == std::string::npos);
   return EXIT_SUCCESS;
 }

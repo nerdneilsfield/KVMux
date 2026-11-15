@@ -93,7 +93,51 @@ simulated key presses.
 Typing is paced and bounded. Cancel it or release input with the usual Host-key,
 focus-loss, or connection-release path; KVMux releases active keys and stops
 remaining text. Clipboard content stays local and is neither persisted nor
-logged. Unicode, Chinese, and Wubi input are not supported yet.
+logged. **Type ASCII** still rejects every non-ASCII character. Wubi input is
+not implemented.
+
+## Type Chinese text on a Windows target
+
+Choose **输入 → Chinese paste (Windows hex)**. This is a separate explicit
+action. It does not run when you choose **Type ASCII**, and KVMux does not
+change the target computer.
+
+Before you start, on the Windows computer that receives the keys:
+
+1. For the signed-in user, set `EnableHexNumpad` to `1`, then sign out and
+   sign in again. If it still has no effect, restart Windows.
+
+   ```text
+   reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
+   ```
+
+2. Turn NumLock on. If it is off, or KVMux has not read that LED yet, the
+   action does not send keys.
+3. Focus Notepad++ or another plain Win32 edit. Do not use the Windows 11
+   Notepad that has the Markdown toolbar: the start of this sequence opens
+   its insert-link window.
+4. Leave the input method in a mode that passes these keys. One manual trial
+   in Notepad++ printed two BMP characters in both English and Chinese modes.
+   That trial is not a platform pass.
+
+Control must be **Local serial** and Ready. Relay control does not send this
+paste. The dialog states these conditions and shows an estimate: about 12
+frames per character times the latest ACK round trip. The label says it is an
+estimate. A long paste is still sent one key edge per ACK, with the same
+65536-character bound as ASCII paste.
+
+Tab, Enter, and printable US ASCII use the ASCII key mapping. Other characters
+inside the Basic Multilingual Plane use the Windows hex sequence. A character
+outside that plane, a surrogate, or a control character other than Tab and
+Enter rejects the whole paste. The dialog shows how many were rejected and
+why. That message does not contain the text. KVMux does not skip those
+characters and continue.
+
+Cancel, focus loss, stale video, a lost control link, and an ACK timeout use
+the same release path as other input, including Left Alt. After the link is
+lost, KVMux does not report that release as confirmed. Logs record counts,
+phase, and the cancel reason. They do not record the text, the code points, or
+the hex strings.
 
 ## Capture screenshots and recordings
 

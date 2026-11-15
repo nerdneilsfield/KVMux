@@ -8,6 +8,7 @@
 
 #include "app/ui_theme.hpp"
 #include "input/us_ascii_text.hpp"
+#include "input/windows_hex_text.hpp"
 
 namespace kvmux {
 
@@ -29,6 +30,45 @@ UiAction action(UiActionKind kind) {
   UiAction out;
   out.kind = kind;
   return out;
+}
+
+constexpr const char* kWindowsHexPasteNote =
+    "前提：在目标机当前用户下把 EnableHexNumpad 设为 1，然后重新登录。"
+    "焦点放在 Notepad++ 或普通 Win32 编辑框上，不要用会抢走 Alt 快捷键的 "
+    "Win11 新版记事本。输入法需要放行这些按键。KVMux 不修改目标机。"
+    "只有按下 Chinese paste (Windows hex) 才会发送。";
+
+void show_paste_progress(const TextPasteSnapshot& paste,
+                         const ControlSnapshot& control) {
+  if (!paste.windows_hex) {
+    ImGui::Text("Typing ASCII: %zu/%zu scheduled", paste.scheduled_gestures,
+                paste.planned_gestures);
+    return;
+  }
+  const auto estimate = estimate_windows_hex_paste(paste.normalized_characters,
+                                                   control.last_ack_rtt);
+  if (estimate.microseconds > 0) {
+    ImGui::Text("Typing: %zu/%zu  ·  估算约 %.1f 秒（%zu 帧 × ACK，估算）",
+                paste.scheduled_gestures, paste.planned_gestures,
+                static_cast<double>(estimate.microseconds) / 1.0e6,
+                estimate.frames);
+  } else {
+    ImGui::Text("Typing: %zu/%zu  ·  估算 %zu 帧（约每字 12 帧 × ACK）",
+                paste.scheduled_gestures, paste.planned_gestures,
+                estimate.frames);
+  }
+}
+
+void show_hex_rejections(const WindowsHexPasteCounts& counts) {
+  if (counts.rejected() == 0) return;
+  ImGui::Text("拒绝了 %zu 个码点，整段未发送。", counts.rejected());
+  if (counts.invalid_utf8 != 0)
+    ImGui::Text("非法 UTF-8：%zu", counts.invalid_utf8);
+  if (counts.surrogate != 0) ImGui::Text("代理项：%zu", counts.surrogate);
+  if (counts.above_bmp != 0) ImGui::Text("BMP 以外：%zu", counts.above_bmp);
+  if (counts.control != 0) ImGui::Text("控制字符：%zu", counts.control);
+  if (counts.bare_carriage_return != 0)
+    ImGui::Text("单独的回车：%zu", counts.bare_carriage_return);
 }
 
 Rect paint_region_button(ImDrawList* draw, ImVec2 pos, const char* label,
@@ -181,8 +221,7 @@ void append_text_paste(UiState& ui, const SessionView& view,
   auto& paste_ui = ui.paste;
   const auto& paste = view.paste;
   if (view.snapshot.text_paste_active) {
-    ImGui::Text("Typing ASCII: %zu/%zu scheduled", paste.scheduled_gestures,
-                paste.planned_gestures);
+    show_paste_progress(paste, view.snapshot.control);
     if (ImGui::Button("Cancel typing")) {
       paste_ui.cancelled = true;
       actions.add(action(UiActionKind::cancel_text_paste));
@@ -265,6 +304,103 @@ void append_text_paste(UiState& ui, const SessionView& view,
     ImGui::Text("Clipboard loaded: %zu bytes, %zu characters",
                 paste_ui.clipboard_loaded_bytes,
                 paste_ui.clipboard_loaded_characters);
+  }
+}
+
+void append_windows_hex_paste(UiState& ui, const SessionView& view,
+                              UiActions& actions) {
+  auto& paste_ui = ui.paste;
+  const auto& paste = view.paste;
+  if (view.snapshot.text_paste_active) {
+    show_paste_progress(paste, view.snapshot.control);
+    if (ImGui::Button("Cancel typing")) {
+      paste_ui.cancelled = true;
+      actions.add(action(UiActionKind::cancel_text_paste));
+      paste_ui.buffer.fill('\0');
+      paste_ui.removed = 0;
+    }
+    return;
+  }
+  ImGui::TextWrapped("%s", kWindowsHexPasteNote);
+  ImGui::InputTextMultiline("##windows-hex-text", paste_ui.buffer.data(),
+                            paste_ui.buffer.size(),
+                            {-1.F, ImGui::GetTextLineHeight() * 6.F});
+  const auto prepared = map_windows_hex_paste(paste_ui.buffer.data());
+  show_hex_rejections(prepared.rejected);
+  if (paste_ui.error == TextPasteError::num_lock ||
+      paste_ui.error == TextPasteError::canceled ||
+      paste_ui.error == TextPasteError::too_long ||
+      paste_ui.error == TextPasteError::empty) {
+    ImGui::TextWrapped("%s", paste_ui.error == TextPasteError::canceled
+                                 ? paste_cancel_message(paste_ui.cancel_reason)
+                                 : text_paste_error_label(paste_ui.error));
+  }
+  const bool ready =
+      view.snapshot.control.state == ControlConnectionState::ready &&
+      view.snapshot.control.target_usb_ready &&
+      view.snapshot.control.release_confirmed;
+  const bool num_lock = (view.snapshot.control.keyboard_leds & 1U) != 0;
+  const bool relay = view.snapshot.control.recoverable_transport;
+  if (!ready) {
+    ImGui::TextUnformatted("控制未就绪，未发送。");
+  } else if (!num_lock) {
+    ImGui::TextUnformatted("目标机 NumLock 关闭或尚未读到，未发送。");
+  } else if (relay) {
+    ImGui::TextUnformatted("这条控制链路不发送 Windows 十六进制粘贴。");
+  }
+  if (prepared) {
+    const auto estimate = estimate_windows_hex_paste(
+        prepared.normalized_characters, view.snapshot.control.last_ack_rtt);
+    ImGui::Text("准备 %zu 个码点，估算 %zu 帧（约每字 12 帧 × ACK）。",
+                prepared.normalized_characters, estimate.frames);
+    if (estimate.microseconds > 0) {
+      ImGui::Text("按最近一次 ACK 往返，估算约 %.1f 秒。这是估算，不是实测。",
+                  static_cast<double>(estimate.microseconds) / 1.0e6);
+    } else {
+      ImGui::TextUnformatted("还没有 ACK 往返时间，不换算秒数。这是估算。");
+    }
+  }
+  const bool can_start = static_cast<bool>(prepared) && ready && num_lock &&
+                         !relay && !ui.connection.capture_only &&
+                         view.snapshot.input_state == InputState::preview;
+  if (action_button("Chinese paste (Windows hex)", can_start,
+                    kWindowsHexPasteNote, true)) {
+    auto start = action(UiActionKind::start_windows_hex_paste);
+    start.text = paste_ui.buffer.data();
+    actions.add(std::move(start));
+  }
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("%s", kWindowsHexPasteNote);
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel")) {
+    paste_ui.buffer.fill('\0');
+    paste_ui.error = TextPasteError::none;
+    paste_ui.cancel_reason = PasteCancelReason::none;
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Load host clipboard")) {
+    char* clipboard = SDL_GetClipboardText();
+    if (!clipboard) {
+      paste_ui.error = TextPasteError::unsupported;
+    } else {
+      const auto bytes = std::strlen(clipboard);
+      const auto mapped = map_windows_hex_paste(clipboard);
+      if (ui.debug) {
+        spdlog::debug(
+            "windows hex clipboard loaded: bytes={} code_points={} rejected={}",
+            bytes, mapped.normalized_characters, mapped.rejected.rejected());
+      }
+      if (bytes < paste_ui.buffer.size()) {
+        std::snprintf(paste_ui.buffer.data(), paste_ui.buffer.size(), "%s",
+                      clipboard);
+        paste_ui.error = mapped.error;
+        paste_ui.cancel_reason = PasteCancelReason::none;
+      } else {
+        paste_ui.error = TextPasteError::too_long;
+      }
+      SDL_free(clipboard);
+    }
   }
 }
 
@@ -862,6 +998,12 @@ void append_command_menus(UiState& ui, const SessionView& view,
             "Type ASCII", !ui.connection.capture_only,
             ui.connection.capture_only ? "当前没有控制连接" : nullptr))
       ui.paste.open = true;
+    if (media_menu_item(
+            "Chinese paste (Windows hex)", !ui.connection.capture_only,
+            ui.connection.capture_only ? "当前没有控制连接" : nullptr))
+      ui.paste.hex_open = true;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      ImGui::SetTooltip("%s", kWindowsHexPasteNote);
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("动作")) {
@@ -956,6 +1098,7 @@ void log_debug_session(UiState& ui, const SessionView& view,
       " control-error=" + error_text(view.control) +
       " input=" + input_state_label(view.snapshot.input_state) +
       " paste=" + paste_status +
+      " paste-engine=" + (paste.windows_hex ? "windows-hex" : "ascii") +
       " paste-reason=" + paste_cancel_reason_name(paste.cancel_reason) +
       " paste-bytes=" + std::to_string(paste.source_bytes) +
       " paste-chars=" + std::to_string(paste.normalized_characters) +
@@ -1037,12 +1180,21 @@ UiActions draw_chrome(UiState& ui, const SessionView& view) {
         ImGui::OpenPopup("Type ASCII");
         ui.paste.open = false;
       }
+      if (ui.paste.hex_open) {
+        ImGui::OpenPopup("Chinese paste (Windows hex)");
+        ui.paste.hex_open = false;
+      }
       ImGui::SetNextWindowPos(
           {viewport->Pos.x + 8.F, viewport->Pos.y + ImGui::GetFrameHeight()});
       ImGui::SetNextWindowSize({std::min(600.F, viewport->Size.x - 16.F), 0.F});
       if (ImGui::BeginPopup("Type ASCII")) {
         record_local_region(ui);
         append_text_paste(ui, view, actions);
+        ImGui::EndPopup();
+      }
+      if (ImGui::BeginPopup("Chinese paste (Windows hex)")) {
+        record_local_region(ui);
+        append_windows_hex_paste(ui, view, actions);
         ImGui::EndPopup();
       }
       append_connections(ui, view, actions);
@@ -1241,8 +1393,7 @@ UiActions draw_status(UiState& ui, const SessionView& view) {
       ImGui::GetColorU32(ImGuiCol_Text), right);
   ImGui::Dummy({ImGui::GetContentRegionAvail().x, line_height});
   if (pasting) {
-    ImGui::Text("Typing ASCII: %zu/%zu scheduled",
-                view.paste.scheduled_gestures, view.paste.planned_gestures);
+    show_paste_progress(view.paste, view.snapshot.control);
     ImGui::SameLine();
     if (ImGui::Button("Cancel typing")) {
       ui.paste.cancelled = true;
