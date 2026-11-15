@@ -45,6 +45,16 @@ struct AppliedInputState {
   DesiredInputState state;
 };
 
+// One keyboard report written for an opted-in hex probe. Usages only.
+struct TracedKeyReport {
+  std::uint32_t seq{};
+  std::int64_t t_ms{};
+  std::uint8_t modifiers{};
+  std::array<std::uint8_t, 6> keys{};
+};
+
+[[nodiscard]] std::string format_traced_key_report(const TracedKeyReport& row);
+
 struct SerialPortInfo {
   std::string name;
   std::string description;
@@ -107,6 +117,12 @@ class ControlSink {
   }
   virtual void cancel_ascii_paste() noexcept {}
   [[nodiscard]] virtual AsciiPasteSnapshot ascii_paste_snapshot() const {
+    return {};
+  }
+  // Hex-probe debug. Default sinks keep no reports.
+  virtual void set_keyboard_report_trace(bool) noexcept {}
+  [[nodiscard]] virtual std::vector<TracedKeyReport>
+  take_keyboard_report_trace() {
     return {};
   }
   virtual void release_all() noexcept = 0;

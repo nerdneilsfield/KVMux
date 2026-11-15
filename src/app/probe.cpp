@@ -367,6 +367,31 @@ PollResult wait_ms(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
   }
 }
 
+class HexTraceSession {
+ public:
+  HexTraceSession(std::ostream& out, ControlSink& sink, bool enabled)
+      : out_(out), sink_(sink), enabled_(enabled) {
+    if (enabled_) sink_.set_keyboard_report_trace(true);
+  }
+  HexTraceSession(const HexTraceSession&) = delete;
+  HexTraceSession& operator=(const HexTraceSession&) = delete;
+  ~HexTraceSession() {
+    if (enabled_) sink_.set_keyboard_report_trace(false);
+    flush();
+  }
+  void flush() {
+    if (!enabled_) return;
+    for (const auto& row : sink_.take_keyboard_report_trace())
+      out_ << format_traced_key_report(row) << '\n';
+    out_.flush();
+  }
+
+ private:
+  std::ostream& out_;
+  ControlSink& sink_;
+  bool enabled_;
+};
+
 // One code point is one paste job. The last edge releases Left Alt.
 // A later release_all still clears modifiers if this wait stops early.
 int run_hex_probe(std::ostream& out, ControlSink& sink, Pulse& pulse,
@@ -380,45 +405,55 @@ int run_hex_probe(std::ostream& out, ControlSink& sink, Pulse& pulse,
   const auto synced = synchronize_idle(sink, pulse, trace, options.timeout_ms);
   if (synced.status != Poll::ok)
     return fail_step(out, sink, "hex", step_failure(synced));
+  if (options.hex_lead_ms > 0) {
+    const auto lead = wait_ms(sink, pulse, trace, options.hex_lead_ms);
+    if (lead.status != Poll::ok)
+      return fail_step(out, sink, "hex", step_failure(lead));
+  }
 
+  HexTraceSession session(out, sink, options.hex_trace);
+  auto fail_hex = [&](std::string_view detail) {
+    session.flush();
+    return fail_step(out, sink, "hex", detail);
+  };
   std::vector<std::uint32_t> sent;
   sent.reserve(options.hex_points.size());
   for (std::size_t index = 0; index < options.hex_points.size(); ++index) {
     const auto point = options.hex_points[index];
     auto mapped = map_windows_hex_scalar(point);
-    if (!mapped) return fail_step(out, sink, "hex", "rejected code point");
+    if (!mapped) return fail_hex("rejected code point");
     AsciiPasteJob job;
     job.gestures.push_back(std::move(mapped.edges));
     // GET_INFO occupies the link while idle. Keep the job and retry.
     const auto start_deadline =
         Clock::now() + std::chrono::milliseconds(options.timeout_ms);
     for (;;) {
+      session.flush();
       pulse();
       auto snap = sink.snapshot();
       trace.observe(snap);
       if (session_broken(snap))
-        return fail_step(out, sink, "hex", step_failure({Poll::fault, snap}));
+        return fail_hex(step_failure({Poll::fault, snap}));
       if (sink.start_ascii_paste(job) == SubmitResult::accepted) break;
-      if (Clock::now() >= start_deadline)
-        return fail_step(out, sink, "hex", "not started");
+      if (Clock::now() >= start_deadline) return fail_hex("not started");
       std::this_thread::sleep_for(kPulse);
     }
     const auto deadline =
         Clock::now() + std::chrono::milliseconds(options.timeout_ms);
     AsciiPasteSnapshot last;
     for (;;) {
+      session.flush();
       pulse();
       last = sink.ascii_paste_snapshot();
       auto snap = sink.snapshot();
       trace.observe(snap);
       if (session_broken(snap))
-        return fail_step(out, sink, "hex", step_failure({Poll::fault, snap}));
+        return fail_hex(step_failure({Poll::fault, snap}));
       if (last.state == AsciiPasteState::completed ||
           last.state == AsciiPasteState::canceled ||
           last.state == AsciiPasteState::failed)
         break;
-      if (Clock::now() >= deadline)
-        return fail_step(out, sink, "hex", "timed out");
+      if (Clock::now() >= deadline) return fail_hex("timed out");
       std::this_thread::sleep_for(kPulse);
     }
     const bool ok = last.state == AsciiPasteState::completed &&
@@ -428,15 +463,16 @@ int run_hex_probe(std::ostream& out, ControlSink& sink, Pulse& pulse,
           std::string("result=") + paste_state_name(last.state) +
           " reason=" + paste_cancel_reason_name(last.cancel_reason) +
           " sent=" + format_hex_points(sent);
-      return fail_step(out, sink, "hex", detail);
+      return fail_hex(detail);
     }
     sent.push_back(point);
+    session.flush();
     if (index + 1 < options.hex_points.size() && options.hex_gap_ms > 0) {
       const auto gap = wait_ms(sink, pulse, trace, options.hex_gap_ms);
-      if (gap.status != Poll::ok)
-        return fail_step(out, sink, "hex", step_failure(gap));
+      if (gap.status != Poll::ok) return fail_hex(step_failure(gap));
     }
   }
+  session.flush();
   const auto list = format_hex_points(sent);
   spdlog::info("hex probe sent code_points={}", list);
   step_line(out, "PASS", "hex", "sent=" + list);

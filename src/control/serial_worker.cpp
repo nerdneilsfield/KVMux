@@ -15,6 +15,24 @@
 
 namespace kvmux {
 
+std::string format_traced_key_report(const TracedKeyReport& row) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string line = "seq=" + std::to_string(row.seq) +
+                     " t_ms=" + std::to_string(row.t_ms) + " mods=";
+  line.push_back(kHex[row.modifiers >> 4U]);
+  line.push_back(kHex[row.modifiers & 0x0fU]);
+  line += " keys=";
+  bool any = false;
+  for (const auto key : row.keys) {
+    if (key == 0) continue;
+    if (any) line.push_back(',');
+    any = true;
+    line.push_back(kHex[key >> 4U]);
+    line.push_back(kHex[key & 0x0fU]);
+  }
+  return line;
+}
+
 SerialIo make_serial_io();
 
 namespace {
@@ -61,6 +79,7 @@ struct Ch9329ControlSink::Impl {
     const char* kind{};
     bool ordinary{};
     bool ascii_paste{};
+    bool trace_logged{false};
   };
 
   Impl(SerialIo value, std::shared_ptr<Diagnostics> sink)
@@ -68,6 +87,25 @@ struct Ch9329ControlSink::Impl {
     // run() uses members declared after worker; start only after
     // initialization.
     worker = std::thread([this] { run(); });
+  }
+
+  // Caller holds mutex. Usages only; the line has no characters.
+  void record_keyboard_trace_locked(const std::uint8_t modifiers,
+                                    const std::array<std::uint8_t, 6>& keys) {
+    const auto now = Clock::now();
+    if (!keyboard_trace_started) {
+      keyboard_trace_origin = now;
+      keyboard_trace_started = true;
+    }
+    TracedKeyReport row;
+    row.seq = keyboard_trace_seq++;
+    row.t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   now - keyboard_trace_origin)
+                   .count();
+    row.modifiers = modifiers;
+    row.keys = keys;
+    keyboard_trace_records.push_back(row);
+    spdlog::info("{}", format_traced_key_report(row));
   }
 
   // Caller holds mutex. The first reason sticks for the life of this job.
@@ -645,6 +683,18 @@ struct Ch9329ControlSink::Impl {
         begin_clear(now);
       }
     }
+    if (transaction && transaction->ascii_paste && !transaction->trace_logged &&
+        transaction->written == 0 && transaction->frame.data.size() >= 8U) {
+      std::array<std::uint8_t, 6> keys{};
+      for (std::size_t index = 0; index < keys.size(); ++index)
+        keys[index] = transaction->frame.data[index + 2U];
+      const auto modifiers = transaction->frame.data[0];
+      std::lock_guard lock(mutex);
+      if (keyboard_trace) {
+        transaction->trace_logged = true;
+        record_keyboard_trace_locked(modifiers, keys);
+      }
+    }
     if (transaction) {
       if (transaction->written < transaction->bytes.size()) {
         const auto remaining =
@@ -826,6 +876,11 @@ struct Ch9329ControlSink::Impl {
   std::optional<AsciiPasteRequest> pending_paste;
   std::size_t paste_gesture{};
   std::size_t paste_edge{};
+  bool keyboard_trace{false};
+  bool keyboard_trace_started{false};
+  std::uint32_t keyboard_trace_seq{0};
+  Clock::time_point keyboard_trace_origin{};
+  std::vector<TracedKeyReport> keyboard_trace_records;
   std::string port;
   int baud{9600};
   std::uint8_t address{};
@@ -1049,6 +1104,22 @@ void Ch9329ControlSink::release_all() noexcept {
 ControlSnapshot Ch9329ControlSink::snapshot() const {
   std::lock_guard lock(impl_->mutex);
   return impl_->status;
+}
+
+void Ch9329ControlSink::set_keyboard_report_trace(const bool enabled) noexcept {
+  std::lock_guard lock(impl_->mutex);
+  impl_->keyboard_trace = enabled;
+  if (!enabled) return;
+  impl_->keyboard_trace_seq = 0;
+  impl_->keyboard_trace_started = false;
+  impl_->keyboard_trace_records.clear();
+}
+
+std::vector<TracedKeyReport> Ch9329ControlSink::take_keyboard_report_trace() {
+  std::lock_guard lock(impl_->mutex);
+  std::vector<TracedKeyReport> rows;
+  rows.swap(impl_->keyboard_trace_records);
+  return rows;
 }
 
 }  // namespace kvmux

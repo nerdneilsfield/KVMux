@@ -1,5 +1,7 @@
 #include "input/windows_hex_text.hpp"
 
+#include "control/hid_keyboard.hpp"
+
 namespace kvmux {
 namespace {
 
@@ -52,6 +54,25 @@ WindowsHexSequence map_windows_hex_scalar(const std::uint32_t scalar) {
     push_tap(result.edges, hex_digit_usage(digits[index]));
   result.edges.push_back(KeyEdge{kLeftAlt, false});
   return result;
+}
+
+std::vector<WindowsHexReport> windows_hex_reports(
+    const std::span<const KeyEdge> edges) {
+  HidKeyboardState keyboard;
+  std::vector<WindowsHexReport> reports;
+  reports.reserve(edges.size());
+  for (const KeyEdge& edge : edges) {
+    if (edge.pressed) {
+      (void)keyboard.press(edge.usage);
+    } else {
+      keyboard.release(edge.usage);
+    }
+    WindowsHexReport report;
+    report.modifiers = keyboard.modifiers();
+    report.keys = keyboard.keys();
+    reports.push_back(report);
+  }
+  return reports;
 }
 
 }  // namespace kvmux

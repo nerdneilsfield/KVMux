@@ -358,7 +358,17 @@ build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --prob
 
 ## Windows 十六进制码点探针（未验证）
 
-这一节还没有目标机结果。下面的命令只把命令行给出的码点打成按键，不读取剪贴板，也不接界面粘贴。在用户把标准输出和观察记回本节之前，整节保持未验证。
+这一节不是平台验收。下面的命令只把命令行给出的码点打成按键，不读取剪贴板，也不接界面粘贴。
+
+### 一次人工观察
+
+主机是 macOS（日志里的 `os=Darwin 27.2.0`），串口 `ch341-usb:32-1.1`，波特率 9600。GET_INFO 芯片版本 `0x38`，NumLock 位为 1。命令是 `--hex-probe 4e2d,7684`。那份日志只有帧长度，没有修饰键和 usage。
+
+Notepad++，英文模式和中文输入法模式各跑了一次。正文出现「中的」，状态栏是长度 6、行 1 列 3，没有弹出菜单或对话框。只覆盖 U+4E2D 和 U+7684 这两个 BMP 汉字。
+
+Win11 新版记事本开着 Markdown 工具栏时，序列一开头就弹出「插入链接」。正文是 0 字符，「显示文本」里是「中的」，「地址」是空的。两个字都进了对话框。不要把这个记事本当作目标应用。
+
+### 准备
 
 目标机是接收按键的那台 Windows。KVMux 跑在插着 CH9329 的电脑上。先在目标机的当前用户下启用十六进制小键盘输入，然后注销并重新登录。仍无效果时再重启。KVMux 不改注册表。
 
@@ -366,7 +376,7 @@ build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --prob
 reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
 ```
 
-然后在目标机打开记事本，点进编辑区，打开 NumLock。输入法先放在英文模式。
+打开 NumLock。用 Notepad++ 或别的普通 Win32 编辑框，点进正文。输入法可以是英文，也可以是中文。不要把焦点放在带 Markdown 工具栏的 Win11 新版记事本上。
 
 在插着 CH9329 的电脑上运行。`PORT` 换成 `kvmux-relay --list-serial` 打印的名字。CH341 直连时名字带 `ch341-usb:` 前缀，例如 `ch341-usb:20-1`，整段原样代入。系统串口则写成 `/dev/ttyUSB0` 这种路径。
 
@@ -374,7 +384,13 @@ reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
 build/linux-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --serial "PORT" --baud 9600 --hex-probe 4e2d,7684
 ```
 
-macOS 上把可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。`--hex-probe` 只能和 `--serial` 一起用。码点用逗号分隔，最多 16 个，不写 `U+` 或 `0x`。`4e2d` 是“中”，`7684` 是“的”。字符之间默认停 300 ms，可用 `--hex-gap-ms` 改成 0 到 60000。
+逐个码点看开头几帧时，先等焦点稳定，再只发一个码点，并把每份键盘报告打出来：
+
+```sh
+build/linux-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --serial "PORT" --baud 9600 --hex-probe 4e2d --hex-single --hex-trace --hex-lead-ms 3000
+```
+
+macOS 上把可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。`--hex-probe` 只能和 `--serial` 一起用。码点用逗号分隔，最多 16 个，不写 `U+` 或 `0x`。`4e2d` 是“中”，`7684` 是“的”。字符之间默认停 300 ms，可用 `--hex-gap-ms` 改成 0 到 60000。`--hex-lead-ms` 在第一个码点之前等待，范围同样是 0 到 60000，等待期间仍维持链路。`--hex-single` 只接受一个码点。`--hex-trace` 把每份写出的键盘报告打到标准输出和日志，一行是 `seq=`、`t_ms=`、`mods=`、`keys=`。`t_ms` 从本次探针的第一份键盘报告算起。行里没有汉字，也没有别的文本。
 
 NumLock 关闭时，程序在发送前停止，退出码为 1，并打印：
 
@@ -393,14 +409,14 @@ NumLock 打开且序列被确认时，跳过的键和鼠标两行仍在，后面
 
 英文模式看完以后，把同一输入法切到中文模式，再运行同一条命令。两次都记下：
 
-- 记事本里实际出现的字符。
+- 编辑框里实际出现的字符。
 - 菜单栏有没有打开，松开之后 Alt 是否还留着。
 - 探针打印的 NumLock 行，以及目标机键盘灯是否一致。
 - 退出码、完整标准输出，以及 `kvmux-probe.log`。
 - 目标机 Windows 版本、输入法名称和当时的中/英模式。
 - 串口速率、USB 拓扑、CH9329 配置，以及 `ready` 行的 `version=`。
 
-这些记录补上之前，不把这次探针当成已经通过。
+上面 Notepad++ 和 Win11 新版记事本的结果只是这一次观察。别的程序、非 BMP 码点，以及其他机器上的串口和 CH9329 配置，都还没有记录。不要把这次观察写成平台已经通过。
 
 ## GUI 帧上传（2026-11-13）
 

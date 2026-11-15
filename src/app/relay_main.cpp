@@ -44,12 +44,17 @@ void print_help(std::ostream& out) {
          "Probe control: --probe-control (--serial PORT [--baud 9600] |\n"
          "       --relay HOST [--control-port 17000]) [--keys] [--mouse]\n"
          "       [--paste] [--hex-probe LIST] [--hex-gap-ms 300]\n"
+         "       [--hex-lead-ms 0] [--hex-single] [--hex-trace]\n"
          "       [--timeout-ms 5000]\n"
          "--hex-probe LIST is up to 16 comma-separated hex code points\n"
          "(example 4e2d,7684). It requires --serial, reads NumLock from\n"
          "GET_INFO, and sends each point as a Windows hex Alt sequence.\n"
          "--hex-gap-ms pauses between points (0..60000) and needs "
          "--hex-probe.\n"
+         "--hex-lead-ms waits before the first point (0..60000) and needs "
+         "--hex-probe.\n"
+         "--hex-single accepts exactly one code point.\n"
+         "--hex-trace logs each keyboard report as seq, t_ms, mods, keys.\n"
          "Probe video: --probe-video HOST [--control-port 17000]\n"
          "       [--video-port 17001] [--seconds 5]\n"
          "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] "
@@ -371,8 +376,12 @@ int probe_control_command(int argc, char** argv) {
   bool baud_seen = false;
   bool port_seen = false;
   bool hex_gap_seen = false;
+  bool hex_lead_seen = false;
+  bool hex_trace = false;
+  bool hex_single = false;
   std::vector<std::uint32_t> hex_points;
   int hex_gap_ms = 300;
+  int hex_lead_ms = 0;
   for (int i = 2; i < argc; ++i) {
     const std::string_view key = argv[i];
     if (key == "--keys") {
@@ -385,6 +394,14 @@ int probe_control_command(int argc, char** argv) {
     }
     if (key == "--paste") {
       paste = true;
+      continue;
+    }
+    if (key == "--hex-trace") {
+      hex_trace = true;
+      continue;
+    }
+    if (key == "--hex-single") {
+      hex_single = true;
       continue;
     }
     std::string_view value;
@@ -433,6 +450,12 @@ int probe_control_command(int argc, char** argv) {
         std::cerr << "Invalid --hex-gap-ms\n";
         return 2;
       }
+    } else if (key == "--hex-lead-ms") {
+      hex_lead_seen = true;
+      if (!parse_bounded_int(value, 0, 60000, hex_lead_ms)) {
+        std::cerr << "Invalid --hex-lead-ms\n";
+        return 2;
+      }
     } else {
       std::cerr << "Unknown probe-control option\n";
       return 2;
@@ -459,6 +482,22 @@ int probe_control_command(int argc, char** argv) {
     std::cerr << "--hex-gap-ms requires --hex-probe\n";
     return 2;
   }
+  if (hex_lead_seen && hex_points.empty()) {
+    std::cerr << "--hex-lead-ms requires --hex-probe\n";
+    return 2;
+  }
+  if (hex_trace && hex_points.empty()) {
+    std::cerr << "--hex-trace requires --hex-probe\n";
+    return 2;
+  }
+  if (hex_single && hex_points.empty()) {
+    std::cerr << "--hex-single requires --hex-probe\n";
+    return 2;
+  }
+  if (hex_single && hex_points.size() != 1) {
+    std::cerr << "--hex-single accepts one code point\n";
+    return 2;
+  }
 
   kvmux::ProbeControlOptions options;
   options.keys = keys;
@@ -466,6 +505,8 @@ int probe_control_command(int argc, char** argv) {
   options.paste = paste;
   options.hex_points = std::move(hex_points);
   options.hex_gap_ms = hex_gap_ms;
+  options.hex_lead_ms = hex_lead_ms;
+  options.hex_trace = hex_trace;
   options.timeout_ms = timeout_ms;
   options.baud = baud;
   options.control_port = control_port;

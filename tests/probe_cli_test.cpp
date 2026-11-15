@@ -148,6 +148,40 @@ void hex_probe_argument_errors(const char* binary) {
                                       "/dev/null", "--hex-gap-ms", "1"});
   require_code(gap, 2);
   require_contains(gap, "--hex-gap-ms requires --hex-probe");
+
+  const auto trace_only = run_relay(
+      binary, {"--probe-control", "--serial", "/dev/null", "--hex-trace"});
+  require_code(trace_only, 2);
+  require_contains(trace_only, "--hex-trace requires --hex-probe");
+
+  const auto single_only = run_relay(
+      binary, {"--probe-control", "--serial", "/dev/null", "--hex-single"});
+  require_code(single_only, 2);
+  require_contains(single_only, "--hex-single requires --hex-probe");
+
+  const auto single_two =
+      run_relay(binary, {"--probe-control", "--serial", "/dev/null",
+                         "--hex-probe", "4e2d,7684", "--hex-single"});
+  require_code(single_two, 2);
+  require_contains(single_two, "--hex-single accepts one code point");
+
+  const auto lead_only = run_relay(binary, {"--probe-control", "--serial",
+                                            "/dev/null", "--hex-lead-ms", "1"});
+  require_code(lead_only, 2);
+  require_contains(lead_only, "--hex-lead-ms requires --hex-probe");
+
+  const auto lead_range =
+      run_relay(binary, {"--probe-control", "--serial", "/dev/null",
+                         "--hex-probe", "4e2d", "--hex-lead-ms", "60001"});
+  require_code(lead_range, 2);
+  require_contains(lead_range, "Invalid --hex-lead-ms");
+
+  const auto one = run_relay(
+      binary, {"--probe-control", "--serial", "/dev/null", "--hex-probe",
+               "4e2d", "--hex-single", "--hex-trace", "--hex-lead-ms", "0"});
+  require_code(one, 1);
+  require_contains(one, "[FAIL] open");
+  check(one.output.find("Invalid --hex-probe") == std::string::npos);
 }
 
 void argument_errors_exit_2(const char* binary) {

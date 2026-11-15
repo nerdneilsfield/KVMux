@@ -26,6 +26,9 @@ struct ProbeControlOptions {
   // Code points only; the probe does not carry other text.
   std::vector<std::uint32_t> hex_points;
   int hex_gap_ms{300};
+  // Quiet time after sync and before the first Alt press.
+  int hex_lead_ms{0};
+  bool hex_trace{false};
   int timeout_ms{5000};
 };
 

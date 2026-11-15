@@ -52,6 +52,9 @@ class Ch9329ControlSink final : public ControlSink {
   [[nodiscard]] AsciiPasteSnapshot ascii_paste_snapshot() const override;
   void release_all() noexcept override;
   [[nodiscard]] ControlSnapshot snapshot() const override;
+  void set_keyboard_report_trace(bool enabled) noexcept override;
+  [[nodiscard]] std::vector<TracedKeyReport> take_keyboard_report_trace()
+      override;
 
  private:
   struct Impl;

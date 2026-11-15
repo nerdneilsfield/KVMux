@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "control/control_event.hpp"
@@ -25,5 +27,14 @@ struct WindowsHexSequence {
 // Digits 0-9 use the keypad. A-F use letter keys. No leading zeros.
 // The scalar is not logged.
 [[nodiscard]] WindowsHexSequence map_windows_hex_scalar(std::uint32_t scalar);
+
+// One HID report per edge, starting from a clear keyboard.
+struct WindowsHexReport {
+  std::uint8_t modifiers{};
+  std::array<std::uint8_t, 6> keys{};
+};
+
+[[nodiscard]] std::vector<WindowsHexReport> windows_hex_reports(
+    std::span<const KeyEdge> edges);
 
 }  // namespace kvmux
