@@ -118,6 +118,38 @@ void start_server(RelayServer& server) {
   check(server.start(local_options(), error));
 }
 
+void hex_probe_argument_errors(const char* binary) {
+  const auto relay = run_relay(
+      binary, {"--probe-control", "--relay", "127.0.0.1", "--hex-probe", "41"});
+  require_code(relay, 2);
+  require_contains(relay, "--hex-probe requires --serial");
+  check(relay.output.find("[PASS]") == std::string::npos);
+
+  const auto surrogate = run_relay(
+      binary,
+      {"--probe-control", "--serial", "/dev/null", "--hex-probe", "d800"});
+  require_code(surrogate, 2);
+  require_contains(surrogate, "Invalid --hex-probe");
+  check(surrogate.output.find("[FAIL]") == std::string::npos);
+
+  const auto range = run_relay(binary, {"--probe-control", "--serial",
+                                        "/dev/null", "--hex-probe", "110000"});
+  require_code(range, 2);
+  require_contains(range, "Invalid --hex-probe");
+
+  std::string many = "1";
+  for (int index = 1; index < 17; ++index) many += ",1";
+  const auto too_many = run_relay(binary, {"--probe-control", "--serial",
+                                           "/dev/null", "--hex-probe", many});
+  require_code(too_many, 2);
+  require_contains(too_many, "Invalid --hex-probe");
+
+  const auto gap = run_relay(binary, {"--probe-control", "--serial",
+                                      "/dev/null", "--hex-gap-ms", "1"});
+  require_code(gap, 2);
+  require_contains(gap, "--hex-gap-ms requires --hex-probe");
+}
+
 void argument_errors_exit_2(const char* binary) {
   const auto both = run_relay(binary, {"--probe-control", "--serial",
                                        "/dev/null", "--relay", "127.0.0.1"});
@@ -228,6 +260,7 @@ void video_probe_rejects_control_relay(const char* binary) {
 int main(int argc, char** argv) {
   check(argc >= 3);
   argument_errors_exit_2(argv[2]);
+  hex_probe_argument_errors(argv[2]);
   missing_serial_fails_open(argv[2]);
   control_relay_probe_passes(argv[2]);
   control_relay_paste_passes(argv[2]);

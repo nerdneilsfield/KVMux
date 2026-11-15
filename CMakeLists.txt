@@ -41,6 +41,7 @@ add_library(kvmux_core STATIC
     src/control/serial_worker.cpp
     src/input/input_router.cpp
     src/input/us_ascii_text.cpp
+    src/input/windows_hex_text.cpp
     src/network/relay_selection.cpp
     src/network/relay_server.cpp
     src/network/relay_client.cpp
@@ -312,6 +313,9 @@ if(BUILD_TESTING)
     add_executable(kvmux_us_ascii_text_test tests/us_ascii_text_test.cpp)
     target_link_libraries(kvmux_us_ascii_text_test PRIVATE kvmux::core)
     add_test(NAME us_ascii_text COMMAND kvmux_us_ascii_text_test)
+    add_executable(kvmux_windows_hex_text_test tests/windows_hex_text_test.cpp)
+    target_link_libraries(kvmux_windows_hex_text_test PRIVATE kvmux::core)
+    add_test(NAME windows_hex_text COMMAND kvmux_windows_hex_text_test)
 
     add_executable(kvmux_input_router_test tests/input_router_test.cpp)
     target_link_libraries(kvmux_input_router_test PRIVATE kvmux::core)

@@ -2,9 +2,11 @@
 
 #include <spdlog/spdlog.h>
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -15,6 +17,7 @@
 #include "control/control_event.hpp"
 #include "control/control_sink.hpp"
 #include "input/us_ascii_text.hpp"
+#include "input/windows_hex_text.hpp"
 #include "video/capture/capture_source.hpp"
 
 namespace kvmux {
@@ -338,6 +341,108 @@ std::string step_failure(const PollResult& result) {
   return result.snap.error;
 }
 
+std::string format_hex_points(const std::span<const std::uint32_t> points) {
+  std::string text;
+  for (const auto point : points) {
+    if (!text.empty()) text.push_back(',');
+    char buffer[8];
+    const auto written =
+        std::to_chars(buffer, buffer + sizeof buffer, point, 16);
+    if (written.ec != std::errc{}) return {};
+    text.append(buffer, written.ptr);
+  }
+  return text;
+}
+
+PollResult wait_ms(ControlSink& sink, Pulse& pulse, SnapshotTrace& trace,
+                   int milliseconds) {
+  const auto deadline = Clock::now() + std::chrono::milliseconds(milliseconds);
+  for (;;) {
+    pulse();
+    auto snap = sink.snapshot();
+    trace.observe(snap);
+    if (session_broken(snap)) return {Poll::fault, std::move(snap)};
+    if (Clock::now() >= deadline) return {Poll::ok, std::move(snap)};
+    std::this_thread::sleep_for(kPulse);
+  }
+}
+
+// One code point is one paste job. The last edge releases Left Alt.
+// A later release_all still clears modifiers if this wait stops early.
+int run_hex_probe(std::ostream& out, ControlSink& sink, Pulse& pulse,
+                  SnapshotTrace& trace, const ProbeControlOptions& options,
+                  const ControlSnapshot& ready) {
+  if ((ready.keyboard_leds & 1U) == 0) {
+    return fail_step(out, sink, "numlock",
+                     "NumLock 关闭（GET_INFO bit0=0），未发送按键");
+  }
+  step_line(out, "PASS", "numlock", "NumLock 打开");
+  const auto synced = synchronize_idle(sink, pulse, trace, options.timeout_ms);
+  if (synced.status != Poll::ok)
+    return fail_step(out, sink, "hex", step_failure(synced));
+
+  std::vector<std::uint32_t> sent;
+  sent.reserve(options.hex_points.size());
+  for (std::size_t index = 0; index < options.hex_points.size(); ++index) {
+    const auto point = options.hex_points[index];
+    auto mapped = map_windows_hex_scalar(point);
+    if (!mapped) return fail_step(out, sink, "hex", "rejected code point");
+    AsciiPasteJob job;
+    job.gestures.push_back(std::move(mapped.edges));
+    // GET_INFO occupies the link while idle. Keep the job and retry.
+    const auto start_deadline =
+        Clock::now() + std::chrono::milliseconds(options.timeout_ms);
+    for (;;) {
+      pulse();
+      auto snap = sink.snapshot();
+      trace.observe(snap);
+      if (session_broken(snap))
+        return fail_step(out, sink, "hex", step_failure({Poll::fault, snap}));
+      if (sink.start_ascii_paste(job) == SubmitResult::accepted) break;
+      if (Clock::now() >= start_deadline)
+        return fail_step(out, sink, "hex", "not started");
+      std::this_thread::sleep_for(kPulse);
+    }
+    const auto deadline =
+        Clock::now() + std::chrono::milliseconds(options.timeout_ms);
+    AsciiPasteSnapshot last;
+    for (;;) {
+      pulse();
+      last = sink.ascii_paste_snapshot();
+      auto snap = sink.snapshot();
+      trace.observe(snap);
+      if (session_broken(snap))
+        return fail_step(out, sink, "hex", step_failure({Poll::fault, snap}));
+      if (last.state == AsciiPasteState::completed ||
+          last.state == AsciiPasteState::canceled ||
+          last.state == AsciiPasteState::failed)
+        break;
+      if (Clock::now() >= deadline)
+        return fail_step(out, sink, "hex", "timed out");
+      std::this_thread::sleep_for(kPulse);
+    }
+    const bool ok = last.state == AsciiPasteState::completed &&
+                    last.cancel_reason == PasteCancelReason::none;
+    if (!ok) {
+      const std::string detail =
+          std::string("result=") + paste_state_name(last.state) +
+          " reason=" + paste_cancel_reason_name(last.cancel_reason) +
+          " sent=" + format_hex_points(sent);
+      return fail_step(out, sink, "hex", detail);
+    }
+    sent.push_back(point);
+    if (index + 1 < options.hex_points.size() && options.hex_gap_ms > 0) {
+      const auto gap = wait_ms(sink, pulse, trace, options.hex_gap_ms);
+      if (gap.status != Poll::ok)
+        return fail_step(out, sink, "hex", step_failure(gap));
+    }
+  }
+  const auto list = format_hex_points(sent);
+  spdlog::info("hex probe sent code_points={}", list);
+  step_line(out, "PASS", "hex", "sent=" + list);
+  return 0;
+}
+
 }  // namespace
 
 int probe_control(std::ostream& out, ControlSink& sink,
@@ -470,6 +575,12 @@ int probe_control(std::ostream& out, ControlSink& sink,
         std::to_string(last.total_gestures);
     if (!ok) return fail_step(out, sink, "paste", detail);
     step_line(out, "PASS", "paste", detail);
+  }
+
+  if (!options.hex_points.empty()) {
+    if (const int failed =
+            run_hex_probe(out, sink, pulse, trace, options, ready.snap))
+      return failed;
   }
 
   const auto started = Clock::now();

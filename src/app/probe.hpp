@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <vector>
 
 namespace kvmux {
 
@@ -20,6 +22,10 @@ struct ProbeControlOptions {
   bool keys{false};
   bool mouse{false};
   bool paste{false};
+  // Windows hex Alt sequences. Empty means the step is not run.
+  // Code points only; the probe does not carry other text.
+  std::vector<std::uint32_t> hex_points;
+  int hex_gap_ms{300};
   int timeout_ms{5000};
 };
 

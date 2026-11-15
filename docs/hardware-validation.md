@@ -356,6 +356,52 @@ build/macos-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --prob
 - 每台 relay 的操作系统、启动命令、主机、端口、角色，以及 Mac 上对应探针的标准输出。
 - Video 探针的 `codec`、`size`、`frames` 和 `longest_gap_ms`。这些数字不是延迟或性能结论。
 
+## Windows 十六进制码点探针（未验证）
+
+这一节还没有目标机结果。下面的命令只把命令行给出的码点打成按键，不读取剪贴板，也不接界面粘贴。在用户把标准输出和观察记回本节之前，整节保持未验证。
+
+目标机是接收按键的那台 Windows。KVMux 跑在插着 CH9329 的电脑上。先在目标机的当前用户下启用十六进制小键盘输入，然后注销并重新登录。仍无效果时再重启。KVMux 不改注册表。
+
+```text
+reg add "HKCU\Control Panel\Input Method" /v EnableHexNumpad /t REG_SZ /d 1 /f
+```
+
+然后在目标机打开记事本，点进编辑区，打开 NumLock。输入法先放在英文模式。
+
+在插着 CH9329 的电脑上运行。`PORT` 换成 `kvmux-relay --list-serial` 打印的名字。CH341 直连时名字带 `ch341-usb:` 前缀，例如 `ch341-usb:20-1`，整段原样代入。系统串口则写成 `/dev/ttyUSB0` 这种路径。
+
+```sh
+build/linux-debug-headless/kvmux-relay --debug --log-file kvmux-probe.log --probe-control --serial "PORT" --baud 9600 --hex-probe 4e2d,7684
+```
+
+macOS 上把可执行文件换成 `build/macos-debug-headless/kvmux-relay`，参数不变。`--hex-probe` 只能和 `--serial` 一起用。码点用逗号分隔，最多 16 个，不写 `U+` 或 `0x`。`4e2d` 是“中”，`7684` 是“的”。字符之间默认停 300 ms，可用 `--hex-gap-ms` 改成 0 到 60000。
+
+NumLock 关闭时，程序在发送前停止，退出码为 1，并打印：
+
+```text
+[FAIL] numlock  NumLock 关闭（GET_INFO bit0=0），未发送按键
+```
+
+NumLock 打开且序列被确认时，跳过的键和鼠标两行仍在，后面是：
+
+```text
+[PASS] numlock  NumLock 打开
+[PASS] hex      sent=4e2d,7684
+```
+
+`sent=` 只列出已经发完的码点，不补前导零。日志里同一行是 `hex probe sent code_points=`，没有汉字和其他文本。中途失败会释放修饰键；链路断开时释放不会报成已确认。
+
+英文模式看完以后，把同一输入法切到中文模式，再运行同一条命令。两次都记下：
+
+- 记事本里实际出现的字符。
+- 菜单栏有没有打开，松开之后 Alt 是否还留着。
+- 探针打印的 NumLock 行，以及目标机键盘灯是否一致。
+- 退出码、完整标准输出，以及 `kvmux-probe.log`。
+- 目标机 Windows 版本、输入法名称和当时的中/英模式。
+- 串口速率、USB 拓扑、CH9329 配置，以及 `ready` 行的 `version=`。
+
+这些记录补上之前，不把这次探针当成已经通过。
+
 ## GUI 帧上传（2026-11-13）
 
 macOS 诊断面板上还没有对比「只在新帧上传」前后的 `sample_to_gpu_submit` 和 `SwapWindow blocking`。这项保持未验证。Linux 上的 FakeCapture 单测只检查 `sample_to_gpu_submit` 的次数是否等于新帧数，不是 KVM 延迟，也不是这块面板的性能记录。

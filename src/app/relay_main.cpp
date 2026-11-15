@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <csignal>
+#include <cstdint>
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +17,7 @@
 #include "app/probe.hpp"
 #include "control/control_sink.hpp"
 #include "control/serial_worker.hpp"
+#include "input/windows_hex_text.hpp"
 #include "network/relay_client.hpp"
 #include "network/relay_selection.hpp"
 #include "network/relay_server.hpp"
@@ -41,7 +43,13 @@ void print_help(std::ostream& out) {
          "Quote DEVICE if it contains spaces. Mode indices are zero-based.\n"
          "Probe control: --probe-control (--serial PORT [--baud 9600] |\n"
          "       --relay HOST [--control-port 17000]) [--keys] [--mouse]\n"
-         "       [--paste] [--timeout-ms 5000]\n"
+         "       [--paste] [--hex-probe LIST] [--hex-gap-ms 300]\n"
+         "       [--timeout-ms 5000]\n"
+         "--hex-probe LIST is up to 16 comma-separated hex code points\n"
+         "(example 4e2d,7684). It requires --serial, reads NumLock from\n"
+         "GET_INFO, and sends each point as a Windows hex Alt sequence.\n"
+         "--hex-gap-ms pauses between points (0..60000) and needs "
+         "--hex-probe.\n"
          "Probe video: --probe-video HOST [--control-port 17000]\n"
          "       [--video-port 17001] [--seconds 5]\n"
          "Serve: --serve [--device ID] [--mode-index N] [--serial PORT] "
@@ -314,6 +322,33 @@ bool parse_bounded_int(std::string_view text, int min, int max, int& output) {
   return true;
 }
 
+constexpr int kMaxHexProbePoints = 16;
+
+bool parse_hex_probe_list(std::string_view text,
+                          std::vector<std::uint32_t>& points) {
+  if (text.empty()) return false;
+  points.clear();
+  std::size_t begin = 0;
+  while (begin <= text.size()) {
+    const auto comma = text.find(',', begin);
+    const auto token = text.substr(begin, comma == std::string_view::npos
+                                              ? std::string_view::npos
+                                              : comma - begin);
+    if (token.empty() || points.size() == kMaxHexProbePoints) return false;
+    std::uint32_t scalar = 0;
+    const auto* first = token.data();
+    const auto* last = first + token.size();
+    const auto parsed = std::from_chars(first, last, scalar, 16);
+    if (parsed.ec != std::errc{} || parsed.ptr != last) return false;
+    if (kvmux::windows_hex_scalar_error(scalar) != kvmux::WindowsHexError::none)
+      return false;
+    points.push_back(scalar);
+    if (comma == std::string_view::npos) return true;
+    begin = comma + 1;
+  }
+  return false;
+}
+
 bool next_value(int argc, char** argv, int& index, std::string_view& value) {
   if (index + 1 >= argc ||
       std::string_view(argv[index + 1]).starts_with("--")) {
@@ -335,6 +370,9 @@ int probe_control_command(int argc, char** argv) {
   bool paste = false;
   bool baud_seen = false;
   bool port_seen = false;
+  bool hex_gap_seen = false;
+  std::vector<std::uint32_t> hex_points;
+  int hex_gap_ms = 300;
   for (int i = 2; i < argc; ++i) {
     const std::string_view key = argv[i];
     if (key == "--keys") {
@@ -380,6 +418,21 @@ int probe_control_command(int argc, char** argv) {
         std::cerr << "Invalid --timeout-ms\n";
         return 2;
       }
+    } else if (key == "--hex-probe") {
+      if (!hex_points.empty()) {
+        std::cerr << "Duplicate --hex-probe\n";
+        return 2;
+      }
+      if (!parse_hex_probe_list(value, hex_points)) {
+        std::cerr << "Invalid --hex-probe\n";
+        return 2;
+      }
+    } else if (key == "--hex-gap-ms") {
+      hex_gap_seen = true;
+      if (!parse_bounded_int(value, 0, 60000, hex_gap_ms)) {
+        std::cerr << "Invalid --hex-gap-ms\n";
+        return 2;
+      }
     } else {
       std::cerr << "Unknown probe-control option\n";
       return 2;
@@ -398,11 +451,21 @@ int probe_control_command(int argc, char** argv) {
     std::cerr << "--control-port applies only to --relay\n";
     return 2;
   }
+  if (relay && !hex_points.empty()) {
+    std::cerr << "--hex-probe requires --serial\n";
+    return 2;
+  }
+  if (hex_gap_seen && hex_points.empty()) {
+    std::cerr << "--hex-gap-ms requires --hex-probe\n";
+    return 2;
+  }
 
   kvmux::ProbeControlOptions options;
   options.keys = keys;
   options.mouse = mouse;
   options.paste = paste;
+  options.hex_points = std::move(hex_points);
+  options.hex_gap_ms = hex_gap_ms;
   options.timeout_ms = timeout_ms;
   options.baud = baud;
   options.control_port = control_port;
