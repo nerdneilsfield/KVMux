@@ -42,6 +42,28 @@ struct WindowsHexReport {
 [[nodiscard]] std::vector<WindowsHexReport> windows_hex_reports(
     std::span<const KeyEdge> edges);
 
+// One sent keyboard report. `completes_gesture` is the gesture whose last
+// edge is inside this report. `kPasteReportContinues` means the gesture
+// still has a later report.
+inline constexpr std::size_t kPasteReportContinues =
+    std::numeric_limits<std::size_t>::max();
+
+struct PasteKeyboardReport {
+  std::uint8_t modifiers{};
+  std::array<std::uint8_t, 6> keys{};
+  std::size_t completes_gesture{kPasteReportContinues};
+  // Set when this report also contains the last edge of the next gesture.
+  std::size_t also_completes_gesture{kPasteReportContinues};
+};
+
+// Packs paste edges into one report per ACK. A Windows-hex gesture (it
+// contains Left Alt) accumulates ordinary presses, at most five, and
+// releases those keys in one report before Alt. Other gestures merge a
+// key-up with the next different key-down. The same key and any modifier
+// change keep their own report. Live keyboard edges do not use this.
+[[nodiscard]] std::vector<PasteKeyboardReport> fold_paste_reports(
+    std::span<const std::vector<KeyEdge>> gestures);
+
 // Counts only. The paste text and its scalar values are not retained.
 struct WindowsHexPasteCounts {
   std::size_t invalid_utf8{};
@@ -72,8 +94,10 @@ struct WindowsHexPasteResult {
 [[nodiscard]] WindowsHexPasteResult map_windows_hex_paste(
     std::string_view text);
 
-// About 12 frames per character times the latest ACK time. A zero duration
-// means the ACK time is unknown. This is an estimate, not a measurement.
+// About 8 reports per character times the latest ACK time: a four-digit
+// scalar is Alt, four accumulated digits with keypad plus, then two release
+// reports. Shorter scalars and ASCII use fewer. A zero duration means the
+// ACK time is unknown. This is an estimate, not a measurement.
 struct WindowsHexPasteEstimate {
   std::size_t frames{};
   std::int64_t microseconds{};
@@ -83,8 +107,8 @@ struct WindowsHexPasteEstimate {
     const std::size_t characters,
     const std::chrono::microseconds ack) noexcept {
   WindowsHexPasteEstimate estimate;
-  if (characters > static_cast<std::size_t>(-1) / 12U) return estimate;
-  estimate.frames = characters * 12U;
+  if (characters > static_cast<std::size_t>(-1) / 8U) return estimate;
+  estimate.frames = characters * 8U;
   if (ack.count() <= 0 || estimate.frames == 0) return estimate;
   const auto frames = static_cast<std::int64_t>(estimate.frames);
   if (ack.count() > (std::numeric_limits<std::int64_t>::max)() / frames)

@@ -11,7 +11,9 @@
 #include "control/control_sink.hpp"
 #include "input/us_ascii_text.hpp"
 
+using kvmux::fold_paste_reports;
 using kvmux::KeyEdge;
+using kvmux::kPasteReportContinues;
 using kvmux::map_us_ascii_text;
 using kvmux::map_windows_hex_paste;
 using kvmux::map_windows_hex_scalar;
@@ -243,10 +245,131 @@ int main() {
 
   const auto estimate =
       kvmux::estimate_windows_hex_paste(2, std::chrono::microseconds(1000));
-  check(estimate.frames == 24 && estimate.microseconds == 24000);
+  check(estimate.frames == 16 && estimate.microseconds == 16000);
   const auto unknown =
       kvmux::estimate_windows_hex_paste(1, std::chrono::microseconds(0));
-  check(unknown.frames == 12 && unknown.microseconds == 0);
+  check(unknown.frames == 8 && unknown.microseconds == 0);
+
+  struct Chord {
+    std::uint8_t modifiers{};
+    std::initializer_list<std::uint8_t> keys{};
+    std::size_t completes{kPasteReportContinues};
+  };
+  const auto expect_fold = [](const std::vector<std::vector<KeyEdge>>& gestures,
+                              const std::initializer_list<Chord> rows) {
+    const auto got = fold_paste_reports(gestures);
+    check(got.size() == rows.size());
+    std::size_t index = 0;
+    for (const Chord& row : rows) {
+      check(got[index].modifiers == row.modifiers);
+      check(got[index].completes_gesture == row.completes);
+      check(got[index].also_completes_gesture == kPasteReportContinues);
+      std::size_t slot = 0;
+      for (const auto key : row.keys) {
+        check(slot < got[index].keys.size());
+        check(got[index].keys[slot] == key);
+        ++slot;
+      }
+      for (; slot < got[index].keys.size(); ++slot)
+        check(got[index].keys[slot] == 0);
+      int used = 0;
+      for (const auto key : got[index].keys)
+        if (key != 0) ++used;
+      check(used <= 5);
+      ++index;
+    }
+    std::vector<int> seen(gestures.size());
+    for (const auto& report : got) {
+      if (report.completes_gesture != kPasteReportContinues) {
+        check(report.completes_gesture < seen.size());
+        ++seen[report.completes_gesture];
+      }
+    }
+    for (const auto count : seen) check(count == 1);
+  };
+  const auto edges_of = [](const kvmux::WindowsHexPasteResult& mapped) {
+    std::vector<std::vector<KeyEdge>> gestures;
+    for (const auto& gesture : mapped.gestures)
+      gestures.push_back(gesture.edges);
+    return gestures;
+  };
+  const auto ascii_edges = [](const char* text) {
+    const auto mapped = map_us_ascii_text(text);
+    check(static_cast<bool>(mapped));
+    std::vector<std::vector<KeyEdge>> gestures;
+    for (const auto& gesture : mapped.gestures)
+      gestures.push_back(gesture.edges);
+    return gestures;
+  };
+
+  // "aa" keeps a release between the two presses.
+  expect_fold(ascii_edges("aa"),
+              {{0x00, {0x04}}, {0x00, {}, 0}, {0x00, {0x04}}, {0x00, {}, 1}});
+  // Shift-A is its own modifier frames. "Ab" does not merge across Shift.
+  expect_fold(ascii_edges("Ab"), {{0x02, {}},
+                                  {0x02, {0x04}},
+                                  {0x02, {}},
+                                  {0x00, {}, 0},
+                                  {0x00, {0x05}},
+                                  {0x00, {}, 1}});
+  // Tab up and Enter down share one report.
+  expect_fold(ascii_edges("\t\n"),
+              {{0x00, {0x2b}}, {0x00, {0x28}, 0}, {0x00, {}, 1}});
+
+  const auto zhong = map_windows_hex_scalar(0x4e2d);
+  check(static_cast<bool>(zhong));
+  // Alt, then plus and the four digits accumulated, then digits, then Alt.
+  expect_fold({zhong.edges}, {{0x04, {}},
+                              {0x04, {0x57}},
+                              {0x04, {0x57, 0x5c}},
+                              {0x04, {0x57, 0x5c, 0x08}},
+                              {0x04, {0x57, 0x5c, 0x08, 0x5a}},
+                              {0x04, {0x57, 0x5c, 0x08, 0x5a, 0x07}},
+                              {0x04, {}},
+                              {0x00, {}, 0}});
+  // U+0011 repeats keypad 1, so that key has its own release frame.
+  const auto eleven = map_windows_hex_scalar(0x11);
+  check(static_cast<bool>(eleven));
+  expect_fold({eleven.edges}, {{0x04, {}},
+                               {0x04, {0x57}},
+                               {0x04, {0x57, 0x59}},
+                               {0x04, {0x57}},
+                               {0x04, {0x57, 0x59}},
+                               {0x04, {}},
+                               {0x00, {}, 0}});
+  // Six distinct ordinary presses while Alt is held. The sixth is not added
+  // to a five-key chord. The finished sequence's last report holds nothing.
+  expect_fold({{{0xe2, true},
+                {0x04, true},
+                {0x05, true},
+                {0x06, true},
+                {0x07, true},
+                {0x08, true},
+                {0x09, true},
+                {0xe2, false}}},
+              {{0x04, {}},
+               {0x04, {0x04}},
+               {0x04, {0x04, 0x05}},
+               {0x04, {0x04, 0x05, 0x06}},
+               {0x04, {0x04, 0x05, 0x06, 0x07}},
+               {0x04, {0x04, 0x05, 0x06, 0x07, 0x08}},
+               {0x04, {}},
+               {0x04, {0x09}},
+               {0x04, {}},
+               {0x00, {}, 0}});
+  // ASCII "a" is not merged into the following Alt press.
+  const auto packed = map_windows_hex_paste("a\xE4\xB8\xAD");
+  check(static_cast<bool>(packed) && packed.gestures.size() == 2);
+  expect_fold(edges_of(packed), {{0x00, {0x04}},
+                                 {0x00, {}, 0},
+                                 {0x04, {}},
+                                 {0x04, {0x57}},
+                                 {0x04, {0x57, 0x5c}},
+                                 {0x04, {0x57, 0x5c, 0x08}},
+                                 {0x04, {0x57, 0x5c, 0x08, 0x5a}},
+                                 {0x04, {0x57, 0x5c, 0x08, 0x5a, 0x07}},
+                                 {0x04, {}},
+                                 {0x00, {}, 1}});
 
   WindowsHexPasteCounts counts;
   check(kvmux::format_windows_hex_paste_log("refused", "num_lock", "none", 1, 0,

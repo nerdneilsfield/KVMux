@@ -83,7 +83,19 @@ build/linux-debug-headless/kvmux-relay --debug --serve \
   --baud 57600
 ```
 
-The GUI must use the same rate when it connects to CH9329 hardware locally. For a remote session, only the relay needs the hardware-side serial setting.
+The GUI must use the same rate when it connects to CH9329 hardware locally. For a remote session, only the relay needs the hardware-side serial setting. The connection panel selects the host port rate. It does not write the chip.
+
+## What a higher rate changes
+
+A paste keyboard report is 14 bytes and its ACK is 7 bytes, 21 bytes in total. At 8N1 the wire time is `21 × 10 / baud`:
+
+| Baud | Wire time |
+| --- | --- |
+| 9600 | 21.9 ms |
+| 57600 | 3.65 ms |
+| 115200 | 1.82 ms |
+
+That is the serial bits only. USB-serial and CH9329 processing are not in the number, and they have not been measured. `115200` remains unavailable when the chip's VCC is 3.3 V. KVMux still sends one report and waits for its ACK.
 
 ## Protocol-mode requirement
 

@@ -12,6 +12,7 @@
 
 #include "control/ch9329_protocol.hpp"
 #include "control/hid_keyboard.hpp"
+#include "input/windows_hex_text.hpp"
 
 namespace kvmux {
 
@@ -128,7 +129,17 @@ struct Ch9329ControlSink::Impl {
       paste.state = state;
     }
     paste_job.reset();
-    paste_gesture = paste_edge = 0;
+    paste_reports.clear();
+    paste_report = 0;
+  }
+
+  // Caller holds mutex. Reports are one ACK each. The edge lists stay on
+  // the job only so cancellation can still see that a job was accepted.
+  void adopt_paste_locked(AsciiPasteJob job, const std::uint64_t job_id) {
+    paste_reports = fold_paste_reports(job.gestures);
+    paste_report = 0;
+    paste = {AsciiPasteState::active, job.gestures.size(), 0, job_id};
+    paste_job = std::move(job);
   }
 
   // Caller holds mutex. A canceled in-flight report still drains its ACK,
@@ -383,17 +394,17 @@ struct Ch9329ControlSink::Impl {
     if (was_ascii_paste) {
       std::lock_guard lock(mutex);
       if (paste.state == AsciiPasteState::active && !was_stalled &&
-          !release_requested) {
-        ++paste_edge;
-        if (paste_job &&
-            paste_edge == paste_job->gestures[paste_gesture].size()) {
-          paste_edge = 0;
-          ++paste_gesture;
+          !release_requested && paste_report < paste_reports.size()) {
+        const auto& sent = paste_reports[paste_report];
+        if (sent.completes_gesture != kPasteReportContinues)
           ++paste.completed_gestures;
-          if (paste_gesture == paste.total_gestures) {
-            paste.state = AsciiPasteState::completed;
-            paste_job.reset();
-          }
+        if (sent.also_completes_gesture != kPasteReportContinues)
+          ++paste.completed_gestures;
+        ++paste_report;
+        if (paste_report == paste_reports.size()) {
+          paste.state = AsciiPasteState::completed;
+          paste_reports.clear();
+          paste_job.reset();
         }
       }
     }
@@ -769,11 +780,8 @@ struct Ch9329ControlSink::Impl {
                    request.job_id, paste.cancel_reason};
           pending_paste.reset();
         } else if (ready_for_paste) {
-          paste = {AsciiPasteState::active, request.job.gestures.size(), 0,
-                   request.job_id};
-          paste_job = std::move(request.job);
+          adopt_paste_locked(std::move(request.job), request.job_id);
           pending_paste.reset();
-          paste_gesture = paste_edge = 0;
         }
         if (paste.active()) return;
       }
@@ -789,14 +797,10 @@ struct Ch9329ControlSink::Impl {
         }
         return;
       }
-      if (paste.state == AsciiPasteState::active && paste_job) {
-        const auto& edges = paste_job->gestures[paste_gesture];
-        const auto& edge = edges[paste_edge];
-        if (edge.pressed) {
-          (void)keyboard.press(edge.usage);
-        } else {
-          keyboard.release(edge.usage);
-        }
+      if (paste.state == AsciiPasteState::active &&
+          paste_report < paste_reports.size()) {
+        const auto& report = paste_reports[paste_report];
+        keyboard.restore(report.modifiers, report.keys);
         begin(ch9329::keyboard_report(address, keyboard.modifiers(),
                                       keyboard.keys()),
               Purpose::keyboard, now, 0, status.epoch, false, true);
@@ -872,10 +876,10 @@ struct Ch9329ControlSink::Impl {
   std::uint64_t ordinary_sequence{};
   AsciiPasteSnapshot paste;
   std::optional<AsciiPasteJob> paste_job;
+  std::vector<PasteKeyboardReport> paste_reports;
+  std::size_t paste_report{};
   // One bounded relay request waits for the worker's own ACK-derived state.
   std::optional<AsciiPasteRequest> pending_paste;
-  std::size_t paste_gesture{};
-  std::size_t paste_edge{};
   bool keyboard_trace{false};
   bool keyboard_trace_started{false};
   std::uint32_t keyboard_trace_seq{0};
@@ -1043,9 +1047,7 @@ SubmitResult Ch9329ControlSink::start_ascii_paste(AsciiPasteJob job) {
     ++impl_->status.rejected_events;
     return SubmitResult::not_ready;
   }
-  impl_->paste = {AsciiPasteState::active, job.gestures.size(), 0};
-  impl_->paste_job = std::move(job);
-  impl_->paste_gesture = impl_->paste_edge = 0;
+  impl_->adopt_paste_locked(std::move(job), 0);
   impl_->wake.notify_one();
   return SubmitResult::accepted;
 }

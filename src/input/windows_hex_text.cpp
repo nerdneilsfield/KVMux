@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <string>
 
 #include "control/hid_keyboard.hpp"
@@ -149,6 +150,194 @@ std::vector<WindowsHexReport> windows_hex_reports(
     report.modifiers = keyboard.modifiers();
     report.keys = keyboard.keys();
     reports.push_back(report);
+  }
+  return reports;
+}
+
+namespace {
+
+constexpr int kMaxChord = 5;
+
+bool modifier_usage(const std::uint8_t usage) noexcept {
+  return usage >= 0xe0U && usage <= 0xe7U;
+}
+
+std::uint8_t modifier_bit(const std::uint8_t usage) noexcept {
+  return static_cast<std::uint8_t>(1U << (usage - 0xe0U));
+}
+
+int filled_keys(const std::array<std::uint8_t, 6>& keys) noexcept {
+  int count = 0;
+  while (count < 6 && keys[static_cast<std::size_t>(count)] != 0) ++count;
+  return count;
+}
+
+bool has_key(const std::array<std::uint8_t, 6>& keys,
+             const std::uint8_t usage) noexcept {
+  return std::find(keys.begin(), keys.end(), usage) != keys.end();
+}
+
+void append_key(std::array<std::uint8_t, 6>& keys,
+                const std::uint8_t usage) noexcept {
+  for (auto& slot : keys) {
+    if (slot == 0) {
+      slot = usage;
+      return;
+    }
+  }
+}
+
+void remove_key(std::array<std::uint8_t, 6>& keys,
+                const std::uint8_t usage) noexcept {
+  std::array<std::uint8_t, 6> packed{};
+  std::size_t count = 0;
+  for (const auto slot : keys) {
+    if (slot != 0 && slot != usage) packed[count++] = slot;
+  }
+  keys = packed;
+}
+
+void push_report(std::vector<PasteKeyboardReport>& out,
+                 const std::uint8_t modifiers,
+                 const std::array<std::uint8_t, 6>& keys,
+                 const std::size_t completes = kPasteReportContinues) {
+  PasteKeyboardReport report;
+  report.modifiers = modifiers;
+  report.keys = keys;
+  report.completes_gesture = completes;
+  out.push_back(report);
+}
+
+bool hex_gesture(const std::vector<KeyEdge>& edges) noexcept {
+  return std::any_of(edges.begin(), edges.end(), [](const KeyEdge& edge) {
+    return edge.usage == kLeftAlt;
+  });
+}
+
+void apply_edge(const KeyEdge& edge, std::uint8_t& modifiers,
+                std::array<std::uint8_t, 6>& keys) noexcept {
+  if (modifier_usage(edge.usage)) {
+    const auto bit = modifier_bit(edge.usage);
+    if (edge.pressed) {
+      modifiers = static_cast<std::uint8_t>(modifiers | bit);
+    } else {
+      modifiers = static_cast<std::uint8_t>(modifiers &
+                                            static_cast<std::uint8_t>(~bit));
+    }
+    return;
+  }
+  if (edge.pressed) {
+    if (!has_key(keys, edge.usage)) append_key(keys, edge.usage);
+  } else {
+    remove_key(keys, edge.usage);
+  }
+}
+
+// Ordinary releases stay down until Alt goes up, except a repeated usage,
+// which gets its own release report before it is pressed again. A sixth
+// distinct key releases the chord first. Those keys share one report, so
+// their release order is not defined. Alt is the next report.
+void fold_hex_gesture(const std::vector<KeyEdge>& edges,
+                      const std::size_t gesture,
+                      std::vector<PasteKeyboardReport>& out) {
+  std::uint8_t modifiers = 0;
+  std::array<std::uint8_t, 6> keys{};
+  bool completed = false;
+  for (const KeyEdge& edge : edges) {
+    if (modifier_usage(edge.usage)) {
+      const auto bit = modifier_bit(edge.usage);
+      if (edge.pressed) {
+        modifiers = static_cast<std::uint8_t>(modifiers | bit);
+        push_report(out, modifiers, keys);
+      } else {
+        if (filled_keys(keys) > 0) {
+          keys.fill(0);
+          push_report(out, modifiers, keys);
+        }
+        modifiers = static_cast<std::uint8_t>(modifiers &
+                                              static_cast<std::uint8_t>(~bit));
+        push_report(out, modifiers, keys, gesture);
+        completed = true;
+      }
+      continue;
+    }
+    if (!edge.pressed) continue;
+    if (has_key(keys, edge.usage)) {
+      remove_key(keys, edge.usage);
+      push_report(out, modifiers, keys);
+    } else if (filled_keys(keys) >= kMaxChord) {
+      keys.fill(0);
+      push_report(out, modifiers, keys);
+    }
+    append_key(keys, edge.usage);
+    push_report(out, modifiers, keys);
+  }
+  if (!completed && !out.empty()) out.back().completes_gesture = gesture;
+}
+
+struct MarkedEdge {
+  KeyEdge edge;
+  std::size_t gesture{};
+  bool last{};
+};
+
+// A key-up followed by a different key-down is one report. A repeated key,
+// or a modifier edge on either side, stays separate so the edge is visible.
+void fold_ascii_gestures(const std::span<const std::vector<KeyEdge>> gestures,
+                         const std::size_t origin,
+                         std::vector<PasteKeyboardReport>& out) {
+  std::vector<MarkedEdge> marked;
+  for (std::size_t index = 0; index < gestures.size(); ++index) {
+    const auto& edges = gestures[index];
+    for (std::size_t edge = 0; edge < edges.size(); ++edge) {
+      marked.push_back(
+          MarkedEdge{edges[edge], origin + index, edge + 1 == edges.size()});
+    }
+  }
+  std::uint8_t modifiers = 0;
+  std::array<std::uint8_t, 6> keys{};
+  for (std::size_t index = 0; index < marked.size(); ++index) {
+    const auto& current = marked[index];
+    apply_edge(current.edge, modifiers, keys);
+    auto completes = current.last ? current.gesture : kPasteReportContinues;
+    auto also = kPasteReportContinues;
+    if (!current.edge.pressed && !modifier_usage(current.edge.usage) &&
+        index + 1 < marked.size()) {
+      const auto& next = marked[index + 1];
+      if (next.edge.pressed && !modifier_usage(next.edge.usage) &&
+          next.edge.usage != current.edge.usage) {
+        apply_edge(next.edge, modifiers, keys);
+        if (next.last) {
+          if (completes == kPasteReportContinues) {
+            completes = next.gesture;
+          } else {
+            also = next.gesture;
+          }
+        }
+        ++index;
+      }
+    }
+    push_report(out, modifiers, keys, completes);
+    out.back().also_completes_gesture = also;
+  }
+}
+
+}  // namespace
+
+std::vector<PasteKeyboardReport> fold_paste_reports(
+    const std::span<const std::vector<KeyEdge>> gestures) {
+  std::vector<PasteKeyboardReport> reports;
+  std::size_t index = 0;
+  while (index < gestures.size()) {
+    if (hex_gesture(gestures[index])) {
+      fold_hex_gesture(gestures[index], index, reports);
+      ++index;
+      continue;
+    }
+    std::size_t end = index + 1;
+    while (end < gestures.size() && !hex_gesture(gestures[end])) ++end;
+    fold_ascii_gestures(gestures.subspan(index, end - index), index, reports);
+    index = end;
   }
   return reports;
 }
