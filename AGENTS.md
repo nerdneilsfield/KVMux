@@ -55,11 +55,13 @@ decision in the relevant documentation.
   events through the existing `InputRouter`/`ControlSink`. It must use the
   common cancel/release path and must not persist or log clipboard/text data.
   Chinese text is in scope (decision 2026-11-15, after the first version
-  shipped) only as a second explicit opt-in engine that types Wubi codes as
-  ordinary scancodes into an input method the user has set up on the target.
+  shipped) only as a second explicit opt-in engine that types Unicode code
+  points as ordinary scancodes using the target OS's hexadecimal code-point
+  entry (Windows first: Alt, keypad plus, hex digits, with `EnableHexNumpad`
+  set on the target). Wubi stays a documented fallback and is not implemented.
   It follows the same rules: user-started, paced, bounded, through
-  `InputRouter`/`ControlSink`, common cancel/release path, no logging or
-  persistence of text or its codes. Its design and prerequisites live in
+  `InputRouter`/`ControlSink`, common cancel/release path, and no logging or
+  persistence of text or its code points. Its design and prerequisites live in
   `docs/plans/2026-11-15-chinese-paste.md`. Other Unicode input stays out of
   scope. The Host key is local-only and must never reach the target.
 - Keep platform capture code in the three native adapters: Media Foundation on
