@@ -89,8 +89,14 @@ Use `<platform>-<configuration>`, optionally followed by `-headless`:
 `-headless` excludes the GUI dependencies and builds the relay. Configure presets
 are enabled only on their matching host OS. Each preset has its own build directory.
 Debug and sanitizer presets build tests; release presets do not. Sanitizers means
-ASan plus UBSan, which the current MSVC build does not support. Windows builds
-require an MSVC developer shell. No cross-compilation toolchain is implied.
+ASan plus UBSan, which the current MSVC build does not support. The windows
+presets pin `clang-cl` from LLVM found on `PATH` (for example `scoop install llvm`),
+so configure never falls back to a bare `clang.exe` or GCC picked up from `PATH`.
+`clang-cl` still compiles against the MSVC v143 toolset and a Windows SDK, and
+linking still uses their libraries, so both must be installed and the build still
+runs from an x64 MSVC developer shell. Delete any `build/windows-*` directory
+created before this pinning; CMake caches the previously detected compiler.
+No cross-compilation toolchain is implied.
 
 Use the same name for configure, build and (where available) test:
 
@@ -105,8 +111,10 @@ Existing build directories are not migrated; configure the new preset once.
 
 ## Windows GUI and relay
 
-Use an x64 MSVC developer shell, CMake 3.25 or newer, and Ninja. Install an
-FFmpeg **shared development SDK**, not just `ffmpeg.exe`: its root must contain
+Use an x64 MSVC developer shell, CMake 3.25 or newer, and Ninja; the presets
+select `clang-cl`, so an LLVM build must be on `PATH` (for example
+`scoop install llvm`). Install an FFmpeg **shared development SDK**, not just
+`ffmpeg.exe`: its root must contain
 `include/libavcodec/avcodec.h`, MSVC-compatible import libraries in `lib/`, and
 runtime DLLs in `bin/`. CI pins Gyan FFmpeg 8.0.1 full shared with a SHA-256 check.
 Set `CMAKE_PREFIX_PATH` to that SDK root before configuring:

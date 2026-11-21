@@ -16,10 +16,11 @@
     {"name": "linux-release-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
     {"name": "linux-sanitizers", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "ON"}},
     {"name": "linux-sanitizers-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "ON"}},
-    {"name": "windows-debug", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
-    {"name": "windows-debug-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
-    {"name": "windows-release", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
-    {"name": "windows-release-headless", "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}}
+    {"name": "windows-base", "hidden": true, "inherits": "base", "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"}, "cacheVariables": {"CMAKE_C_COMPILER": "clang-cl", "CMAKE_CXX_COMPILER": "clang-cl"}},
+    {"name": "windows-debug", "inherits": "windows-base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-debug-headless", "inherits": "windows-base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug", "BUILD_TESTING": "ON", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-release", "inherits": "windows-base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "ON", "KVMUX_ENABLE_SANITIZERS": "OFF"}},
+    {"name": "windows-release-headless", "inherits": "windows-base", "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF", "KVMUX_BUILD_GUI": "OFF", "KVMUX_ENABLE_SANITIZERS": "OFF"}}
   ],
   "buildPresets": [
     {"name": "macos-debug", "configurePreset": "macos-debug"},
