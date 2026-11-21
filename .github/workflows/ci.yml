@@ -31,17 +31,10 @@ jobs:
       - name: Install host dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          choco install -y ninja
-          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
-          Invoke-WebRequest 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne 'e4a40b46e3a3f3e5f2ed28352bd1fd6c733ae3808a8743682ef7f0d4e20c7d51') {
-            throw 'FFmpeg archive checksum mismatch'
-          }
-          Expand-Archive $archive -DestinationPath $env:RUNNER_TEMP
-          $ffmpeg = Join-Path $env:RUNNER_TEMP 'ffmpeg-8.0.1-full_build-shared'
-          "CMAKE_PREFIX_PATH=$ffmpeg" >> $env:GITHUB_ENV
-          "$ffmpeg/bin" >> $env:GITHUB_PATH
+        run: choco install -y ninja
+      - name: Set up vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
       - name: Install libusb (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

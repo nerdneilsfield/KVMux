@@ -18,7 +18,11 @@ decision in the relevant documentation.
 
 - Use C++20, CMake Presets, and Ninja. Keep platform selection in CMake and the
   platform adapters instead of scattering conditionals through business code.
-- Do not use Git submodules, Conan, vcpkg, or configure-time network downloads.
+- Do not use Git submodules, Conan, or vcpkg outside the Windows manifest.
+  The windows presets build FFmpeg from the root `vcpkg.json` manifest through
+  the vcpkg toolchain at configure time (decision recorded 2026-11-22). All
+  other platforms discover host dependencies and configure performs no other
+  downloads.
 - Vendor third-party libraries when practical under `third_party/`. Keep only
   the source and build integration needed by KVMux, pin the upstream version,
   and preserve each upstream license and required notices.
@@ -82,7 +86,9 @@ decision in the relevant documentation.
   mapping/state, latest-frame behavior, video ownership, and lifecycle faults
   specified by the design.
 - Provide Debug, Release, and supported sanitizer presets. A preset must use the
-  Ninja generator and must not mutate or download dependencies at configure time.
+  Ninja generator and must not mutate or download dependencies at configure time,
+  except the Windows vcpkg manifest, which installs only the dependencies
+  declared in `vcpkg.json`.
 
 - Use the root `Makefile` as the normal configure, build, test, format, and lint
   entry point. Let it select the host CMake preset; use `HEADLESS=1` only when a

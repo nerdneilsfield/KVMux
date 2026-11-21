@@ -445,8 +445,10 @@ if(WIN32)
     install(FILES ${kvmux_runtime_dlls} DESTINATION "${CMAKE_INSTALL_BINDIR}")
     file(GLOB kvmux_ffmpeg_notices
         "${kvmux_ffmpeg_prefix}/LICENSE*" "${kvmux_ffmpeg_prefix}/README*")
-    install(FILES ${kvmux_ffmpeg_notices}
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux/licenses/ffmpeg")
+    if(kvmux_ffmpeg_notices)
+        install(FILES ${kvmux_ffmpeg_notices}
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux/licenses/ffmpeg")
+    endif()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         # Debug installs are for local/CI smoke checks, not redistribution.
         set(CMAKE_INSTALL_DEBUG_LIBRARIES TRUE)

@@ -11,7 +11,9 @@ H.265 LAN relay 和 UDP/KCP 传输；这些部分以
 [当前 LAN 使用说明](../lan-relay.md)和
 [UDP/KCP 协议与实现计划](../plans/2026-09-12-udp-kcp-relay.md)为准。
 依赖采用仓库内固定版本源码及显式发现的系统库，构建方式见
-[构建说明](../building.md)，不再采用本文早期建议的 vcpkg。
+[构建说明](../building.md)。Windows 例外（2026-11-22 决定）：Windows 平台的
+FFmpeg 由根目录 vcpkg manifest（vcpkg.json）在配置时构建，取代手动下载的
+FFmpeg SDK；其余平台不使用 vcpkg。
 本文其余采集、渲染和 CH9329 设计仍提供背景，但不代表所有验收目标已经通过。
 
 ## 1. 产品边界与最终技术决策
@@ -32,7 +34,7 @@ H.265 LAN relay 和 UDP/KCP 传输；这些部分以
 
 | 事项 | 本规格的决定 |
 |---|---|
-| 语言和构建 | 使用 C++20、CMake、Ninja，采用 vcpkg manifest 管理第三方依赖。 |
+| 语言和构建 | 使用 C++20、CMake、Ninja。第三方依赖以 vendored 源码与系统库显式发现为主；仅 Windows 的 FFmpeg 由 vcpkg manifest（vcpkg.json）提供。 |
 | 窗口、事件与鼠标捕获 | 使用 SDL3，不自行重写跨平台窗口系统。 |
 | 界面 | 使用 Dear ImGui 官方 SDL3 平台后端和 OpenGL3 渲染后端。 |
 | 图形基线 | 三个平台统一采用 OpenGL 3.2 Core、GLSL 150；macOS 创建 forward-compatible core context。 |

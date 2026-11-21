@@ -32,17 +32,19 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 
 ## FFmpeg runtime (not vendored)
 
-- Windows CI SDK: Gyan FFmpeg `8.0.1`, `ffmpeg-8.0.1-full_build-shared.zip`.
-- Archive: https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.zip
-- SHA-256: `e4a40b46e3a3f3e5f2ed28352bd1fd6c733ae3808a8743682ef7f0d4e20c7d51`.
-- The full shared build includes GPL components. Installation preserves the SDK's
-  root LICENSE and README files under `share/kvmux/licenses/ffmpeg`.
+- Windows: built from the root vcpkg manifest (`vcpkg.json`), port `ffmpeg`,
+  default `x64-windows` triplet. The FFmpeg version follows the pinned vcpkg
+  checkout; record the version and port feature set for each release.
+- The vcpkg port has its own enabled features and licenses (verify GPL/nonfree
+  components in the installed tree). The vcpkg installed root ships no
+  LICENSE/README files, so collect the FFmpeg license notices and a
+  corresponding-source offer from the pinned vcpkg port before distribution.
 - Before distributing binaries, retain the exact build configuration, matching
   FFmpeg and bundled codec-library sources, patches and build instructions, or a
   valid corresponding-source offer. A link to upstream alone is not a source offer.
 - macOS/Linux use host FFmpeg libraries; their version, enabled features and
   license obligations depend on the host package. No FFmpeg sources are modified
-  by KVMux, and configure does not download FFmpeg.
+  by KVMux, and configure does not download FFmpeg on those platforms.
 
 ## Inter
 

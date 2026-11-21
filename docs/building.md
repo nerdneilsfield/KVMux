@@ -1,7 +1,9 @@
 # Building KVMux
 
 KVMux uses C++20, CMake Presets, and Ninja. Configure does not download or
-modify dependencies. Run these commands from the repository root:
+modify dependencies; the only exception is the windows presets, which build
+FFmpeg from the vcpkg manifest (`vcpkg.json`) at configure time. Run these
+commands from the repository root:
 
 ```sh
 cmake --preset macos-debug
@@ -15,14 +17,20 @@ to enable AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ## Dependency policy
 
-KVMux does not use Git submodules, Conan, or vcpkg. Source dependencies that
-are practical to embed are pinned under `third_party/` with only the required
+KVMux does not use Git submodules or Conan, and CMake does not fetch from the
+network, with one Windows-only exception: the windows presets consume the root
+vcpkg manifest (`vcpkg.json`) and build its declared dependencies at configure
+time. This supersedes the design document's earlier rejection of vcpkg for
+Windows only (decision recorded 2026-11-22). Source dependencies that are
+practical to embed are pinned under `third_party/` with only the required
 source, build integration, upstream version record, and license notices. CMake
-does not fetch from the network.
+does not fetch from the network anywhere else.
 
 Large runtime libraries that are impractical to embed are discovered explicitly
 from the build host. FFmpeg is currently required with `libavcodec`, `libavutil`,
-and `libswscale`; the development build is verified with FFmpeg 9.0.1. Their
+and `libswscale`; the development build is verified with FFmpeg 9.0.1. On
+Windows the FFmpeg version instead follows the vcpkg checkout used by the
+manifest; pin that checkout and record the version with each release. Their
 supported versions, feature configuration, runtime packaging, and license
 obligations must be recorded when introduced. A release must ship the notices
 and source/build-offer information required by each dependency.
@@ -113,14 +121,14 @@ Existing build directories are not migrated; configure the new preset once.
 
 Use an x64 MSVC developer shell, CMake 3.25 or newer, and Ninja; the presets
 select `clang-cl`, so an LLVM build must be on `PATH` (for example
-`scoop install llvm`). Install an FFmpeg **shared development SDK**, not just
-`ffmpeg.exe`: its root must contain
-`include/libavcodec/avcodec.h`, MSVC-compatible import libraries in `lib/`, and
-runtime DLLs in `bin/`. CI pins Gyan FFmpeg 8.0.1 full shared with a SHA-256 check.
-Set `CMAKE_PREFIX_PATH` to that SDK root before configuring:
+`scoop install llvm`). The windows presets also point the vcpkg toolchain at
+`$env{VCPKG_ROOT}`: install vcpkg, set `VCPKG_ROOT` to its checkout, and the
+first configure builds the `ffmpeg` port from `vcpkg.json` for the default
+`x64-windows` triplet. Pin the vcpkg checkout commit once the resulting FFmpeg
+version is validated, and record the FFmpeg version shipped with each Windows
+release. Set `VCPKG_ROOT` before configuring:
 
 ```powershell
-$env:CMAKE_PREFIX_PATH = 'C:/deps/ffmpeg-8.0.1-full_build-shared'
 cmake --preset windows-debug
 cmake --build --preset windows-debug --parallel 2
 ctest --preset windows-debug --output-on-failure
@@ -173,7 +181,8 @@ FFmpeg and system graphics libraries remain distribution runtime dependencies.
 X11/Wayland input behavior and real capture/control still need platform acceptance.
 
 Windows SDK DLL redistribution must retain the SDK's license notices and matching
-source/build information; the full shared FFmpeg build includes GPL components.
+source/build information; the vcpkg `ffmpeg` port has its own feature and
+license set, so check the installed tree before distribution.
 The install tree is a development staging tree, not a signed release package or
 a complete FFmpeg source offer. See `third_party/INVENTORY.md` before distribution.
 Debug staging includes non-redistributable MSVC debug runtimes for local checks;
