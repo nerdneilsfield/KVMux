@@ -29,8 +29,8 @@ does not fetch from the network anywhere else.
 Large runtime libraries that are impractical to embed are discovered explicitly
 from the build host. FFmpeg is currently required with `libavcodec`, `libavutil`,
 and `libswscale`; the development build is verified with FFmpeg 9.0.1. On
-Windows the FFmpeg version instead follows the vcpkg checkout used by the
-manifest; pin that checkout and record the version with each release. Their
+Windows the FFmpeg version instead follows the manifest's pinned
+`builtin-baseline`; record the version with each release. Their
 supported versions, feature configuration, runtime packaging, and license
 obligations must be recorded when introduced. A release must ship the notices
 and source/build-offer information required by each dependency.
@@ -122,11 +122,12 @@ Existing build directories are not migrated; configure the new preset once.
 Use an x64 MSVC developer shell, CMake 3.25 or newer, and Ninja; the presets
 select `clang-cl`, so an LLVM build must be on `PATH` (for example
 `scoop install llvm`). The windows presets also point the vcpkg toolchain at
-`$env{VCPKG_ROOT}`: install vcpkg, set `VCPKG_ROOT` to its checkout, and the
-first configure builds the `ffmpeg` port from `vcpkg.json` for the default
-`x64-windows` triplet. Pin the vcpkg checkout commit once the resulting FFmpeg
-version is validated, and record the FFmpeg version shipped with each Windows
-release. Set `VCPKG_ROOT` before configuring:
+`$env{VCPKG_ROOT}`: clone vcpkg from GitHub, run its `bootstrap-vcpkg` script,
+and set `VCPKG_ROOT` to that checkout. Use a standalone git clone; the vcpkg
+copy bundled under `VC\vcpkg` in Visual Studio may fail to resolve the
+manifest's `builtin-baseline`. The manifest pins a vcpkg baseline, so the
+FFmpeg port version is reproducible from `vcpkg.json`; record the FFmpeg
+version shipped with each Windows release. Set `VCPKG_ROOT` before configuring:
 
 ```powershell
 cmake --preset windows-debug

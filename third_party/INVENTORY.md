@@ -33,8 +33,9 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 ## FFmpeg runtime (not vendored)
 
 - Windows: built from the root vcpkg manifest (`vcpkg.json`), port `ffmpeg`,
-  default `x64-windows` triplet. The FFmpeg version follows the pinned vcpkg
-  checkout; record the version and port feature set for each release.
+  default `x64-windows` triplet. The FFmpeg version follows the manifest's
+  pinned `builtin-baseline`; record the version and port feature set for each
+  release.
 - The vcpkg port has its own enabled features and licenses (verify GPL/nonfree
   components in the installed tree). The vcpkg installed root ships no
   LICENSE/README files, so collect the FFmpeg license notices and a
