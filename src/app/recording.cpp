@@ -144,6 +144,18 @@ struct Recording::Impl {
   FrameCrop crop{};
   std::string encoder_name;
   unsigned frames_written{};
+  // Reused for every appended frame.
+  AVFrame* picture{};
+  AVPacket* packet{};
+  Impl() = default;
+  Impl(const Impl&) = delete;
+  Impl& operator=(const Impl&) = delete;
+  Impl(Impl&&) = delete;
+  Impl& operator=(Impl&&) = delete;
+  ~Impl() {
+    av_frame_free(&picture);
+    av_packet_free(&packet);
+  }
 };
 
 Recording::Recording(std::filesystem::path output_directory)
@@ -324,37 +336,49 @@ bool Recording::snapshot_now(const VideoFrame& input,
   return true;
 }
 
+using SwsContextPtr = std::unique_ptr<SwsContext, decltype(&sws_freeContext)>;
+
+// Converts only the crop region; scroll crops are even, so 4:2:0 chroma planes
+// start on a whole sample, as in snapshot_now.
 static std::vector<std::uint8_t> crop_rgb(const VideoFrame& input,
-                                          FrameCrop crop) {
+                                          FrameCrop crop,
+                                          SwsContextPtr& convert) {
   if (!valid_frame(input) || !crop.width || !crop.height ||
       crop.x + crop.width > static_cast<unsigned>(input.frame->width) ||
       crop.y + crop.height > static_cast<unsigned>(input.frame->height))
     return {};
-  std::vector<std::uint8_t> rgb(static_cast<std::size_t>(crop.width) *
-                                crop.height * 3);
-  auto* convert =
-      sws_getContext(input.frame->width, input.frame->height,
-                     static_cast<AVPixelFormat>(input.frame->format),
-                     input.frame->width, input.frame->height, AV_PIX_FMT_RGB24,
-                     SWS_BILINEAR, nullptr, nullptr, nullptr);
-  if (!convert) return {};
-  std::vector<std::uint8_t> full(static_cast<std::size_t>(input.frame->width) *
-                                 input.frame->height * 3);
-  std::uint8_t* data[]{full.data()};
-  int stride[]{input.frame->width * 3};
-  if (sws_scale(convert, input.frame->data, input.frame->linesize, 0,
-                input.frame->height, data, stride) < 0) {
-    sws_freeContext(convert);
-    return {};
+  AVFrame* source = av_frame_clone(input.frame.get());
+  int result = source ? 0 : AVERROR(ENOMEM);
+  if (result >= 0) {
+    source->crop_left = crop.x;
+    source->crop_top = crop.y;
+    source->crop_right =
+        static_cast<unsigned>(input.frame->width) - crop.x - crop.width;
+    source->crop_bottom =
+        static_cast<unsigned>(input.frame->height) - crop.y - crop.height;
+    result = av_frame_apply_cropping(source, AV_FRAME_CROP_UNALIGNED);
   }
-  sws_freeContext(convert);
-  for (unsigned y = 0; y < crop.height; ++y)
-    std::copy_n(full.data() +
-                    ((crop.y + y) * static_cast<unsigned>(input.frame->width) +
-                     crop.x) *
-                        3,
-                static_cast<std::size_t>(crop.width) * 3,
-                rgb.data() + static_cast<std::size_t>(y) * crop.width * 3);
+  if (result >= 0 && (source->width != static_cast<int>(crop.width) ||
+                      source->height != static_cast<int>(crop.height)))
+    result = AVERROR(EINVAL);
+  if (result >= 0) {
+    convert.reset(
+        sws_getCachedContext(convert.release(), source->width, source->height,
+                             static_cast<AVPixelFormat>(source->format),
+                             source->width, source->height, AV_PIX_FMT_RGB24,
+                             SWS_BILINEAR, nullptr, nullptr, nullptr));
+    if (!convert) result = AVERROR(ENOMEM);
+  }
+  std::vector<std::uint8_t> rgb;
+  if (result >= 0) {
+    rgb.resize(static_cast<std::size_t>(crop.width) * crop.height * 3);
+    std::uint8_t* data[]{rgb.data()};
+    int stride[]{static_cast<int>(crop.width * 3)};
+    if (sws_scale(convert.get(), source->data, source->linesize, 0,
+                  source->height, data, stride) < 0)
+      rgb.clear();
+  }
+  av_frame_free(&source);
   return rgb;
 }
 static bool write_rgb_jpeg(std::span<const std::uint8_t> rgb, unsigned width,
@@ -493,6 +517,9 @@ bool Recording::start_now(const VideoFrame& first,
   impl->codec->time_base = {1, 1'000'000};
   impl->codec->framerate = {0, 1};
   impl->codec->max_b_frames = 0;
+  // libx264 defaults to "medium"; recording runs beside live capture.
+  if (impl->encoder_name == "libx264")
+    (void)av_opt_set(impl->codec->priv_data, "preset", "veryfast", 0);
   if (impl->format->oformat->flags & AVFMT_GLOBALHEADER)
     impl->codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
   result = avcodec_open2(impl->codec, encoder, nullptr);
@@ -544,18 +571,24 @@ bool Recording::start_now(const VideoFrame& first,
 bool Recording::write_frame(const VideoFrame& input) {
   auto& impl = *impl_;
   auto* source = input.frame.get();
-  AVFrame* picture = av_frame_alloc();
-  AVPacket* packet = av_packet_alloc();
-  if (!picture || !packet) {
-    av_frame_free(&picture);
-    av_packet_free(&packet);
+  if (!impl.picture) impl.picture = av_frame_alloc();
+  if (!impl.packet) impl.packet = av_packet_alloc();
+  if (!impl.picture || !impl.packet) {
     fail("allocate MP4 frame/packet");
     return false;
   }
-  picture->format = impl.codec->pix_fmt;
-  picture->width = impl.codec->width;
-  picture->height = impl.codec->height;
-  int result = av_frame_get_buffer(picture, 32);
+  AVFrame* const picture = impl.picture;
+  AVPacket* const packet = impl.packet;
+  int result{};
+  if (picture->buf[0] == nullptr) {
+    picture->format = impl.codec->pix_fmt;
+    picture->width = impl.codec->width;
+    picture->height = impl.codec->height;
+    result = av_frame_get_buffer(picture, 32);
+  } else {
+    // Copies only if the encoder still holds a reference to the last frame.
+    result = av_frame_make_writable(picture);
+  }
   const auto crop = impl.crop;
   if (!valid_frame(input) ||
       crop.x + crop.width > static_cast<unsigned>(source->width) ||
@@ -615,8 +648,6 @@ bool Recording::write_frame(const VideoFrame& input) {
     }
   }
   if (result >= 0) impl.last_pts = picture->pts;
-  av_frame_free(&picture);
-  av_packet_free(&packet);
   if (result < 0) {
     const std::string message = "append MP4 frame: " + av_error(result);
     std::filesystem::path path;
@@ -886,6 +917,7 @@ void Recording::ensure_worker() {
     worker_ = std::jthread([this](std::stop_token token) { worker(token); });
 }
 void Recording::worker(std::stop_token token) {
+  SwsContextPtr scroll_convert(nullptr, sws_freeContext);
   while (!token.stop_requested()) {
     std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> begin;
     std::optional<VideoFrame> next, scroll_next;
@@ -932,7 +964,8 @@ void Recording::worker(std::stop_token token) {
       spdlog::debug("scroll state: idle reason=cancel");
     }
     if (scroll_begin) {
-      auto pixels = crop_rgb(scroll_begin->frame, scroll_begin->crop);
+      auto pixels =
+          crop_rgb(scroll_begin->frame, scroll_begin->crop, scroll_convert);
       scroll_stitcher_.emplace();
       scroll_crop_ = scroll_begin->crop;
       scroll_sequence_ = 1;
@@ -969,7 +1002,7 @@ void Recording::worker(std::stop_token token) {
       }
     }
     if (scroll_next && scroll_stitcher_) {
-      auto pixels = crop_rgb(*scroll_next, scroll_crop_);
+      auto pixels = crop_rgb(*scroll_next, scroll_crop_, scroll_convert);
       const auto sequence = ++scroll_sequence_;
       StitchUpdate update{StitchResult::invalid, 0};
       if (!pixels.empty()) {

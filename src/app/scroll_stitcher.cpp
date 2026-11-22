@@ -24,22 +24,38 @@ void ScrollStitcher::reset() noexcept {
 }
 
 double ScrollStitcher::error(std::span<const std::uint8_t> next,
-                             std::uint32_t displacement, bool reverse) const {
+                             std::uint32_t displacement, bool reverse,
+                             double give_up_at) const {
   const auto rows = frame_height_ - displacement;
   const auto stride = static_cast<std::size_t>(width_) * 3;
   const auto previous_row = reverse ? 0U : displacement;
   const auto next_row = reverse ? displacement : 0U;
-  long double sum = 0;
   const auto count = static_cast<std::size_t>(rows) * stride;
-  for (std::size_t i = 0; i < count; ++i) {
-    const int delta =
-        static_cast<int>(
-            previous_[static_cast<std::size_t>(previous_row) * stride + i]) -
-        static_cast<int>(next[static_cast<std::size_t>(next_row) * stride + i]);
-    sum += static_cast<long double>(delta * delta);
+  // The exact integer sum fits in 64 bits for any frame the limits admit, and
+  // converts to the same long double the previous accumulator produced.
+  const auto normalized = [&](std::uint64_t sum) {
+    return static_cast<double>(
+        static_cast<long double>(sum) /
+        (static_cast<long double>(count) * 255.0L * 255.0L));
+  };
+  const auto* before =
+      previous_.data() + static_cast<std::size_t>(previous_row) * stride;
+  const auto* after = next.data() + static_cast<std::size_t>(next_row) * stride;
+  std::uint64_t sum = 0;
+  for (std::uint32_t row = 0; row < rows; ++row) {
+    std::int64_t row_sum = 0;
+    for (std::uint32_t pixel = 0; pixel < width_; ++pixel) {
+      for (int channel = 0; channel < 3; ++channel, ++before, ++after) {
+        const int delta = static_cast<int>(*before) - static_cast<int>(*after);
+        row_sum += static_cast<std::int64_t>(delta) * delta;
+      }
+    }
+    sum += static_cast<std::uint64_t>(row_sum);
+    // The sum only grows, so this candidate can no longer beat the best one.
+    if (normalized(sum) >= give_up_at)
+      return std::numeric_limits<double>::infinity();
   }
-  return static_cast<double>(
-      sum / (static_cast<long double>(count) * 255.0L * 255.0L));
+  return normalized(sum);
 }
 
 StitchUpdate ScrollStitcher::add(std::span<const std::uint8_t> rgb,
@@ -76,12 +92,12 @@ StitchUpdate ScrollStitcher::add(std::span<const std::uint8_t> rgb,
   std::uint32_t forward = 0, reverse = 0;
   const auto maximum_displacement = height - config_.minimum_overlap;
   for (std::uint32_t d = 1; d <= maximum_displacement; ++d) {
-    const auto f = error(rgb, d, false);
+    const auto f = error(rgb, d, false, forward_error);
     if (f < forward_error) {
       forward_error = f;
       forward = d;
     }
-    const auto r = error(rgb, d, true);
+    const auto r = error(rgb, d, true, reverse_error);
     if (r < reverse_error) {
       reverse_error = r;
       reverse = d;

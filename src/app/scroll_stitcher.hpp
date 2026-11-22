@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -45,8 +46,11 @@ class ScrollStitcher {
   }
 
  private:
-  double error(std::span<const std::uint8_t> next, std::uint32_t displacement,
-               bool reverse) const;
+  // Returns infinity once the error reaches give_up_at.
+  double error(
+      std::span<const std::uint8_t> next, std::uint32_t displacement,
+      bool reverse,
+      double give_up_at = std::numeric_limits<double>::infinity()) const;
 
   ScrollStitcherConfig config_;
   std::uint32_t width_{};
