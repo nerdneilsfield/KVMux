@@ -25,8 +25,7 @@ class VideoProcessor {
 
  private:
   [[nodiscard]] std::optional<VideoFrame> process_raw(CaptureSample sample);
-  [[nodiscard]] std::optional<VideoFrame> process_mjpeg(
-      const CaptureSample& sample);
+  [[nodiscard]] std::optional<VideoFrame> process_mjpeg(CaptureSample sample);
   bool ensure_mjpeg_decoder();
   void fail(std::string message);
 

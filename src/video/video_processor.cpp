@@ -147,7 +147,8 @@ std::optional<VideoFrame> VideoProcessor::process(CaptureSample sample) {
     }
     return metadata(sample, sample.decoded);
   }
-  return sample.raw ? process_raw(std::move(sample)) : process_mjpeg(sample);
+  return sample.raw ? process_raw(std::move(sample))
+                    : process_mjpeg(std::move(sample));
 }
 
 std::optional<VideoFrame> VideoProcessor::process_raw(CaptureSample sample) {
@@ -258,17 +259,33 @@ bool VideoProcessor::ensure_mjpeg_decoder() {
   return true;
 }
 
-std::optional<VideoFrame> VideoProcessor::process_mjpeg(
-    const CaptureSample& sample) {
+std::optional<VideoFrame> VideoProcessor::process_mjpeg(CaptureSample sample) {
   if (!ensure_mjpeg_decoder()) {
     return std::nullopt;
   }
-  const auto& jpeg = *sample.mjpeg;
+  // avcodec_send_packet copies the whole JPEG when the packet carries no
+  // AVBufferRef. Hand the payload over with a reference-counted owner instead;
+  // the decoder may hold it past this call and the owner frees it on the last
+  // reference.
+  auto holder = std::make_unique<OwnedRawBytes>();
+  holder->bytes = std::move(sample.mjpeg->bytes);
+  const auto payload_size = sample.mjpeg->payload_size;
+  // keep the arguments sequenced: holder.release() must not run before the
+  // size/pointer reads, or they would dereference a null unique_ptr
+  auto* payload_bytes = holder->bytes.data();
+  const auto payload_storage = holder->bytes.size();
   AVPacket packet{};
-  packet.data = const_cast<std::uint8_t*>(jpeg.bytes.data());
-  packet.size = static_cast<int>(jpeg.payload_size);
+  packet.buf = av_buffer_create(payload_bytes, payload_storage, free_raw_bytes,
+                                holder.release(), 0);
+  if (packet.buf == nullptr) {
+    fail("could not retain MJPEG payload");
+    return std::nullopt;
+  }
+  packet.data = packet.buf->data;
+  packet.size = static_cast<int>(payload_size);
   auto frame = own(av_frame_alloc());
   if (!frame) {
+    av_packet_unref(&packet);
     fail("could not allocate decoded AVFrame");
     return std::nullopt;
   }
@@ -278,6 +295,7 @@ std::optional<VideoFrame> VideoProcessor::process_mjpeg(
     if (drained >= 0) av_frame_unref(frame.get());
     sent = avcodec_send_packet(decoder_, &packet);
   }
+  av_packet_unref(&packet);
   if (sent < 0) {
     fail("MJPEG packet rejected: " + av_error(sent));
     return std::nullopt;
