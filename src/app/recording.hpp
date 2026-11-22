@@ -61,9 +61,9 @@ struct FrameCrop {
   const double bottom = std::max(y0, y1);
   const double limit_x = static_cast<double>(source_width);
   const double limit_y = static_cast<double>(source_height);
-  const auto edge = [](double along, double limit, bool far) {
+  const auto edge = [](double along, double limit, bool outer) {
     const double scaled = std::clamp(along, 0.0, limit);
-    const double snapped = far ? std::ceil(scaled) : std::floor(scaled);
+    const double snapped = outer ? std::ceil(scaled) : std::floor(scaled);
     if (snapped <= 0.0) return 0U;
     if (snapped >= limit) return static_cast<unsigned>(limit);
     return static_cast<unsigned>(snapped);
