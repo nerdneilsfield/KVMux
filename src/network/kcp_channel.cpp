@@ -80,6 +80,10 @@ bool KcpChannel::input(std::span<const std::uint8_t> packet) {
 void KcpChannel::update(std::uint32_t monotonic_ms) {
   if (failed_) return;
   ikcp_update(kcp_, monotonic_ms);
+  // Send new messages and ACKs now instead of on the next 10 ms tick. Callers
+  // update only after the previous batch drained, so this keeps the bounded
+  // output queue's backpressure contract that a flush in submit() would not.
+  if (kcp_->nsnd_que != 0 || kcp_->ackcount != 0) ikcp_flush(kcp_);
   if (kcp_->state == static_cast<IUINT32>(-1)) failed_ = true;
 }
 int KcpChannel::output(const char* data, int size, IKCPCB*, void* user) {
