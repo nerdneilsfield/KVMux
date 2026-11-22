@@ -81,6 +81,8 @@ struct Ch9329ControlSink::Impl {
     bool ordinary{};
     bool ascii_paste{};
     bool trace_logged{false};
+    // The worker loop skips its idle wait until the first write attempt.
+    bool write_attempted{false};
   };
 
   Impl(SerialIo value, std::shared_ptr<Diagnostics> sink)
@@ -707,6 +709,7 @@ struct Ch9329ControlSink::Impl {
       }
     }
     if (transaction) {
+      transaction->write_attempted = true;
       if (transaction->written < transaction->bytes.size()) {
         const auto remaining =
             std::span(transaction->bytes).subspan(transaction->written);
@@ -834,8 +837,15 @@ struct Ch9329ControlSink::Impl {
     while (true) {
       {
         std::unique_lock lock(mutex);
-        wake.wait_for(lock, std::chrono::milliseconds(1),
-                      [this] { return stopping.load(); });
+        // Start new work at once: a fresh frame is written in the next pass
+        // and a queued event or release begins as soon as the link is idle.
+        wake.wait_for(lock, std::chrono::milliseconds(1), [this] {
+          if (stopping.load()) return true;
+          if (!open) return false;
+          if (transaction) return !transaction->write_attempted;
+          return release_requested || queue.release_pending() ||
+                 queue.size() != 0;
+        });
         if (stopping.load()) {
           invalidate_sync();
           queue.request_release();
