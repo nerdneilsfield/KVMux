@@ -36,6 +36,23 @@
 namespace {
 using namespace kvmux;
 
+// Swap interval is per drawable on some GL platforms and per context on
+// others, so skip the call only when both already hold the wanted value.
+struct SwapInterval {
+  SDL_WindowID window{};
+  int value{-1};
+};
+void set_swap_interval(SwapInterval& window_state, int& context_value,
+                       SDL_Window* window, int value) {
+  const auto id = SDL_GetWindowID(window);
+  if (window_state.window == id && window_state.value == value &&
+      context_value == value)
+    return;
+  if (!SDL_GL_SetSwapInterval(value)) return;
+  window_state = {id, value};
+  context_value = value;
+}
+
 struct TrafficRate {
   std::optional<relay::TrafficSnapshot> baseline;
   std::chrono::steady_clock::time_point sampled_at{};
@@ -366,6 +383,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
+  SwapInterval main_swap, second_swap;
+  int context_swap = -1;
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;
@@ -721,12 +740,9 @@ int main(int argc, char** argv) {
     }
   };
 
-  while (host.running) {
-    const auto frame_started = std::chrono::steady_clock::now();
-    std::erase_if(retired_sessions, [](auto& future) {
-      return future.wait_for(std::chrono::seconds(0)) ==
-             std::future_status::ready;
-    });
+  // The session, second window and current frame can be replaced during an
+  // iteration, so refresh these before routing any event.
+  const auto refresh_host = [&] {
     host.session = session.get();
     host.diagnostics = diagnostics.get();
     host.window2 = window2;
@@ -735,6 +751,15 @@ int main(int argc, char** argv) {
     host.current_frame = current_frame ? &*current_frame : nullptr;
     host.renderer_width = renderer.width();
     host.renderer_height = renderer.height();
+  };
+
+  while (host.running) {
+    const auto frame_started = std::chrono::steady_clock::now();
+    std::erase_if(retired_sessions, [](auto& future) {
+      return future.wait_for(std::chrono::seconds(0)) ==
+             std::future_status::ready;
+    });
+    refresh_host();
     SDL_Event event;
     while (SDL_PollEvent(&event)) route_sdl_event(event, host, ui);
     settle_window_focus(host);
@@ -884,8 +909,9 @@ int main(int argc, char** argv) {
       session2->tick();
       if (auto newest = session2->take_latest_frame())
         second_frame = std::move(newest);
+      const auto snapshot2 = session2->snapshot();
       if (second_frame &&
-          second_frame->generation != session2->snapshot().capture.generation)
+          second_frame->generation != snapshot2.capture.generation)
         second_frame.reset();
       if (second_frame) {
         const auto decision =
@@ -903,9 +929,8 @@ int main(int argc, char** argv) {
           }
         }
       }
-      const bool fresh = session2->snapshot().video_fresh &&
-                         renderer2.width() > 0 && !second_upload_failed &&
-                         !second_display_failed &&
+      const bool fresh = snapshot2.video_fresh && renderer2.width() > 0 &&
+                         !second_upload_failed && !second_display_failed &&
                          std::chrono::steady_clock::now() - second_uploaded_at <
                              std::chrono::milliseconds(500);
       if (second_valid && !fresh) {
@@ -1065,7 +1090,7 @@ int main(int argc, char** argv) {
     view.renderer_width = renderer.width();
     view.renderer_height = renderer.height();
     view.has_texture = view.texture != 0 && view.renderer_width > 0;
-    SDL_GL_SetSwapInterval(config.vsync ? 1 : 0);
+    set_swap_interval(main_swap, context_swap, window, config.vsync ? 1 : 0);
     apply(draw_video(ui, view));
     draw_banners(ui, view);
     // Chrome may have replaced the diagnostics object. Read it after the
@@ -1097,19 +1122,10 @@ int main(int argc, char** argv) {
     SDL_GL_SwapWindow(window);
     diagnostics->record_present_blocking(std::chrono::steady_clock::now() -
                                          before);
-    if (!config.vsync) {
-      constexpr auto frame_budget = std::chrono::milliseconds(1000 / 120);
-      const auto elapsed = std::chrono::steady_clock::now() - frame_started;
-      if (elapsed < frame_budget)
-        SDL_Delay(static_cast<Uint32>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(frame_budget -
-                                                                  elapsed)
-                .count()));
-    }
     if (window2) {
       if (SDL_GL_MakeCurrent(window2, context)) {
         second_display_failed = false;
-        SDL_GL_SetSwapInterval(0);
+        set_swap_interval(second_swap, context_swap, window2, 0);
         int w2{}, h2{};
         SDL_GetWindowSizeInPixels(window2, &w2, &h2);
         glViewport(0, 0, w2, h2);
@@ -1137,6 +1153,24 @@ int main(int argc, char** argv) {
         spdlog::error("Could not restore the main GL context: {}",
                       SDL_GetError());
         host.running = false;
+      }
+    }
+    if (!config.vsync) {
+      // Keep drawing at most 120 Hz, but route input as soon as it arrives
+      // instead of letting it sit in the queue until the budget runs out.
+      constexpr auto frame_budget = std::chrono::milliseconds(1000 / 120);
+      refresh_host();
+      while (host.running) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                frame_budget -
+                (std::chrono::steady_clock::now() - frame_started))
+                .count();
+        if (remaining <= 0) break;
+        SDL_Event waited;
+        if (!SDL_WaitEventTimeout(&waited, static_cast<Sint32>(remaining)))
+          break;
+        route_sdl_event(waited, host, ui);
       }
     }
   }
