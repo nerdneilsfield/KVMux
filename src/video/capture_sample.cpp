@@ -35,12 +35,12 @@ bool valid_dimensions(const std::uint32_t width,
          height <= kMaxCaptureHeight;
 }
 
-std::optional<CaptureSample> CaptureSample::make_raw(
-    const std::uint64_t generation, const std::uint64_t sequence,
-    const std::chrono::steady_clock::time_point arrival,
-    const std::uint32_t width, const std::uint32_t height,
-    const PixelFormat format, const std::span<const PlaneLayout> planes,
-    const std::span<const std::uint8_t> bytes) {
+namespace {
+
+bool valid_raw_payload(const std::uint32_t width, const std::uint32_t height,
+                       const PixelFormat format,
+                       const std::span<const PlaneLayout> planes,
+                       const std::span<const std::uint8_t> bytes) {
   const std::size_t expected_planes =
       format == PixelFormat::nv12
           ? 2U
@@ -48,15 +48,38 @@ std::optional<CaptureSample> CaptureSample::make_raw(
                      format == PixelFormat::yuv444p
                  ? 3U
                  : 1U);
-  if (!valid_dimensions(width, height) || format == PixelFormat::unknown ||
-      format == PixelFormat::mjpeg || planes.size() != expected_planes ||
-      bytes.empty() || bytes.size() > kMaxRawSampleBytes ||
-      !std::all_of(planes.begin(), planes.end(),
-                   [size = bytes.size()](const auto& plane) {
-                     return plane_fits(plane, size);
-                   })) {
+  return valid_dimensions(width, height) && format != PixelFormat::unknown &&
+         format != PixelFormat::mjpeg && planes.size() == expected_planes &&
+         !bytes.empty() && bytes.size() <= kMaxRawSampleBytes &&
+         std::all_of(planes.begin(), planes.end(),
+                     [size = bytes.size()](const auto& plane) {
+                       return plane_fits(plane, size);
+                     });
+}
+
+}  // namespace
+
+std::optional<CaptureSample> CaptureSample::make_raw(
+    const std::uint64_t generation, const std::uint64_t sequence,
+    const std::chrono::steady_clock::time_point arrival,
+    const std::uint32_t width, const std::uint32_t height,
+    const PixelFormat format, const std::span<const PlaneLayout> planes,
+    const std::span<const std::uint8_t> bytes) {
+  if (!valid_raw_payload(width, height, format, planes, bytes))
     return std::nullopt;
-  }
+  return make_raw(generation, sequence, arrival, width, height, format,
+                  std::vector<PlaneLayout>(planes.begin(), planes.end()),
+                  std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+}
+
+std::optional<CaptureSample> CaptureSample::make_raw(
+    const std::uint64_t generation, const std::uint64_t sequence,
+    const std::chrono::steady_clock::time_point arrival,
+    const std::uint32_t width, const std::uint32_t height,
+    const PixelFormat format, std::vector<PlaneLayout> planes,
+    std::vector<std::uint8_t> bytes) {
+  if (!valid_raw_payload(width, height, format, planes, bytes))
+    return std::nullopt;
 
   CaptureSample sample{};
   sample.generation = generation;
@@ -64,9 +87,7 @@ std::optional<CaptureSample> CaptureSample::make_raw(
   sample.arrival = arrival;
   sample.width = width;
   sample.height = height;
-  sample.raw =
-      RawPayload{format, std::vector<PlaneLayout>(planes.begin(), planes.end()),
-                 std::vector<std::uint8_t>(bytes.begin(), bytes.end())};
+  sample.raw = RawPayload{format, std::move(planes), std::move(bytes)};
   return sample;
 }
 

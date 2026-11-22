@@ -77,6 +77,14 @@ struct CaptureSample {
       std::uint32_t height, PixelFormat format,
       std::span<const PlaneLayout> planes, std::span<const std::uint8_t> bytes);
 
+  // Same validation, but takes ownership of payloads the caller already
+  // copied out of a driver buffer, so that frame is not copied a second time.
+  [[nodiscard]] static std::optional<CaptureSample> make_raw(
+      std::uint64_t generation, std::uint64_t sequence,
+      std::chrono::steady_clock::time_point arrival, std::uint32_t width,
+      std::uint32_t height, PixelFormat format, std::vector<PlaneLayout> planes,
+      std::vector<std::uint8_t> bytes);
+
   // reuse keeps its allocation when the capacity already covers the payload
   // and the decoder padding. A null pointer allocates a new buffer.
   [[nodiscard]] static std::optional<CaptureSample> make_mjpeg(

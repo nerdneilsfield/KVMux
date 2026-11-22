@@ -679,9 +679,9 @@ class MediaFoundationCapture final : public CaptureSource {
         planes.push_back({0, static_cast<std::ptrdiff_t>(row_bytes), row_bytes,
                           mode.height});
       }
-      result = CaptureSample::make_raw(generation, sequence, arrival,
-                                       mode.width, mode.height,
-                                       mode.delivered_format, planes, owned);
+      result = CaptureSample::make_raw(
+          generation, sequence, arrival, mode.width, mode.height,
+          mode.delivered_format, std::move(planes), std::move(owned));
     }
     if (result) {
       result->device_timestamp = timestamp;
