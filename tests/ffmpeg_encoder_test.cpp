@@ -219,8 +219,8 @@ void run_case(kvmux::VideoCodec codec, kvmux::EncodingPriority priority) {
                               : "priority=size") != std::string::npos,
           "priority is observable in diagnostic");
   require(diagnostic.find(priority == EncodingPriority::quality
-                              ? "preset=medium"
-                              : "preset=slow") != std::string::npos,
+                              ? "preset=veryfast"
+                              : "preset=faster") != std::string::npos,
           "effective preset is observable in diagnostic");
   require(
       diagnostic.find(priority == EncodingPriority::quality
@@ -239,7 +239,7 @@ int main() {
       encoding_profile(EncodingPriority::quality, 40'000'000).bitrate ==
       40'000'000);
   static_assert(
-      encoding_profile(EncodingPriority::quality, 1).ffmpeg_preset[0] == 'm');
+      encoding_profile(EncodingPriority::quality, 1).ffmpeg_preset[0] == 'v');
   static_assert(
       encoding_profile(EncodingPriority::quality, 1).jetson_preset_level == 3);
   static_assert(encoding_profile(EncodingPriority::size, 40'000'000).bitrate ==
@@ -247,7 +247,7 @@ int main() {
   static_assert(encoding_profile(EncodingPriority::size, 100'000).bitrate ==
                 250'000);
   static_assert(encoding_profile(EncodingPriority::size, 1).ffmpeg_preset[0] ==
-                's');
+                'f');
   static_assert(
       encoding_profile(EncodingPriority::size, 1).jetson_preset_level == 4);
   std::string error;

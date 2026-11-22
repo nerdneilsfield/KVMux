@@ -71,8 +71,11 @@ struct RelayServer::Impl {
     VideoProcessor processor;
     std::unique_ptr<SwsContext, decltype(&sws_freeContext)> scaler(
         nullptr, sws_freeContext);
+    // Reused while the encoder holds no reference to its buffers.
+    AvFramePtr converted;
     std::uint64_t generation{};
     bool waiting_idr = true;
+    bool poll_now{};
     Clock::time_point next_source{};
     auto reset_codec = [&] {
       if (codec) {
@@ -87,9 +90,11 @@ struct RelayServer::Impl {
         std::chrono::microseconds interval;
         {
           std::unique_lock lock(media_mutex);
-          media_wake.wait_for(lock, 2ms, [&] {
-            return stopping || generation != media_generation || keyframe;
-          });
+          // A just-submitted frame is polled at once instead of after 2 ms.
+          if (!std::exchange(poll_now, false))
+            media_wake.wait_for(lock, 2ms, [&] {
+              return stopping || generation != media_generation || keyframe;
+            });
           if (stopping) break;
           wanted = media_generation;
           refresh = std::exchange(keyframe, false);
@@ -179,21 +184,35 @@ struct RelayServer::Impl {
         auto input = frame->frame;
         if (input->format != AV_PIX_FMT_NV12 &&
             input->format != AV_PIX_FMT_YUV420P) {
-          AvFramePtr converted(av_frame_alloc(),
-                               [](AVFrame* f) { av_frame_free(&f); });
-          if (!converted)
-            throw std::runtime_error("H.26x frame allocation failed");
-          converted->format = AV_PIX_FMT_NV12;
-          converted->width = input->width;
-          converted->height = input->height;
-          if (av_frame_get_buffer(converted.get(), 32) < 0 ||
-              av_frame_copy_props(converted.get(), input.get()) < 0)
-            throw std::runtime_error("H.26x frame storage allocation failed");
+          // Convert straight to the format the encoder consumes without a
+          // second copy: NV12 for Jetson, YUV420P for libx264/libx265.
+          const auto target = codec->backend() == CodecBackend::jetson_gstreamer
+                                  ? AV_PIX_FMT_NV12
+                                  : AV_PIX_FMT_YUV420P;
+          if (!converted || converted->format != target ||
+              converted->width != input->width ||
+              converted->height != input->height ||
+              !av_frame_is_writable(converted.get())) {
+            converted = AvFramePtr(av_frame_alloc(),
+                                   [](AVFrame* f) { av_frame_free(&f); });
+            if (!converted)
+              throw std::runtime_error("H.26x frame allocation failed");
+            converted->format = target;
+            converted->width = input->width;
+            converted->height = input->height;
+            if (av_frame_get_buffer(converted.get(), 32) < 0)
+              throw std::runtime_error("H.26x frame storage allocation failed");
+          }
+          // Assign only what the encoder reads: copy_props would append side
+          // data to the reused frame on every pass.
+          converted->color_primaries = input->color_primaries;
+          converted->color_trc = input->color_trc;
+          converted->sample_aspect_ratio = input->sample_aspect_ratio;
           scaler.reset(sws_getCachedContext(
               scaler.release(), input->width, input->height,
               static_cast<AVPixelFormat>(input->format), input->width,
-              input->height, AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, nullptr,
-              nullptr, nullptr));
+              input->height, target, SWS_FAST_BILINEAR, nullptr, nullptr,
+              nullptr));
           const int matrix = input->colorspace == AVCOL_SPC_BT709
                                  ? SWS_CS_ITU709
                                  : SWS_CS_ITU601;
@@ -212,7 +231,7 @@ struct RelayServer::Impl {
                         input->height, converted->data,
                         converted->linesize) != input->height)
             throw std::runtime_error("H.26x conversion failed");
-          input = std::move(converted);
+          input = converted;
         }
         EncoderInput value;
         value.frame = std::move(input);
@@ -225,6 +244,7 @@ struct RelayServer::Impl {
         const auto result = codec->submit(value);
         if (!result.ok() && result.status != CodecStatus::again)
           throw std::runtime_error(result.message);
+        poll_now = true;
       }
     } catch (const std::exception& error) {
       std::lock_guard lock(media_mutex);

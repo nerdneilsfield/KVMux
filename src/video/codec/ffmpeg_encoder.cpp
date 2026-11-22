@@ -148,26 +148,33 @@ class FfmpegEncoder final : public VideoEncoder {
               "Invalid owned CPU frame planes or strides"};
     if (pending_.size() >= 4)
       return {CodecStatus::again, "poll encoder then retry input"};
-    auto frame = own(av_frame_alloc());
-    if (!frame) return fail("allocate encoder frame");
-    frame->format = AV_PIX_FMT_YUV420P;
-    frame->width = w;
-    frame->height = h;
-    int result = av_frame_get_buffer(frame.get(), 32);
-    if (result >= 0) result = av_frame_copy_props(frame.get(), source);
-    if (result < 0)
-      return fail("allocate/copy encoder frame: " + av_error(result));
-    for (int y = 0; y < h; ++y)
-      std::memcpy(frame->data[0] + y * frame->linesize[0],
-                  source->data[0] + y * source->linesize[0], w);
-    for (int y = 0; y < h / 2; ++y)
-      for (int x = 0; x < w / 2; ++x) {
-        frame->data[1][y * frame->linesize[1] + x] =
-            source->data[1][y * source->linesize[1] + (planar ? x : 2 * x)];
-        frame->data[2][y * frame->linesize[2] + x] =
-            planar ? source->data[2][y * source->linesize[2] + x]
-                   : source->data[1][y * source->linesize[1] + 2 * x + 1];
-      }
+    int result{};
+    AvFramePtr frame;
+    if (planar) {
+      // YUV420P is the encoder format: take a buffer reference, not a copy.
+      frame = own(av_frame_clone(source));
+      if (!frame) return fail("reference encoder frame");
+    } else {
+      frame = own(av_frame_alloc());
+      if (!frame) return fail("allocate encoder frame");
+      frame->format = AV_PIX_FMT_YUV420P;
+      frame->width = w;
+      frame->height = h;
+      result = av_frame_get_buffer(frame.get(), 32);
+      if (result >= 0) result = av_frame_copy_props(frame.get(), source);
+      if (result < 0)
+        return fail("allocate/copy encoder frame: " + av_error(result));
+      for (int y = 0; y < h; ++y)
+        std::memcpy(frame->data[0] + y * frame->linesize[0],
+                    source->data[0] + y * source->linesize[0], w);
+      for (int y = 0; y < h / 2; ++y)
+        for (int x = 0; x < w / 2; ++x) {
+          frame->data[1][y * frame->linesize[1] + x] =
+              source->data[1][y * source->linesize[1] + 2 * x];
+          frame->data[2][y * frame->linesize[2] + x] =
+              source->data[1][y * source->linesize[1] + 2 * x + 1];
+        }
+    }
     frame->pts = next_token_;
     frame->pict_type = force_idr_ ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     result = avcodec_send_frame(context_, frame.get());

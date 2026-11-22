@@ -91,7 +91,7 @@ struct FixtureEncoder final : VideoEncoder {
     return {};
   }
   CodecResult submit(const EncoderInput& value) override {
-    assert(value.frame && value.frame->format == AV_PIX_FMT_NV12);
+    assert(value.frame && value.frame->format == AV_PIX_FMT_YUV420P);
     if (input) return {CodecStatus::again, {}};
     input = value;
     return {};

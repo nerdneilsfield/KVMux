@@ -36,10 +36,10 @@ struct EncodingProfile {
 [[nodiscard]] constexpr EncodingProfile encoding_profile(
     EncodingPriority priority, std::uint32_t requested_bitrate) noexcept {
   return priority == EncodingPriority::quality
-             ? EncodingProfile{requested_bitrate, "medium", 3}
+             ? EncodingProfile{requested_bitrate, "veryfast", 3}
              : EncodingProfile{
                    std::max<std::uint32_t>(250'000, requested_bitrate / 2),
-                   "slow", 4};
+                   "faster", 4};
 }
 
 struct CodecResult {
