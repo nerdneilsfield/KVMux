@@ -12,9 +12,13 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <mstcpip.h>
+// clang-format off
+// Order matters: ws2tcpip.h and mswsock.h need winsock2.h first, and mswsock.h
+// is what provides SIO_UDP_CONNRESET.
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
+// clang-format on
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
