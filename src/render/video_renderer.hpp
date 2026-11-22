@@ -79,6 +79,12 @@ class VideoRenderer {
                     const std::uint8_t* data, int stride, int row_bytes);
 
   unsigned int program_{};
+  // Resolved once after linking: the colour conversion runs for every frame.
+  int pixel_format_uniform_{-1};
+  int source_size_uniform_{-1};
+  int yuv_matrix_uniform_{-1};
+  int yuv_offset_uniform_{-1};
+  int yuv_scale_uniform_{-1};
   unsigned int vertex_array_{};
   unsigned int framebuffer_{};
   unsigned int output_texture_{};

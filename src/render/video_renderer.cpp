@@ -149,6 +149,11 @@ bool VideoRenderer::compile_program() {
   glUniform1i(glGetUniformLocation(program_, "plane0"), 0);
   glUniform1i(glGetUniformLocation(program_, "plane1"), 1);
   glUniform1i(glGetUniformLocation(program_, "plane2"), 2);
+  pixel_format_uniform_ = glGetUniformLocation(program_, "pixel_format");
+  source_size_uniform_ = glGetUniformLocation(program_, "source_size");
+  yuv_matrix_uniform_ = glGetUniformLocation(program_, "yuv_matrix");
+  yuv_offset_uniform_ = glGetUniformLocation(program_, "yuv_offset");
+  yuv_scale_uniform_ = glGetUniformLocation(program_, "yuv_scale");
   glUseProgram(0);
   return true;
 }
@@ -379,12 +384,11 @@ bool VideoRenderer::upload(const VideoFrame& input,
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
   glViewport(0, 0, width_, height_);
   glUseProgram(program_);
-  glUniform1i(glGetUniformLocation(program_, "pixel_format"), kind);
-  glUniform2i(glGetUniformLocation(program_, "source_size"), width_, height_);
-  glUniformMatrix3fv(glGetUniformLocation(program_, "yuv_matrix"), 1, GL_FALSE,
-                     m.data());
-  glUniform3fv(glGetUniformLocation(program_, "yuv_offset"), 1, offset.data());
-  glUniform3fv(glGetUniformLocation(program_, "yuv_scale"), 1, scale.data());
+  glUniform1i(pixel_format_uniform_, kind);
+  glUniform2i(source_size_uniform_, width_, height_);
+  glUniformMatrix3fv(yuv_matrix_uniform_, 1, GL_FALSE, m.data());
+  glUniform3fv(yuv_offset_uniform_, 1, offset.data());
+  glUniform3fv(yuv_scale_uniform_, 1, scale.data());
   glBindVertexArray(vertex_array_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
   glBindVertexArray(0);
