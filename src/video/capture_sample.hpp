@@ -71,11 +71,13 @@ struct CaptureSample {
   // Owned CPU decoder output; no compressed dependencies cross this mailbox.
   std::shared_ptr<AVFrame> decoded;
 
+  // reuse, when not null, donates its allocation to the copied payload.
   [[nodiscard]] static std::optional<CaptureSample> make_raw(
       std::uint64_t generation, std::uint64_t sequence,
       std::chrono::steady_clock::time_point arrival, std::uint32_t width,
       std::uint32_t height, PixelFormat format,
-      std::span<const PlaneLayout> planes, std::span<const std::uint8_t> bytes);
+      std::span<const PlaneLayout> planes, std::span<const std::uint8_t> bytes,
+      std::vector<std::uint8_t>* reuse = nullptr);
 
   // Same validation, but takes ownership of payloads the caller already
   // copied out of a driver buffer, so that frame is not copied a second time.

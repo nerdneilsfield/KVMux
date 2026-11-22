@@ -573,7 +573,7 @@ class V4l2CaptureSource final : public CaptureSource {
       if (buffer.bytesused > kMaxRawSampleBytes) return std::nullopt;
       sample = CaptureSample::make_raw(
           generation, sequence, arrival, mode.width, mode.height,
-          mode.device_format, planes, {bytes, buffer.bytesused});
+          mode.device_format, planes, {bytes, buffer.bytesused}, &raw_spare_);
     }
     if (sample) {
       sample->device_timestamp =
@@ -601,6 +601,11 @@ class V4l2CaptureSource final : public CaptureSource {
         discarded->mjpeg->bytes.capacity() > mjpeg_spare_.capacity()) {
       mjpeg_spare_ = std::move(discarded->mjpeg->bytes);
     }
+    // An overwritten raw frame donates its buffer to the next copy.
+    if (discarded && discarded->raw &&
+        discarded->raw->bytes.capacity() > raw_spare_.capacity()) {
+      raw_spare_ = std::move(discarded->raw->bytes);
+    }
   }
 
   mutable std::mutex mutex_;
@@ -608,6 +613,7 @@ class V4l2CaptureSource final : public CaptureSource {
   CaptureSnapshot snapshot_;
   std::optional<CaptureSample> latest_;
   std::vector<std::uint8_t> mjpeg_spare_;
+  std::vector<std::uint8_t> raw_spare_;
   std::thread worker_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<int> stop_fd_{-1};

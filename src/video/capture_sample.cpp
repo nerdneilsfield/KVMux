@@ -64,12 +64,16 @@ std::optional<CaptureSample> CaptureSample::make_raw(
     const std::chrono::steady_clock::time_point arrival,
     const std::uint32_t width, const std::uint32_t height,
     const PixelFormat format, const std::span<const PlaneLayout> planes,
-    const std::span<const std::uint8_t> bytes) {
+    const std::span<const std::uint8_t> bytes,
+    std::vector<std::uint8_t>* const reuse) {
   if (!valid_raw_payload(width, height, format, planes, bytes))
     return std::nullopt;
+  std::vector<std::uint8_t> payload;
+  if (reuse != nullptr) payload = std::move(*reuse);
+  payload.assign(bytes.begin(), bytes.end());
   return make_raw(generation, sequence, arrival, width, height, format,
                   std::vector<PlaneLayout>(planes.begin(), planes.end()),
-                  std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+                  std::move(payload));
 }
 
 std::optional<CaptureSample> CaptureSample::make_raw(

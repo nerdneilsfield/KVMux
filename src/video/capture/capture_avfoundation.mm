@@ -178,15 +178,15 @@ static ColorMatrix color_matrix(CVImageBufferRef image) {
           break;
         }
         const std::size_t offset = bytes.size();
-        bytes.resize(offset + stride * rows);
-        std::memcpy(bytes.data() + offset, base, stride * rows);
+        const auto* first = static_cast<const std::uint8_t*>(base);
+        bytes.insert(bytes.end(), first, first + stride * rows);
         planes.push_back({offset, static_cast<std::ptrdiff_t>(stride), row_bytes, rows});
       }
       if (!valid) break;
 
-      result = CaptureSample::make_raw(_generation, 0, std::chrono::steady_clock::now(),
-                                       static_cast<std::uint32_t>(width),
-                                       static_cast<std::uint32_t>(height), format, planes, bytes);
+      result = CaptureSample::make_raw(
+          _generation, 0, std::chrono::steady_clock::now(), static_cast<std::uint32_t>(width),
+          static_cast<std::uint32_t>(height), format, std::move(planes), std::move(bytes));
       if (!result) break;
       const CMTime timestamp = CMSampleBufferGetPresentationTimeStamp(sample_buffer);
       if (CMTIME_IS_NUMERIC(timestamp) && timestamp.timescale > 0) {

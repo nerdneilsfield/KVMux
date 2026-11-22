@@ -627,7 +627,10 @@ class MediaFoundationCapture final : public CaptureSource {
       }
       if (row_bytes == 0 || rows > kMaxRawSampleBytes / row_bytes)
         return std::nullopt;
-      std::vector<std::uint8_t> owned(row_bytes * rows);
+      // Append rows into reserved storage: sizing the vector up front would
+      // zero-fill a buffer that is overwritten immediately.
+      std::vector<std::uint8_t> owned;
+      owned.reserve(row_bytes * rows);
       ComPtr<IMF2DBuffer> buffer2d;
       if (SUCCEEDED(buffer.As(&buffer2d))) {
         BYTE* scanline = nullptr;
@@ -639,10 +642,11 @@ class MediaFoundationCapture final : public CaptureSource {
           buffer2d->Unlock2D();
           return std::nullopt;
         }
-        for (std::size_t row = 0; row < rows; ++row)
-          std::memcpy(owned.data() + row * row_bytes,
-                      scanline + static_cast<std::ptrdiff_t>(row) * pitch,
-                      row_bytes);
+        for (std::size_t row = 0; row < rows; ++row) {
+          const BYTE* line =
+              scanline + static_cast<std::ptrdiff_t>(row) * pitch;
+          owned.insert(owned.end(), line, line + row_bytes);
+        }
         buffer2d->Unlock2D();
       } else {
         BYTE* bytes = nullptr;
@@ -662,10 +666,10 @@ class MediaFoundationCapture final : public CaptureSource {
         }
         const BYTE* first = bytes;
         if (stride < 0) first += (rows - 1U) * absolute_stride;
-        for (std::size_t row = 0; row < rows; ++row)
-          std::memcpy(owned.data() + row * row_bytes,
-                      first + static_cast<std::ptrdiff_t>(row) * stride,
-                      row_bytes);
+        for (std::size_t row = 0; row < rows; ++row) {
+          const BYTE* line = first + static_cast<std::ptrdiff_t>(row) * stride;
+          owned.insert(owned.end(), line, line + row_bytes);
+        }
         buffer->Unlock();
       }
       std::vector<PlaneLayout> planes;
