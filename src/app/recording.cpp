@@ -468,7 +468,10 @@ bool Recording::start_now(const VideoFrame& first,
     return false;
   }
   auto impl = std::make_unique<Impl>();
-  const auto* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+  // Prefer libx264 by name: the generic lookup can return a hardware encoder,
+  // such as h264_d3d12va on Windows, that rejects yuv420p input.
+  const auto* encoder = avcodec_find_encoder_by_name("libx264");
+  if (!encoder) encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
   if (!encoder) {
     fail(reject("FFmpeg H.264 encoder unavailable", {}, {}));
     return false;

@@ -1,5 +1,14 @@
 {
   "name": "kvmux",
   "builtin-baseline": "b94b6bdc326c0faea9070b4862e0e0d4e4ac5396",
-  "dependencies": [ "ffmpeg" ]
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "features": [
+        "gpl",
+        "x264",
+        "x265"
+      ]
+    }
+  ]
 }

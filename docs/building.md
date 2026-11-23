@@ -182,8 +182,9 @@ FFmpeg and system graphics libraries remain distribution runtime dependencies.
 X11/Wayland input behavior and real capture/control still need platform acceptance.
 
 Windows SDK DLL redistribution must retain the SDK's license notices and matching
-source/build information; the vcpkg `ffmpeg` port has its own feature and
-license set, so check the installed tree before distribution.
+source/build information. The manifest enables the `gpl`, `x264` and `x265`
+features of the vcpkg `ffmpeg` port, so the Windows FFmpeg DLLs are GPL builds;
+see `third_party/INVENTORY.md` for what a distribution must carry.
 The install tree is a development staging tree, not a signed release package or
 a complete FFmpeg source offer. See `third_party/INVENTORY.md` before distribution.
 Debug staging includes non-redistributable MSVC debug runtimes for local checks;

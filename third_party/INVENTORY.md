@@ -36,8 +36,12 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
   default `x64-windows` triplet. The FFmpeg version follows the manifest's
   pinned `builtin-baseline`; record the version and port feature set for each
   release.
-- The vcpkg port has its own enabled features and licenses (verify GPL/nonfree
-  components in the installed tree). The vcpkg installed root ships no
+- Enabled features: the port defaults plus `gpl`, `x264` and `x265` (decision
+  2026-11-23), so recording and relay H.264/HEVC encoding work on Windows as on
+  Linux and macOS. The Windows FFmpeg build, with libx264 and libx265, is
+  therefore distributed under the GPL (version 2 or later); KVMux's own code
+  stays MIT. Ship the GPL text and a corresponding-source offer covering FFmpeg,
+  x264 and x265 with any Windows binary. The vcpkg installed root ships no
   LICENSE/README files, so collect the FFmpeg license notices and a
   corresponding-source offer from the pinned vcpkg port before distribution.
 - Before distributing binaries, retain the exact build configuration, matching
