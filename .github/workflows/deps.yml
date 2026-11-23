@@ -46,4 +46,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create "${{ inputs.tag }}" "$env:ARCHIVE" "$env:ARCHIVE.sha256" --repo "$env:GITHUB_REPOSITORY" --prerelease --target "$env:GITHUB_SHA" --title "${{ inputs.tag }}" --notes "Prebuilt Windows x64 dependencies (vcpkg x64-windows-release: FFmpeg with x264 and x265, GPL) for KVMux release builds."
+        run: |
+          gh release create "${{ inputs.tag }}" "$env:ARCHIVE" "$env:ARCHIVE.sha256" --repo "$env:GITHUB_REPOSITORY" --prerelease --target "$env:GITHUB_SHA" --title "${{ inputs.tag }}" --notes "Prebuilt Windows x64 dependencies (vcpkg x64-windows-release: FFmpeg with x264 and x265, GPL) for KVMux release builds."
