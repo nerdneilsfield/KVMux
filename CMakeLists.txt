@@ -143,7 +143,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(WIN32)
-    target_link_libraries(kvmux_core PRIVATE ws2_32)
+    target_link_libraries(kvmux_core PRIVATE ws2_32 winmm)
     target_compile_definitions(kvmux_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
@@ -279,7 +279,7 @@ if(BUILD_TESTING)
     add_executable(kvmux_paste_cancel_test tests/paste_cancel_test.cpp src/app/kvm_session.cpp)
     target_link_libraries(kvmux_paste_cancel_test PRIVATE kvmux::core kvmux::capture)
     add_test(NAME paste_cancel COMMAND kvmux_paste_cancel_test)
-    set_tests_properties(paste_cancel PROPERTIES TIMEOUT 60)
+    set_tests_properties(paste_cancel PROPERTIES TIMEOUT 120)
 
     add_executable(kvmux_relay_selection_test tests/relay_selection_test.cpp)
     target_link_libraries(kvmux_relay_selection_test PRIVATE kvmux::core)

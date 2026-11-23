@@ -266,7 +266,9 @@ void fresh_link_completes_paste() {
                        progress.planned_gestures == bytes &&
                        progress.scheduled_gestures == bytes;
               },
-              20000ms),
+              // 8192 FakeSerial transactions, each paced by a 1 ms ACK poll:
+              // CI timers made 20 s too tight (macOS took 22 s).
+              60000ms),
           "a fresh FakeSerial paste completes");
 }
 

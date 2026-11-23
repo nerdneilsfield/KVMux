@@ -14,6 +14,12 @@
 #include "control/hid_keyboard.hpp"
 #include "input/windows_hex_text.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+// windows.h first: timeapi.h needs its base types.
+#include <timeapi.h>
+#endif
+
 namespace kvmux {
 
 std::string format_traced_key_report(const TracedKeyReport& row) {
@@ -834,6 +840,18 @@ struct Ch9329ControlSink::Impl {
   }
 
   void run() {
+#if defined(_WIN32)
+    // SDL raises the Windows timer to 1 ms only in the GUI. The headless relay
+    // and tests never initialise SDL, so each 1 ms wait below would sleep a
+    // whole 15.6 ms scheduler tick per ACK poll.
+    timeBeginPeriod(1);
+    struct TimerPeriod {
+      TimerPeriod() = default;
+      TimerPeriod(const TimerPeriod&) = delete;
+      TimerPeriod& operator=(const TimerPeriod&) = delete;
+      ~TimerPeriod() { timeEndPeriod(1); }
+    } const timer_period;
+#endif
     while (true) {
       {
         std::unique_lock lock(mutex);
