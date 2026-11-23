@@ -393,8 +393,20 @@ struct RelayServer::Impl {
       auto now = Clock::now();
       std::vector<udp::Datagram> received;
       received.reserve(32);
+      // Wait for the next packet the pacer can send instead of a fixed 1 ms:
+      // its bucket is only a few packets deep, so how often this loop wakes
+      // sets the stream rate. A packet held back by a full socket buffer is
+      // retried shortly.
+      std::chrono::nanoseconds first_wait = 1ms;
+      if (pending) {
+        first_wait = 200us;
+      } else if (pacer) {
+        if (const auto due = pacer->next_deadline(now))
+          first_wait =
+              std::clamp<std::chrono::nanoseconds>(*due - now, 0ns, 1ms);
+      }
       for (unsigned i = 0; i < 32; ++i) {
-        auto input = control_socket->receive(i == 0 ? 1ms : 0ms);
+        auto input = control_socket->receive(i == 0 ? first_wait : 0ns);
         if (input.status == udp::ReceiveStatus::idle) break;
         if (input.status == udp::ReceiveStatus::error) {
           fatal = true;

@@ -195,26 +195,85 @@ SendStatus Socket::send_to(const Endpoint& endpoint,
     return SendStatus::would_block;
   return SendStatus::error;
 }
-ReceiveResult Socket::receive(std::chrono::milliseconds timeout) const {
+namespace {
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// select() sleeps in whole scheduler ticks (15.6 ms unless the process raised
+// the timer), so a wait shorter than 1 ms goes through a high-resolution
+// waitable timer instead. Returns false when no such timer exists (before
+// Windows 10 1803) so the caller falls back to select().
+bool sleep_precisely(std::chrono::nanoseconds duration) {
+  struct Timer {
+    HANDLE handle = CreateWaitableTimerExW(
+        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        TIMER_ALL_ACCESS);
+    ~Timer() {
+      if (handle) CloseHandle(handle);
+    }
+  };
+  thread_local const Timer timer;
+  if (!timer.handle) return false;
+  LARGE_INTEGER due;
+  due.QuadPart = -std::max<std::int64_t>(1, duration.count() / 100);
+  return SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE) &&
+         WaitForSingleObject(timer.handle, 100) == WAIT_OBJECT_0;
+}
+int select_readable(NativeSocket socket, std::chrono::microseconds timeout) {
+  fd_set ready;
+  FD_ZERO(&ready);
+  FD_SET(socket, &ready);
+  const auto micros = static_cast<long long>(timeout.count());
+  timeval tv{static_cast<long>(micros / 1000000),
+             static_cast<long>(micros % 1000000)};
+  return select(0, &ready, nullptr, nullptr, &tv);
+}
+// A positive result means readable, zero means the wait timed out.
+int wait_readable(NativeSocket socket, std::chrono::nanoseconds remaining) {
+  if (remaining < std::chrono::milliseconds(1)) {
+    const int ready = select_readable(socket, {});
+    if (ready != 0 || remaining <= std::chrono::nanoseconds::zero())
+      return ready;
+    // Not interruptible by a datagram, but the wait is under 1 ms.
+    if (sleep_precisely(remaining)) return select_readable(socket, {});
+  }
+  return select_readable(
+      socket, std::chrono::ceil<std::chrono::microseconds>(remaining));
+}
+#elif defined(__linux__)
+int wait_readable(NativeSocket socket, std::chrono::nanoseconds remaining) {
+  pollfd fd{socket, POLLIN, 0};
+  const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+      std::min<std::chrono::nanoseconds>(remaining,
+                                         std::chrono::hours(24 * 365)));
+  timespec limit{
+      static_cast<time_t>(seconds.count()),
+      static_cast<long>(
+          (remaining -
+           std::chrono::duration_cast<std::chrono::nanoseconds>(seconds))
+              .count())};
+  return ::ppoll(&fd, 1, &limit, nullptr);
+}
+#else
+int wait_readable(NativeSocket socket, std::chrono::nanoseconds remaining) {
+  pollfd fd{socket, POLLIN, 0};
+  const auto milliseconds = static_cast<int>(std::clamp<std::int64_t>(
+      std::chrono::ceil<std::chrono::milliseconds>(remaining).count(), 0,
+      INT_MAX));
+  return ::poll(&fd, 1, milliseconds);
+}
+#endif
+}  // namespace
+ReceiveResult Socket::receive(std::chrono::nanoseconds timeout) const {
   if (native(handle_) == invalid_socket) return {};
   using Clock = std::chrono::steady_clock;
   const auto deadline =
-      Clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
+      Clock::now() + std::max(timeout, std::chrono::nanoseconds::zero());
   for (;;) {
     const auto remaining =
-        std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
-    const auto milliseconds = static_cast<int>(
-        std::clamp<std::int64_t>(remaining.count(), 0, INT_MAX));
-#ifdef _WIN32
-    fd_set ready;
-    FD_ZERO(&ready);
-    FD_SET(native(handle_), &ready);
-    timeval tv{milliseconds / 1000, (milliseconds % 1000) * 1000};
-    const int result = select(0, &ready, nullptr, nullptr, &tv);
-#else
-    pollfd fd{native(handle_), POLLIN, 0};
-    const int result = ::poll(&fd, 1, milliseconds);
-#endif
+        std::max(deadline - Clock::now(), Clock::duration::zero());
+    const int result = wait_readable(native(handle_), remaining);
     if (result == 0) return {ReceiveStatus::idle, {}};
     if (result < 0) {
       if (!interrupted(last_error())) return {};

@@ -466,9 +466,15 @@ struct MediaPacer::Impl {
       : codec(c), generation(g), rate(r), updated(now) {
     counters.waiting_idr = c != VideoCodec::mjpeg;
   }
+  // Bucket depth: two packets, or two milliseconds of the configured rate when
+  // that is more. A wake-up that comes late (a coarse OS timer tick) can then
+  // still send what the rate owes instead of one 2400-byte bucket per wake-up.
+  double burst() const {
+    return std::max(2400.0, static_cast<double>(rate) * 0.002);
+  }
   double credit(MediaTime now) const {
     return std::min(
-        2400.0,
+        burst(),
         tokens +
             std::max(0.0,
                      std::chrono::duration<double>(now - updated).count()) *

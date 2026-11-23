@@ -53,7 +53,10 @@ class Socket {
   [[nodiscard]] std::optional<std::uint16_t> local_port() const;
   [[nodiscard]] SendStatus send_to(const Endpoint&,
                                    std::span<const std::uint8_t>) const;
-  [[nodiscard]] ReceiveResult receive(std::chrono::milliseconds timeout) const;
+  // Waits up to `timeout` for a datagram. Sub-millisecond timeouts are honored
+  // where the OS allows (ppoll on Linux, a high-resolution timer on Windows);
+  // elsewhere they round up to 1 ms.
+  [[nodiscard]] ReceiveResult receive(std::chrono::nanoseconds timeout) const;
   void close() noexcept;
 
  private:

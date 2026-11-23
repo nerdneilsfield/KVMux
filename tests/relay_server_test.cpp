@@ -119,10 +119,41 @@ void encoder_failure_test() {
   assert(server.snapshot().failure.find("no encoder") != std::string::npos);
 }
 
+// Pad a JPEG with comment segments, which decoders skip, up to about `target`
+// bytes so one frame spans hundreds of datagrams like a real 1080p MJPEG frame.
+std::vector<std::uint8_t> padded_jpeg(const std::vector<std::uint8_t>& jpeg,
+                                      std::size_t target) {
+  std::vector<std::uint8_t> out(jpeg.begin(), jpeg.begin() + 2);
+  while (out.size() + jpeg.size() - 2 < target) {
+    out.insert(out.end(), {0xFF, 0xFE, 0xFF, 0xFF});
+    out.insert(out.end(), 65533, 0);
+  }
+  out.insert(out.end(), jpeg.begin() + 2, jpeg.end());
+  return out;
+}
+
+// The pacer's token bucket holds 2400 bytes, so the sender must wait for the
+// next packet instead of sleeping a whole receive() timeout between sends.
+// Otherwise throughput is bounded by loops per second times 2400 bytes (about
+// 2.4 MB/s at 1 ms, far below the 12 MB/s default) and large frames miss their
+// deadline.
+void large_frame_throughput_test(const char* jpeg) {
+  RelayFixture relay(jpeg);
+  relay.capture.jpeg = padded_jpeg(relay.capture.jpeg, 300'000);
+  GuiFixture gui(relay.options());
+  gui.activate();
+  const auto initial = gui.client->traffic_snapshot().video_received_bytes;
+  gui.run_for(1000ms);
+  const auto bytes =
+      gui.client->traffic_snapshot().video_received_bytes - initial;
+  assert(bytes > 5'000'000);
+}
+
 int main(int argc, char** argv) {
   assert(argc > 1);
   admission_policy_test();
   encoder_failure_test();
+  large_frame_throughput_test(argv[1]);
   {
     RelayFixture capped(argv[1], 24000);
     GuiFixture gui(capped.options());

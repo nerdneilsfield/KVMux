@@ -99,8 +99,8 @@ struct MediaPacerStats {
 };
 // Rate counts outer 32-byte envelope + body, NOT UDP/IP headers. Latest raw
 // source stays in the caller's existing mailbox. Caller services control before
-// pulling a bounded packet batch and checking control again (2400-byte burst
-// cap).
+// pulling a bounded packet batch and checking control again (burst cap: 2400
+// bytes or two milliseconds of the rate, whichever is larger).
 class MediaPacer {
  public:
   MediaPacer(VideoCodec, std::uint64_t generation,

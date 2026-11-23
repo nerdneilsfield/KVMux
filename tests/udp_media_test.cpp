@@ -323,6 +323,21 @@ void pacing() {
   auto deadline = hevc.next_deadline(epoch);
   assert(deadline && *deadline <= epoch + 100ms);
   assert(hevc.poll(epoch + 100ms).needs_idr);
+  // The bucket is two milliseconds deep at high rates, so a sender that wakes
+  // once per millisecond still sends the full rate of a large MJPEG frame
+  // (a 2400-byte bucket would take 125 ms for 300 KB at 1 ms wake-ups).
+  MediaPacer fast(VideoCodec::mjpeg, 7, 12000000, epoch);
+  auto large = make_frame(VideoCodec::mjpeg, 1, 300000);
+  large.first_arrival = epoch;
+  assert(fast.submit(large, epoch).accepted);
+  int finished_ms = -1;
+  for (int ms = 0; ms < 100 && finished_ms < 0; ++ms) {
+    const auto now = epoch + std::chrono::milliseconds(ms);
+    while (fast.next_datagram(now)) {
+    }
+    if (!fast.active_deadline()) finished_ms = ms;
+  }
+  assert(finished_ms >= 0 && finished_ms <= 40);
   // Long idle never accumulates more than 2400 total-envelope bytes.
   MediaPacer burst(VideoCodec::mjpeg, 7, 1000000, epoch);
   auto f = make_frame(VideoCodec::mjpeg, 1, 10000);
