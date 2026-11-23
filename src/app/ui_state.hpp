@@ -437,12 +437,29 @@ inline ImVec2 menu_icon_shown_pos(const OverlayFlags& overlay,
   return fits(candidates[3]);
 }
 
+// Share this machine: settings the panel edits, and the text main refreshes.
+// `encoding` indexes kShareEncodings: MJPEG, then H.264/H.265 quality/size.
+enum class SharePhase { idle, starting, running, stopping };
+inline constexpr const char* kShareEncodings[] = {
+    "MJPEG pass-through", "H.264 quality", "H.264 size", "H.265 quality",
+    "H.265 size"};
+struct ShareUi {
+  SharePhase phase{SharePhase::idle};
+  int encoding{0};
+  char bind_address[64]{"127.0.0.1"};
+  int control_port{17000};
+  int video_port{17001};
+  std::string error;
+  std::string status;
+};
+
 // Panels mutate these groups. config, recording, and the window are the
 // objects the draw code already wrote; they are not session calls.
 struct UiState {
   ConnectionForm connection;
   MediaUi media;
   PasteUi paste;
+  ShareUi share;
   OverlayFlags overlay;
   Config* config{nullptr};
   Recording* recording{nullptr};
@@ -502,6 +519,8 @@ enum class UiActionKind {
   start_windows_hex_paste,
   activate_control,
   set_video_rect,
+  start_share,
+  stop_share,
 };
 
 // Drawn panels append these. The frame loop runs each panel's list before

@@ -551,6 +551,69 @@ void append_media_menu(UiState& ui, const SessionView& view,
   }
 }
 
+void append_share(UiState& ui, const SessionView& view, UiActions& actions) {
+  auto& form = ui.connection;
+  auto& share = ui.share;
+  ImGui::SeparatorText("Share this machine");
+  if (share.phase == SharePhase::idle) {
+    if (ImGui::BeginCombo("Encoding", kShareEncodings[share.encoding])) {
+      for (int i = 0; i < static_cast<int>(std::size(kShareEncodings)); ++i)
+        if (ImGui::Selectable(kShareEncodings[i], i == share.encoding))
+          share.encoding = i;
+      ImGui::EndCombo();
+    }
+    ImGui::InputText("Bind address", share.bind_address,
+                     sizeof(share.bind_address));
+    ImGui::InputInt("Share control port", &share.control_port);
+    show_port_error(share.control_port, "Share control port");
+    ImGui::InputInt("Share video port", &share.video_port);
+    show_port_error(share.video_port, "Share video port");
+    const bool have_capture =
+        form.video_source == VideoSource::local && form.selected_device >= 0 &&
+        form.selected_device < static_cast<int>(form.devices.size()) &&
+        form.selected_mode >= 0 &&
+        form.selected_mode < static_cast<int>(form.modes.size());
+    const bool have_serial =
+        form.control_target == ControlTarget::local_serial &&
+        form.selected_port >= 0 &&
+        form.selected_port < static_cast<int>(form.ports.size());
+    const bool ports_ok =
+        relay_port_ok(share.control_port) && relay_port_ok(share.video_port);
+    const bool source_pending = form.draft_video != form.video_source ||
+                                form.draft_control != form.control_target;
+    const char* reason =
+        view.retiring ? "Stopping previous session..."
+        : view.relay_video_open || view.relay_control_open
+            ? "Disconnect the relay first."
+        : source_pending ? "Apply the connection changes first."
+        : !have_capture && !have_serial
+            ? "Select a capture device and mode, or a serial port."
+        : share.bind_address[0] == '\0' ? "Enter a bind address."
+        : !ports_ok                     ? "Enter a port from 1 to 65535."
+                                        : nullptr;
+    if (action_button("Start sharing", reason == nullptr, reason, true))
+      actions.add(action(UiActionKind::start_share));
+  } else {
+    if (share.phase == SharePhase::running) {
+      ImGui::TextUnformatted(share.status.c_str());
+      if (ImGui::Button("Stop sharing"))
+        actions.add(action(UiActionKind::stop_share));
+    } else if (share.phase == SharePhase::starting) {
+      ImGui::TextUnformatted("Starting...");
+      if (ImGui::Button("Cancel"))
+        actions.add(action(UiActionKind::stop_share));
+    } else {
+      ImGui::TextUnformatted("Stopping...");
+    }
+  }
+  if (!share.error.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::packed(theme::error));
+    ImGui::TextWrapped("%s", share.error.c_str());
+    ImGui::PopStyleColor();
+  }
+  ImGui::TextUnformatted("Unauthenticated. Trusted LAN only.");
+}
+
 void append_connections(UiState& ui, const SessionView& view,
                         UiActions& actions) {
   auto& form = ui.connection;
@@ -572,15 +635,18 @@ void append_connections(UiState& ui, const SessionView& view,
     form.open_connections = false;
     form.close_connections_when_ready = false;
   }
-  ImGui::Text("Video: %s", link_status_text(view.video).c_str());
-  if (require_control)
-    ImGui::Text("Control: %s", link_status_text(view.control).c_str());
-  ImGui::Separator();
+  const bool sharing = ui.share.phase != SharePhase::idle;
+  if (!sharing) {
+    ImGui::Text("Video: %s", link_status_text(view.video).c_str());
+    if (require_control)
+      ImGui::Text("Control: %s", link_status_text(view.control).c_str());
+    ImGui::Separator();
+  }
   const bool source_pending = form.draft_video != form.video_source ||
                               form.draft_control != form.control_target;
   const VideoSource shown_video = form.draft_video;
   const ControlTarget shown_control = form.draft_control;
-  const bool controls_enabled = !view.captured;
+  const bool controls_enabled = !view.captured && !sharing;
   ImGui::BeginDisabled(!controls_enabled);
   if (view.retiring) ImGui::TextUnformatted("Stopping previous session...");
   ImGui::BeginDisabled(view.retiring);
@@ -920,6 +986,7 @@ void append_connections(UiState& ui, const SessionView& view,
   host_key.usage = config.host_scancode;
   actions.add(std::move(host_key));
   ImGui::EndDisabled();
+  append_share(ui, view, actions);
   const auto window_pos = ImGui::GetWindowPos();
   const auto window_size = ImGui::GetWindowSize();
   form.panel_shown = true;

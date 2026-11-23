@@ -67,9 +67,62 @@ void admission_policy_test() {
   assert(reset.interval() == 20ms && !reset.latest());
 }
 
+// An encoder that cannot be created on the first client stops the workers; the
+// server must report that instead of staying bound and silent.
+struct RawModeCapture final : CaptureSource {
+  std::vector<DeviceInfo> enumerate_devices() override { return {}; }
+  std::vector<CaptureMode> enumerate_modes(const std::string&) override {
+    return {};
+  }
+  void start(const CaptureMode&) override {}
+  void stop() noexcept override {}
+  std::optional<CaptureSample> take_latest_sample() override { return {}; }
+  CaptureSnapshot snapshot() const override {
+    CaptureSnapshot out;
+    out.state = CaptureState::streaming;
+    out.actual_mode = {
+        "fake",   16, 16, {50, 1}, PixelFormat::yuv420p, PixelFormat::yuv420p,
+        "YUV420P"};
+    return out;
+  }
+};
+void encoder_failure_test() {
+  FakeSerial serial;
+  RawModeCapture capture;
+  Ch9329ControlSink sink{serial.io()};
+  sink.connect("fake", 115200);
+  assert(until([&] { return sink.snapshot().release_confirmed; }));
+  kvmux::relay::RelayServer server(
+      &capture, &sink,
+      [](kvmux::CodecBackend,
+         std::string& error) -> std::unique_ptr<kvmux::VideoEncoder> {
+        error = "no encoder";
+        return nullptr;
+      });
+  kvmux::relay::ServerOptions options;
+  options.bind_address = "127.0.0.1";
+  options.control_port = options.video_port = 0;
+  options.codec = kvmux::VideoCodec::h264;
+  std::string error;
+  assert(server.start(options, error));
+  assert(!server.snapshot().failed);
+  kvmux::relay::ClientOptions client;
+  client.control_port = server.control_port();
+  client.video_port = server.video_port();
+  GuiFixture gui(client);
+  assert(until(
+      [&] {
+        gui.run_for(20ms);
+        return server.snapshot().failed;
+      },
+      5000ms));
+  assert(server.snapshot().failure.find("no encoder") != std::string::npos);
+}
+
 int main(int argc, char** argv) {
   assert(argc > 1);
   admission_policy_test();
+  encoder_failure_test();
   {
     RelayFixture capped(argv[1], 24000);
     GuiFixture gui(capped.options());

@@ -26,6 +26,11 @@ struct ServerSnapshot {
   MediaPacerStats
       pacer{};  // sent_bytes means paced bytes, not confirmed socket delivery.
   MediaReason last_reason{MediaReason::none};
+  // Set when the worker threads stopped on their own (socket error, encoder
+  // failure). The sockets stay bound until stop(), so the server answers
+  // nothing while this is true.
+  bool failed{};
+  std::string failure;
 };
 // Either side may be null. Role is video when only capture is set, control
 // when only the sink is set, and both when both are set. Both null fails

@@ -55,6 +55,8 @@ struct RelayServer::Impl {
   std::uint64_t media_generation{};
   bool credit{}, keyframe{};
   std::string media_error;
+  bool failed{};
+  std::string failure;
   ServerSnapshot snapshot;
 
   Impl(CaptureSource* c, Ch9329ControlSink* s, EncoderFactory f)
@@ -739,6 +741,10 @@ struct RelayServer::Impl {
     revoke();
     {
       std::lock_guard lock(media_mutex);
+      if (fatal) {
+        failed = true;
+        failure = media_error.empty() ? "Relay network error" : media_error;
+      }
       media_generation = 0;
       credit = false;
       offer.reset();
@@ -805,6 +811,8 @@ bool RelayServer::start(const ServerOptions& options, std::string& error) {
   }
   p.stopping = false;
   p.media_error.clear();
+  p.failed = false;
+  p.failure.clear();
   if (p.role != wire::RelayRole::control)
     p.media_worker = std::thread([&p] { p.media_loop(); });
   p.network_worker = std::thread([&p] { p.run(); });
@@ -825,7 +833,10 @@ void RelayServer::stop() noexcept {
 }
 ServerSnapshot RelayServer::snapshot() const {
   std::lock_guard lock(impl_->media_mutex);
-  return impl_->snapshot;
+  auto value = impl_->snapshot;
+  value.failed = impl_->failed;
+  value.failure = impl_->failure;
+  return value;
 }
 std::uint16_t RelayServer::control_port() const {
   return impl_->control_socket ? impl_->control_socket->local_port().value_or(0)

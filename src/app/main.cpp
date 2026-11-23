@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,8 +28,10 @@
 #include "app/ui_panels.hpp"
 #include "app/ui_state.hpp"
 #include "app/ui_theme.hpp"
+#include "control/serial_worker.hpp"
 #include "network/relay_client.hpp"
 #include "network/relay_selection.hpp"
+#include "network/relay_server.hpp"
 #include "render/video_renderer.hpp"
 #include "support/config.hpp"
 #include "support/diagnostics.hpp"
@@ -61,6 +64,88 @@ struct TrafficRate {
     baseline.reset();
     bytes_per_second.reset();
   }
+};
+
+// Capture source, CH9329 sink and relay server for "Share this machine".
+// Member order makes the destructor stop the server before the sources it
+// reads. stop() joins threads, so destroy this off the UI thread.
+struct ShareHost {
+  std::unique_ptr<CaptureSource> capture;
+  std::unique_ptr<Ch9329ControlSink> sink;
+  std::unique_ptr<relay::RelayServer> server;
+
+  // Like KvmSession::shutdown, give the serial worker time to send the key and
+  // button release before the sink is destroyed; its own destructor waits only
+  // 50 ms.
+  ~ShareHost() {
+    server.reset();
+    if (!sink) return;
+    sink->disconnect();
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline &&
+           sink->snapshot().state != ControlConnectionState::disconnected)
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+
+  // Mirrors kvmux-relay --serve. A null mode_index means no capture, an empty
+  // serial means no sink.
+  bool start(const relay::ServerOptions& options,
+             const std::vector<CaptureMode>& modes,
+             std::optional<std::size_t> mode_index, const std::string& serial,
+             int baud, std::uint8_t address, std::string& error) {
+    try {
+      if (mode_index) {
+        const auto mode = relay::select_mode(modes, mode_index, options.codec);
+        capture = create_platform_capture_source();
+        capture->start(modes[mode]);
+        if (capture->snapshot().state == CaptureState::fault) {
+          error = capture->snapshot().error;
+          return false;
+        }
+      }
+      if (!serial.empty()) {
+        sink = std::make_unique<Ch9329ControlSink>();
+        sink->connect(serial, baud, address);
+      }
+      server = std::make_unique<relay::RelayServer>(capture.get(), sink.get());
+      return server->start(options, error);
+    } catch (const std::exception& failure) {
+      error = failure.what();
+      return false;
+    }
+  }
+  std::string status() const {
+    std::string text =
+        "Listening: " + std::to_string(server->control_port()) + " (control)";
+    if (server->video_port())
+      text += ", " + std::to_string(server->video_port()) + " (video)";
+    const auto line = [&](const char* name, const char* state,
+                          const std::string& detail) {
+      text += std::string("\n") + name + ": " + state;
+      if (!detail.empty()) text += " - " + detail;
+    };
+    if (capture) {
+      const auto snapshot = capture->snapshot();
+      line("Capture", capture_state_label(snapshot.state), snapshot.error);
+    }
+    if (sink) {
+      const auto snapshot = sink->snapshot();
+      line("Control", control_state_label(snapshot.state), snapshot.error);
+    }
+    if (capture)
+      line("Media", relay::media_reason_name(server->snapshot().last_reason),
+           {});
+    return text;
+  }
+};
+
+// Result of starting a ShareHost on a worker thread. A failed or cancelled
+// start keeps its host so the UI thread can hand it to a stop task.
+struct ShareStart {
+  std::unique_ptr<ShareHost> host;
+  std::string error;
+  bool ok{false};
 };
 
 GLuint load_brand_texture() {
@@ -626,6 +711,175 @@ int main(int argc, char** argv) {
     (void)session2->select_capture(form.devices[device_index],
                                    form.modes2[mode_index]);
   };
+  // Share this machine. The local session is retired first so the device and
+  // port are free, and an idle local session stays in its place meanwhile.
+  // Stopping joins threads, so it runs in an async task like retired sessions.
+  struct ShareResume {
+    std::optional<DeviceInfo> device;
+    std::optional<CaptureMode> mode;
+    std::string port;
+  } share_resume;
+  std::unique_ptr<ShareHost> share_host;
+  std::future<void> share_stop;
+  std::future<ShareStart> share_start;
+  auto share_status_at = std::chrono::steady_clock::time_point{};
+  const auto begin_share = [&] {
+    auto& form = ui.connection;
+    auto& share = ui.share;
+    if (share.phase != SharePhase::idle) return;
+    // A pending device or mode scan was queued on the session retired below;
+    // its result would never arrive, so wait for the scan to finish.
+    if (devices_future.valid() || modes_future) {
+      share.error = "Device scan in progress. Try again in a moment.";
+      return;
+    }
+    (void)recording.stop();
+    if (ui.media.scroll_active) {
+      recording.cancel_scroll("share-start");
+      ui.media.scroll_active = false;
+      ui.media.scroll_sample_after.reset();
+    }
+    close_second();
+    share_resume = {};
+    const auto before = session->snapshot();
+    const bool previewing = before.capture.state == CaptureState::streaming ||
+                            before.capture.state == CaptureState::starting;
+    if (previewing && form.video_source == VideoSource::local &&
+        form.selected_device >= 0 &&
+        form.selected_device < static_cast<int>(form.devices.size()) &&
+        form.selected_mode >= 0 &&
+        form.selected_mode < static_cast<int>(form.modes.size())) {
+      share_resume.device =
+          form.devices[static_cast<std::size_t>(form.selected_device)];
+      share_resume.mode =
+          form.modes[static_cast<std::size_t>(form.selected_mode)];
+    }
+    if (before.control.state != ControlConnectionState::disconnected &&
+        before.control.state != ControlConnectionState::fault &&
+        form.control_target == ControlTarget::local_serial &&
+        form.selected_port >= 0 &&
+        form.selected_port < static_cast<int>(form.ports.size()))
+      share_resume.port =
+          form.ports[static_cast<std::size_t>(form.selected_port)].name;
+    share.error.clear();
+    share.status.clear();
+    retire_session();
+    diagnostics = std::make_shared<Diagnostics>();
+    session = std::make_unique<KvmSession>(diagnostics);
+    (void)session->set_mouse_mode(config.mouse_mode);
+    session->set_capture_only(form.capture_only);
+    session->set_host_key(config.host_scancode);
+    session->set_keep_alive(config.keep_alive);
+    current_frame.reset();
+    drop_primary_texture();
+    form.open_connections = true;
+    share.phase = SharePhase::starting;
+    spdlog::info("Share: starting");
+  };
+  // Capture start and the server bind can block, so they run off the UI thread.
+  const auto start_share_now = [&] {
+    auto& form = ui.connection;
+    auto& share = ui.share;
+    relay::ServerOptions options;
+    options.bind_address = share.bind_address;
+    options.control_port = static_cast<std::uint16_t>(share.control_port);
+    options.video_port = static_cast<std::uint16_t>(share.video_port);
+    if (share.encoding >= 1) {
+      options.codec = share.encoding <= 2 ? VideoCodec::h264 : VideoCodec::hevc;
+      options.priority = share.encoding % 2 == 1 ? EncodingPriority::quality
+                                                 : EncodingPriority::size;
+    }
+    std::optional<std::size_t> mode_index;
+    if (form.video_source == VideoSource::local && form.selected_device >= 0 &&
+        form.selected_device < static_cast<int>(form.devices.size()) &&
+        form.selected_mode >= 0 &&
+        form.selected_mode < static_cast<int>(form.modes.size()))
+      mode_index = static_cast<std::size_t>(form.selected_mode);
+    std::string serial;
+    if (form.control_target == ControlTarget::local_serial &&
+        form.selected_port >= 0 &&
+        form.selected_port < static_cast<int>(form.ports.size()))
+      serial = form.ports[static_cast<std::size_t>(form.selected_port)].name;
+    share_start =
+        std::async(std::launch::async, [options, modes = form.modes, mode_index,
+                                        serial, baud = config.serial_baud_rate,
+                                        address = config.serial_address] {
+          ShareStart result;
+          result.host = std::make_unique<ShareHost>();
+          result.ok = result.host->start(options, modes, mode_index, serial,
+                                         baud, address, result.error);
+          return result;
+        });
+  };
+  const auto end_share = [&] {
+    auto& share = ui.share;
+    if (share.phase != SharePhase::running &&
+        share.phase != SharePhase::starting)
+      return;
+    if (share_host)
+      share_stop =
+          std::async(std::launch::async,
+                     [old = std::move(share_host)]() mutable { old.reset(); });
+    share.phase = SharePhase::stopping;
+    spdlog::info("Share: stopping");
+  };
+  const auto tick_share = [&] {
+    auto& share = ui.share;
+    const auto now = std::chrono::steady_clock::now();
+    if (share.phase == SharePhase::starting && retired_sessions.empty() &&
+        !share_start.valid())
+      start_share_now();
+    if (share_start.valid() && share_start.wait_for(std::chrono::seconds(0)) ==
+                                   std::future_status::ready) {
+      auto result = share_start.get();
+      if (share.phase == SharePhase::starting && result.ok) {
+        share_host = std::move(result.host);
+        share_status_at = {};
+        share.phase = SharePhase::running;
+        spdlog::info("Share: listening control={} video={}",
+                     share_host->server->control_port(),
+                     share_host->server->video_port());
+      } else {
+        // Failed, or cancelled while starting: stop whatever was started.
+        if (share.phase == SharePhase::starting) {
+          share.error =
+              result.error.empty() ? "Could not start sharing." : result.error;
+          spdlog::warn("Share: start failed: {}", share.error);
+        }
+        share_stop = std::async(
+            std::launch::async,
+            [old = std::move(result.host)]() mutable { old.reset(); });
+        share.phase = SharePhase::stopping;
+      }
+    }
+    if (share.phase == SharePhase::running && share_host &&
+        now - share_status_at >= std::chrono::milliseconds(500)) {
+      const auto server_state = share_host->server->snapshot();
+      if (server_state.failed) {
+        share.error = server_state.failure;
+        spdlog::warn("Share: server stopped: {}", share.error);
+        end_share();
+      } else {
+        share.status = share_host->status();
+        share_status_at = now;
+      }
+    }
+    if (share.phase == SharePhase::stopping && retired_sessions.empty() &&
+        !share_start.valid() &&
+        (!share_stop.valid() || share_stop.wait_for(std::chrono::seconds(0)) ==
+                                    std::future_status::ready)) {
+      if (share_stop.valid()) share_stop.get();
+      if (share_resume.device && share_resume.mode)
+        (void)session->select_capture(*share_resume.device, *share_resume.mode);
+      if (!share_resume.port.empty())
+        (void)session->connect_control(
+            share_resume.port, config.serial_baud_rate, config.serial_address);
+      share_resume = {};
+      share.status.clear();
+      share.phase = SharePhase::idle;
+      spdlog::info("Share: stopped");
+    }
+  };
   load_connection(ui.connection, config);
   session->set_capture_only(ui.connection.capture_only);
   bool restore_capture = config.video_source == VideoSource::local &&
@@ -736,6 +990,12 @@ int main(int argc, char** argv) {
         case UiActionKind::set_video_rect:
           session->set_video_rect(item.video_rect);
           break;
+        case UiActionKind::start_share:
+          begin_share();
+          break;
+        case UiActionKind::stop_share:
+          end_share();
+          break;
       }
     }
   };
@@ -759,6 +1019,7 @@ int main(int argc, char** argv) {
       return future.wait_for(std::chrono::seconds(0)) ==
              std::future_status::ready;
     });
+    tick_share();
     refresh_host();
     SDL_Event event;
     while (SDL_PollEvent(&event)) route_sdl_event(event, host, ui);
@@ -1176,6 +1437,7 @@ int main(int argc, char** argv) {
   }
   close_second();
   recording.shutdown();
+  share_host.reset();
   session->shutdown();
   if (pref) {
     int w{}, h{};
