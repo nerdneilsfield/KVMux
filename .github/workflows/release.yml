@@ -19,7 +19,9 @@ jobs:
             preset: windows-release
             name: windows-x64
             # Use the prebuilt dependency tree; never install vcpkg ports here.
-            configure-args: -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-release
+            # clang-cl rejects a precompiled header that ccache restored with a
+            # newer source mtime, so build without precompiled headers.
+            configure-args: -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-release -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
           - os: macos-15
             preset: macos-release
             name: macos-arm64
