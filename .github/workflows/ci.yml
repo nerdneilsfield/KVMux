@@ -6,7 +6,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             preset: macos-debug
           - os: ubuntu-24.04
             preset: linux-debug
@@ -17,6 +17,8 @@ jobs:
           - os: ubuntu-24.04
             preset: linux-debug-headless
     runs-on: ${{ matrix.os }}
+    # The first Windows run builds FFmpeg through vcpkg; later runs reuse the cache.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Install host dependencies (macOS)
@@ -32,6 +34,23 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: choco install -y ninja
+      # vcpkg removed the x-gha provider that run-vcpkg sets by default, so use a
+      # files cache saved with actions/cache. run-vcpkg keeps a preset value.
+      - name: Configure vcpkg binary cache (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'vcpkg-bincache'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          "VCPKG_BINARY_SOURCES=clear;files,$dir,readwrite" >> $env:GITHUB_ENV
+      - name: Restore vcpkg binary cache (Windows)
+        id: vcpkg-cache
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bincache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'CMakePresets.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
       - name: Set up vcpkg (Windows)
         if: runner.os == 'Windows'
         uses: lukka/run-vcpkg@v11
@@ -44,25 +63,23 @@ jobs:
           if ((Get-FileHash $bin -Algorithm SHA256).Hash -ne '19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8') {
             throw 'libusb Windows archive checksum mismatch'
           }
-          $src = Join-Path $env:RUNNER_TEMP 'libusb-1.0.27.tar.bz2'
-          Invoke-WebRequest 'https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2' -OutFile $src
-          if ((Get-FileHash $src -Algorithm SHA256).Hash -ne 'ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575') {
-            throw 'libusb source archive checksum mismatch'
-          }
           $root = Join-Path $env:RUNNER_TEMP 'libusb-1.0.27-windows'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
           if (-not (Test-Path $seven)) { throw '7-Zip is required to extract libusb-1.0.27.7z' }
           & $seven x $bin "-o$root" -y
           if ($LASTEXITCODE -ne 0) { throw 'libusb archive extraction failed' }
-          $srcDir = Join-Path $env:RUNNER_TEMP 'libusb-src'
-          New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
-          tar -xjf $src -C $srcDir
-          if ($LASTEXITCODE -ne 0) { throw 'libusb source extraction failed' }
-          Copy-Item (Join-Path $srcDir 'libusb-1.0.27\COPYING') (Join-Path $root 'COPYING')
+          # The binary archive has no COPYING; the 1.0.27 text is kept in the repo.
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'third_party\libusb-1.0.27\COPYING') (Join-Path $root 'COPYING')
           "LIBUSB_ROOT=$root" >> $env:GITHUB_ENV
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
+      - name: Save vcpkg binary cache (Windows)
+        if: always() && runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bincache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'CMakePresets.json') }}
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --parallel
       - name: Test
@@ -90,6 +107,7 @@ jobs:
           if [ -x stage/bin/kvmux ]; then stage/bin/kvmux --help; fi
   linux-sanitizers:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libusb-1.0-0-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev

@@ -62,7 +62,7 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 
 ## libusb runtime (not vendored)
 
-- Not downloaded by CMake and not stored under `third_party/`.
+- Not downloaded by CMake. Only the license text is stored under `third_party/`.
 - License: LGPL-2.1-or-later. Upstream `COPYING` is the GNU Lesser General
   Public License, version 2.1, and `libusb.h` grants version 2.1 or any later
   version. KVMux does not modify libusb.
@@ -74,11 +74,14 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
   Archive: https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.7z
   SHA-256: `19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8`.
   That archive has the DLL and import library. It does not include `COPYING`.
-- Windows license text: official source `libusb-1.0.27.tar.bz2`.
-  Archive: https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2
-  SHA-256: `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`.
-  CI copies `libusb-1.0.27/COPYING` to the root of `LIBUSB_ROOT`. The Windows
-  build then copies `libusb-1.0.dll` and that `COPYING` next to the executables.
+- Windows license text: `libusb-1.0.27/COPYING`, copied unchanged from the
+  official source `libusb-1.0.27.tar.bz2`
+  (https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2,
+  SHA-256 `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`).
+  File SHA-256: `5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a`.
+  CI copies it to the root of `LIBUSB_ROOT`. The Windows build then copies
+  `libusb-1.0.dll` and that `COPYING` next to the executables. Replace it when
+  the Windows libusb version changes.
 - A binary distribution must ship the LGPL notice and a corresponding-source
   offer for the libusb version that was actually linked. A link to upstream
   alone is not that offer.

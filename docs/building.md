@@ -254,11 +254,9 @@ SHA-256 `19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8`).
 That tree must contain `include/libusb.h` or `include/libusb-1.0/libusb.h`,
 and for an x64 MSVC build `VS2022/MS64/dll/libusb-1.0.dll` together with
 `libusb-1.0.lib`. The official `.7z` does not contain the license text. Copy
-`COPYING` from the official source tarball
-`libusb-1.0.27.tar.bz2`
-(<https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2>,
-SHA-256 `ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575`)
-to the root of `LIBUSB_ROOT`. The build then installs it beside the DLL.
+`third_party/libusb-1.0.27/COPYING` (taken unchanged from the 1.0.27 source
+tarball) to the root of `LIBUSB_ROOT`. The build then installs it beside the
+DLL.
 
 libusb is LGPL-2.1-or-later and is linked dynamically. KVMux does not modify
 it. A binary distribution keeps that license notice and a corresponding-source
