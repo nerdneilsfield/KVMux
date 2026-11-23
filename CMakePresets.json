@@ -47,8 +47,8 @@
     {"name": "macos-sanitizers-headless", "configurePreset": "macos-sanitizers-headless", "output": {"outputOnFailure": true}},
     {"name": "linux-debug", "configurePreset": "linux-debug", "output": {"outputOnFailure": true}},
     {"name": "linux-debug-headless", "configurePreset": "linux-debug-headless", "output": {"outputOnFailure": true}},
-    {"name": "linux-sanitizers", "configurePreset": "linux-sanitizers", "output": {"outputOnFailure": true}},
-    {"name": "linux-sanitizers-headless", "configurePreset": "linux-sanitizers-headless", "output": {"outputOnFailure": true}},
+    {"name": "linux-sanitizers", "configurePreset": "linux-sanitizers", "output": {"outputOnFailure": true}, "environment": {"LSAN_OPTIONS": "suppressions=${sourceDir}/tests/lsan.supp"}},
+    {"name": "linux-sanitizers-headless", "configurePreset": "linux-sanitizers-headless", "output": {"outputOnFailure": true}, "environment": {"LSAN_OPTIONS": "suppressions=${sourceDir}/tests/lsan.supp"}},
     {"name": "windows-debug", "configurePreset": "windows-debug", "output": {"outputOnFailure": true}},
     {"name": "windows-debug-headless", "configurePreset": "windows-debug-headless", "output": {"outputOnFailure": true}}
   ]

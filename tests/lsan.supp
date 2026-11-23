@@ -1,0 +1,4 @@
+# LeakSanitizer suppressions for the linux-sanitizers test presets.
+# libx265 3.5 (Ubuntu 24.04 libx265-199) leaks parameter copies inside
+# x265_encoder_open; every frame on those stacks is in libx265 or libavcodec.
+leak:libx265.so
