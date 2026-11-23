@@ -71,7 +71,7 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --parallel
       - name: Install
-        run: cmake --install build/${{ matrix.preset }} --prefix stage
+        run: cmake --install build/${{ matrix.preset }} --prefix "$PWD/stage"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
