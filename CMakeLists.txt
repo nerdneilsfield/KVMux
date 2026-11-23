@@ -499,3 +499,22 @@ foreach(dependency IN ITEMS SDL imgui libserialport glad nlohmann_json spdlog fo
     install(FILES ${dependency_notices}
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/kvmux/licenses/${dependency}")
 endforeach()
+
+# Linux .deb for the release workflow: `cpack -G DEB` in a Linux build tree.
+# dpkg-shlibdeps derives the FFmpeg/libusb package dependencies of the Ubuntu
+# release that built it. The package installs under /opt/kvmux because it
+# carries its own libSDL3.so.0, which must not collide with a system SDL3.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_PACKAGE_NAME "kvmux")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Low-latency KVM viewer for USB capture and CH9329 control")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/nerdneilsfield/KVMux")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/kvmux")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "KVMux <https://github.com/nerdneilsfield/KVMux>")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "video")
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    # The bundled SDL3 is private to the package, not a dependency to resolve.
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "${CMAKE_BINARY_DIR}/third_party/SDL")
+    include(CPack)
+endif()

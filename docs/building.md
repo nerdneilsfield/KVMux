@@ -127,7 +127,11 @@ and set `VCPKG_ROOT` to that checkout. Use a standalone git clone; the vcpkg
 copy bundled under `VC\vcpkg` in Visual Studio may fail to resolve the
 manifest's `builtin-baseline`. The manifest pins a vcpkg baseline, so the
 FFmpeg port version is reproducible from `vcpkg.json`; record the FFmpeg
-version shipped with each Windows release. Set `VCPKG_ROOT` before configuring:
+version shipped with each Windows release. All windows presets install the
+manifest into one shared `build/vcpkg_installed`, so FFmpeg is built once and a
+second preset reuses it. `windows-release` already builds both `kvmux.exe` and
+`kvmux-relay.exe`; the headless presets are only for hosts without the GUI
+dependencies. Set `VCPKG_ROOT` before configuring:
 
 ```powershell
 cmake --preset windows-debug

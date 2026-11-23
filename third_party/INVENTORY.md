@@ -33,7 +33,11 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
 ## FFmpeg runtime (not vendored)
 
 - Windows: built from the root vcpkg manifest (`vcpkg.json`), port `ffmpeg`,
-  default `x64-windows` triplet. The FFmpeg version follows the manifest's
+  default `x64-windows` triplet. Release builds do not build it: the manual
+  Dependencies workflow (`.github/workflows/deps.yml`) builds the same manifest
+  once with the `x64-windows-release` triplet and publishes the installed tree
+  as a prerelease asset; the release workflow downloads it by the tag and
+  SHA-256 pinned in `.github/actions/setup/action.yml`. The FFmpeg version follows the manifest's
   pinned `builtin-baseline`; record the version and port feature set for each
   release.
 - Enabled features: the port defaults plus `gpl`, `x264` and `x265` (decision
@@ -48,7 +52,9 @@ The listed archives were acquired explicitly while updating dependencies. CMake 
   FFmpeg and bundled codec-library sources, patches and build instructions, or a
   valid corresponding-source offer. A link to upstream alone is not a source offer.
 - macOS/Linux use host FFmpeg libraries; their version, enabled features and
-  license obligations depend on the host package. No FFmpeg sources are modified
+  license obligations depend on the host package. Release packages for both use
+  Homebrew's `ffmpeg` (with x264 and x265, so GPL), installed separately by the
+  user and not shipped in the Linux archive. No FFmpeg sources are modified
   by KVMux, and configure does not download FFmpeg on those platforms.
 
 ## Inter

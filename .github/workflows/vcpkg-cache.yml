@@ -1,0 +1,29 @@
+# Disabled; only the Release workflow runs. Uncomment to restore.
+
+# name: vcpkg cache
+# # Tag runs can only restore caches saved on the default branch. Rebuild the
+# # Windows vcpkg binary cache on master whenever the manifest changes, so a
+# # release tag does not have to build FFmpeg, x264 and x265 from source.
+# on:
+#   push:
+#     branches: [master]
+#     paths: [vcpkg.json]
+#   workflow_dispatch:
+# jobs:
+#   windows:
+#     runs-on: windows-2022
+#     timeout-minutes: 120
+#     steps:
+#       - uses: actions/checkout@v4
+#       - id: setup
+#         uses: ./.github/actions/setup
+#         with:
+#           ccache-key: windows-release
+#       - name: Install vcpkg dependencies
+#         run: cmake --preset windows-release
+#       - name: Save vcpkg binary cache
+#         if: always() && steps.setup.outputs.vcpkg-cache-hit != 'true'
+#         uses: actions/cache/save@v4
+#         with:
+#           path: ${{ runner.temp }}/vcpkg-bincache
+#           key: ${{ steps.setup.outputs.vcpkg-cache-key }}

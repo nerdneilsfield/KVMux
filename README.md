@@ -33,8 +33,9 @@ identifying the capture and serial devices.
 ## Get KVMux
 
 Build from source using the [build guide](docs/building.md). The repository's
-[CI](.github/workflows/ci.yml) builds and tests source; it does not publish
-installer downloads. You need a C++20 compiler, CMake, Ninja and FFmpeg development
+[Release](.github/workflows/release.yml) workflow builds Windows, macOS and
+Linux packages for each `v*` tag and attaches them to a draft GitHub Release; it
+runs no tests. The test CI (`ci.yml`) is disabled. You need a C++20 compiler, CMake, Ninja and FFmpeg development
 libraries, including avformat. Windows builds require an MSVC developer shell.
 
 On macOS with a C++20 compiler and CMake installed, install Ninja and FFmpeg

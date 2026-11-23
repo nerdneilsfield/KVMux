@@ -1,0 +1,98 @@
+name: Set up KVMux build dependencies
+description: >
+  Host packages on Linux and macOS. On Windows: MSVC environment, Ninja, the
+  prebuilt dependency archive from the Dependencies workflow, and the official
+  libusb 1.0.27 build. ccache for every compiler.
+inputs:
+  ccache-key:
+    description: Per-preset key for the compiler cache.
+    required: true
+  linux-deps:
+    description: Where Linux FFmpeg and libusb come from, apt (for .deb) or brew.
+    default: apt
+runs:
+  using: composite
+  steps:
+    - name: Install host dependencies (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install ninja ffmpeg pkg-config libusb
+    - name: Install host dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y ninja-build ${{ inputs.linux-deps == 'apt' && 'libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libusb-1.0-0-dev' || '' }} libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev
+    # FFmpeg and libusb come from Homebrew bottles (x86_64 and arm64 Linux), so
+    # one Linux package per architecture runs on any distribution with Homebrew
+    # and glibc 2.39+ instead of being tied to one Ubuntu release's FFmpeg.
+    - name: Install FFmpeg and libusb from Homebrew (Linux)
+      if: runner.os == 'Linux' && inputs.linux-deps == 'brew'
+      shell: bash
+      run: |
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        brew install ffmpeg libusb
+        prefix="$(brew --prefix)"
+        echo "CMAKE_PREFIX_PATH=$prefix" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+    # Unchanged translation units, including the vendored SDL, come from the
+    # cache instead of being recompiled on every run.
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ inputs.ccache-key }}
+        max-size: 500M
+    - name: Use ccache as the compiler launcher
+      shell: bash
+      run: |
+        echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+        echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+    - name: Set up MSVC (Windows)
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Install Ninja (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: choco install -y ninja
+    # Prebuilt FFmpeg, x264 and x265 from the Dependencies workflow, pinned by
+    # tag and SHA-256 the way Sunshine and OBS pin their dependency archives.
+    # Configure then points the vcpkg toolchain at this tree and builds no port.
+    - name: Download prebuilt dependencies (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        KVMUX_DEPS_TAG: deps-2026.11.23
+        KVMUX_DEPS_SHA256: A70AAE337589558F6E1DE1C17FD8105820B1F4F11B47895A8DCB4A2FD2A43905
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if (-not $env:KVMUX_DEPS_TAG) {
+          throw 'No prebuilt dependencies pinned. Run the Dependencies workflow, then set KVMUX_DEPS_TAG and KVMUX_DEPS_SHA256 in .github/actions/setup/action.yml.'
+        }
+        $dir = Join-Path $env:RUNNER_TEMP 'kvmux-deps'
+        gh release download $env:KVMUX_DEPS_TAG --repo $env:GITHUB_REPOSITORY --pattern kvmux-deps-windows-x64.zip --dir $dir
+        if ($LASTEXITCODE -ne 0) { throw 'dependency archive download failed' }
+        $zip = Join-Path $dir 'kvmux-deps-windows-x64.zip'
+        if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:KVMUX_DEPS_SHA256) {
+          throw 'dependency archive checksum mismatch'
+        }
+        & (Join-Path $env:ProgramFiles '7-Zip\7z.exe') x $zip "-o$dir" -y
+        if ($LASTEXITCODE -ne 0) { throw 'dependency archive extraction failed' }
+        # Only the toolchain script is used from the runner's own vcpkg.
+        "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+        "KVMUX_DEPS_DIR=$(Join-Path $dir 'vcpkg_installed')" >> $env:GITHUB_ENV
+    - name: Install libusb (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $bin = Join-Path $env:RUNNER_TEMP 'libusb-1.0.27.7z'
+        Invoke-WebRequest 'https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.7z' -OutFile $bin
+        if ((Get-FileHash $bin -Algorithm SHA256).Hash -ne '19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8') {
+          throw 'libusb Windows archive checksum mismatch'
+        }
+        $root = Join-Path $env:RUNNER_TEMP 'libusb-1.0.27-windows'
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        $seven = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+        if (-not (Test-Path $seven)) { throw '7-Zip is required to extract libusb-1.0.27.7z' }
+        & $seven x $bin "-o$root" -y
+        if ($LASTEXITCODE -ne 0) { throw 'libusb archive extraction failed' }
+        # The binary archive has no COPYING; the 1.0.27 text is kept in the repo.
+        Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'third_party\libusb-1.0.27\COPYING') (Join-Path $root 'COPYING')
+        "LIBUSB_ROOT=$root" >> $env:GITHUB_ENV

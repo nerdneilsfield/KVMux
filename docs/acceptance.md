@@ -52,7 +52,7 @@ commands have since been replaced; use [current build instructions](building.md)
 | Linux adapter syntax | passed | `zig c++ -target x86_64-linux-gnu ... capture_v4l2.cpp` |
 | Windows build | not run locally | Media Foundation source and CI job exist; no Windows toolchain evidence in this record |
 | Linux build | not run locally | V4L2 source and CI job exist; no Ubuntu host evidence in this record |
-| CI | configured, not yet observed | `.github/workflows/ci.yml` has macOS, Ubuntu and Windows jobs plus Linux sanitizers |
+| CI | passed 2026-11-23 (run 45136011688) | All jobs green on macOS 15, Ubuntu 24.04 and Windows 2022, plus Linux sanitizers. `ci.yml` has since been disabled; only `release.yml` (build and package, no tests) runs |
 
 ## Hardware and performance evidence
 

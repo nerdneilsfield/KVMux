@@ -1,0 +1,121 @@
+name: Release
+# The only CI workflow. Pushing a v* tag builds every platform and opens a
+# draft GitHub Release with the packages; nothing is tested. Manual dispatch
+# builds the same packages as artifacts only, and on master also refreshes the
+# Windows vcpkg cache that tag runs restore.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            preset: windows-release
+            name: windows-x64
+            # Use the prebuilt dependency tree; never install vcpkg ports here.
+            configure-args: -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-release
+          - os: macos-15
+            preset: macos-release
+            name: macos-arm64
+          # Linux Homebrew archives link Homebrew's FFmpeg and libusb, so one
+          # build per architecture runs anywhere with Homebrew and glibc 2.39+.
+          - os: ubuntu-24.04
+            preset: linux-release
+            name: linux-brew-x64
+            linux-deps: brew
+          - os: ubuntu-24.04-arm
+            preset: linux-release
+            name: linux-brew-arm64
+            linux-deps: brew
+          # .deb packages link the release's own FFmpeg, one per Ubuntu release.
+          - os: ubuntu-24.04
+            preset: linux-release
+            name: ubuntu24.04-amd64
+            linux-deps: apt
+          - os: ubuntu-24.04-arm
+            preset: linux-release
+            name: ubuntu24.04-arm64
+            linux-deps: apt
+          - os: ubuntu-26.04
+            preset: linux-release
+            name: ubuntu26.04-amd64
+            linux-deps: apt
+          - os: ubuntu-26.04-arm
+            preset: linux-release
+            name: ubuntu26.04-arm64
+            linux-deps: apt
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      PACKAGE: kvmux-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: setup
+        uses: ./.github/actions/setup
+        with:
+          ccache-key: ${{ matrix.name }}
+          linux-deps: ${{ matrix.linux-deps || 'apt' }}
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.configure-args }} "-DVCPKG_INSTALLED_DIR=${{ env.KVMUX_DEPS_DIR }}"
+      - name: Configure
+        if: runner.os != 'Windows'
+        # The Homebrew archive keeps Homebrew's lib directory in its RUNPATH.
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.linux-deps == 'brew' && '-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON' || '' }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+      - name: Install
+        run: cmake --install build/${{ matrix.preset }} --prefix stage
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # vcpkg keeps each port's license as share/<port>/copyright; ship the
+          # GPL FFmpeg, x264 and x265 texts with their DLLs.
+          foreach ($port in 'ffmpeg', 'x264', 'x265') {
+            $src = "$env:KVMUX_DEPS_DIR/x64-windows-release/share/$port/copyright"
+            if (-not (Test-Path $src)) { throw "missing $src" }
+            $dst = "stage/share/kvmux/licenses/$port"
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item $src $dst
+          }
+          Compress-Archive -Path stage/* -DestinationPath "$env:PACKAGE.zip"
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k stage "$PACKAGE.zip"
+      - name: Package (Linux Homebrew archive)
+        if: matrix.linux-deps == 'brew'
+        run: tar -C stage -czf "$PACKAGE.tar.gz" .
+      - name: Package (Linux .deb)
+        if: matrix.linux-deps == 'apt'
+        run: |
+          version_args=()
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version_args=(-D "CPACK_PACKAGE_VERSION=${GITHUB_REF_NAME#v}")
+          fi
+          (cd build/${{ matrix.preset }} && cpack -G DEB "${version_args[@]}" -D "CPACK_DEBIAN_FILE_NAME=$PACKAGE.deb")
+          mv "build/${{ matrix.preset }}/$PACKAGE.deb" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.*
+          if-no-files-found: error
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --generate-notes --verify-tag

@@ -28,8 +28,8 @@ KVMux 使用外接硬件，不是软件屏幕共享工具。可用的采集模�
 
 ## 获取 KVMux
 
-按[构建指南](docs/building.md)从源码构建。仓库的 [CI](.github/workflows/ci.yml)
-会构建和测试源码，但不发布安装包下载。构建需要 C++20 编译器、CMake、Ninja 和 FFmpeg 开发库（包括 avformat）。
+按[构建指南](docs/building.md)从源码构建。仓库的 [Release](.github/workflows/release.yml) workflow
+在推送 `v*` tag 时构建 Windows、macOS 和 Linux 安装包，并附在 GitHub Release 草稿上，不跑测试。测试用的 CI（`ci.yml`）已停用。构建需要 C++20 编译器、CMake、Ninja 和 FFmpeg 开发库（包括 avformat）。
 Windows 构建需要在 MSVC 开发者命令行中运行。
 
 macOS 用户安装 C++20 编译器和 CMake 后，可用 Homebrew 安装 Ninja 和 FFmpeg，
