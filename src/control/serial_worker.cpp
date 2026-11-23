@@ -845,6 +845,18 @@ struct Ch9329ControlSink::Impl {
     // and tests never initialise SDL, so each 1 ms wait below would sleep a
     // whole 15.6 ms scheduler tick per ACK poll.
     timeBeginPeriod(1);
+    // Windows 11 ignores that request for a minimized or covered window unless
+    // the process opts out, and the relay loop and ACK polling both rely on
+    // 1 ms waits.
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    throttling.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                          &throttling, sizeof(throttling));
     struct TimerPeriod {
       TimerPeriod() = default;
       TimerPeriod(const TimerPeriod&) = delete;
