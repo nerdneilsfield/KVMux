@@ -913,12 +913,11 @@ bool Recording::stop() {
          result == std::string_view{"idle"};
 }
 void Recording::ensure_worker() {
-  if (!worker_.joinable())
-    worker_ = std::jthread([this](std::stop_token token) { worker(token); });
+  if (!worker_.joinable()) worker_ = std::thread([this] { worker(); });
 }
-void Recording::worker(std::stop_token token) {
+void Recording::worker() {
   SwsContextPtr scroll_convert(nullptr, sws_freeContext);
-  while (!token.stop_requested()) {
+  while (true) {
     std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> begin;
     std::optional<VideoFrame> next, scroll_next;
     std::optional<ScrollRequest> scroll_begin;
@@ -926,12 +925,12 @@ void Recording::worker(std::stop_token token) {
     bool stop = false, scroll_finish = false, scroll_cancel = false;
     {
       std::unique_lock lock(mutex_);
-      wake_.wait(lock, token, [this] {
-        return start_ || snapshot_ || latest_ || stop_requested_ ||
+      wake_.wait(lock, [this] {
+        return shutdown_ || start_ || snapshot_ || latest_ || stop_requested_ ||
                scroll_start_ || scroll_latest_ || scroll_finish_ ||
                scroll_cancel_;
       });
-      if (token.stop_requested()) break;
+      if (shutdown_) break;
       begin = std::move(start_);
       start_.reset();
       shot = std::move(snapshot_);
@@ -1150,9 +1149,14 @@ void Recording::worker(std::stop_token token) {
 }
 void Recording::shutdown() noexcept {
   if (worker_.joinable()) {
-    worker_.request_stop();
+    {
+      std::lock_guard lock(mutex_);
+      shutdown_ = true;
+    }
     wake_.notify_all();
     worker_.join();
+    std::lock_guard lock(mutex_);
+    shutdown_ = false;
   }
 }
 }  // namespace kvmux

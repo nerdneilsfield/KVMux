@@ -159,7 +159,7 @@ class Recording final {
   [[nodiscard]] bool snapshot_now(const VideoFrame& frame,
                                   std::optional<FrameCrop> crop);
   [[nodiscard]] bool write_frame(const VideoFrame& frame);
-  void worker(std::stop_token stop_token);
+  void worker();
   void ensure_worker();
   void fail(std::string message) noexcept;
 
@@ -169,7 +169,7 @@ class Recording final {
   std::filesystem::path output_directory_;
   std::chrono::steady_clock::time_point paused_at_{};
   std::chrono::steady_clock::duration paused_duration_{};
-  std::condition_variable_any wake_;
+  std::condition_variable wake_;
   std::optional<VideoFrame> latest_;
   std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> snapshot_;
   struct ScrollRequest {
@@ -185,7 +185,10 @@ class Recording final {
   bool scroll_cancel_{};
   std::optional<std::pair<VideoFrame, std::optional<FrameCrop>>> start_;
   bool stop_requested_{};
-  std::jthread worker_;
+  // std::thread, not std::jthread: Xcode 16's libc++ still gates jthread
+  // behind -fexperimental-library.
+  bool shutdown_{};
+  std::thread worker_;
 };
 
 }  // namespace kvmux
