@@ -333,19 +333,22 @@ if(BUILD_TESTING)
     target_link_libraries(kvmux_relay_session_test PRIVATE kvmux::core)
     add_test(NAME relay_session COMMAND kvmux_relay_session_test)
 
-    add_executable(kvmux_relay_role_test tests/relay_role_test.cpp)
-    target_link_libraries(kvmux_relay_role_test PRIVATE kvmux::core)
-    add_test(NAME relay_role COMMAND kvmux_relay_role_test
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
-        "$<TARGET_FILE:kvmux-relay>")
-    set_tests_properties(relay_role PROPERTIES TIMEOUT 60)
+    # These two drive kvmux-relay with fork/execv/waitpid, so they are POSIX-only.
+    if(NOT WIN32)
+        add_executable(kvmux_relay_role_test tests/relay_role_test.cpp)
+        target_link_libraries(kvmux_relay_role_test PRIVATE kvmux::core)
+        add_test(NAME relay_role COMMAND kvmux_relay_role_test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
+            "$<TARGET_FILE:kvmux-relay>")
+        set_tests_properties(relay_role PROPERTIES TIMEOUT 60)
 
-    add_executable(kvmux_probe_cli_test tests/probe_cli_test.cpp)
-    target_link_libraries(kvmux_probe_cli_test PRIVATE kvmux::core)
-    add_test(NAME probe_cli COMMAND kvmux_probe_cli_test
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
-        "$<TARGET_FILE:kvmux-relay>")
-    set_tests_properties(probe_cli PROPERTIES TIMEOUT 90)
+        add_executable(kvmux_probe_cli_test tests/probe_cli_test.cpp)
+        target_link_libraries(kvmux_probe_cli_test PRIVATE kvmux::core)
+        add_test(NAME probe_cli COMMAND kvmux_probe_cli_test
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/red16.jpg"
+            "$<TARGET_FILE:kvmux-relay>")
+        set_tests_properties(probe_cli PROPERTIES TIMEOUT 90)
+    endif()
 
     add_executable(kvmux_relay_client_role_test
         tests/relay_client_role_test.cpp src/app/kvm_session.cpp)
