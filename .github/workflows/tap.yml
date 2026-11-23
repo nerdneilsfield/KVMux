@@ -1,0 +1,118 @@
+name: Tap
+# Publishing a release (or running this by hand with its tag) writes the
+# Scoop manifest, the macOS Cask and the Linux Formula into
+# nerdneilsfield/homebrew-apps, with the sha256 values from the release's
+# SHA256SUMS file. TAP_GITHUB_TOKEN needs contents write on that repository.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish to the tap, for example v0.1.0
+        required: true
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download checksums
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS
+      - name: Write manifests
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          sum() {
+            local value
+            value="$(awk -v name="kvmux-$TAG-$1" '$2 == name { print $1 }' SHA256SUMS)"
+            [ -n "$value" ] || { echo "no checksum for kvmux-$TAG-$1" >&2; exit 1; }
+            printf '%s' "$value"
+          }
+          windows_sha="$(sum windows-x64.zip)"
+          macos_sha="$(sum macos-arm64.zip)"
+          linux_x64_sha="$(sum linux-brew-x64.tar.gz)"
+          linux_arm64_sha="$(sum linux-brew-arm64.tar.gz)"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/nerdneilsfield/homebrew-apps.git" tap
+          mkdir -p tap/bucket tap/Casks tap/Formula
+          cat > tap/bucket/kvmux.json <<EOF
+          {
+            "version": "$version",
+            "description": "Low-latency KVM viewer for USB capture and CH9329 control",
+            "homepage": "https://github.com/$GITHUB_REPOSITORY",
+            "license": "MIT,GPL-2.0-or-later",
+            "architecture": {
+              "64bit": {
+                "url": "$base/kvmux-$TAG-windows-x64.zip",
+                "hash": "$windows_sha"
+              }
+            },
+            "bin": ["bin\\\\kvmux.exe", "bin\\\\kvmux-relay.exe"],
+            "shortcuts": [["bin\\\\kvmux.exe", "KVMux"]]
+          }
+          EOF
+          cat > tap/Casks/kvmux.rb <<EOF
+          cask "kvmux" do
+            version "$version"
+            sha256 "$macos_sha"
+
+            url "https://github.com/$GITHUB_REPOSITORY/releases/download/v#{version}/kvmux-v#{version}-macos-arm64.zip"
+            name "KVMux"
+            desc "Low-latency KVM viewer for USB capture and CH9329 control"
+            homepage "https://github.com/$GITHUB_REPOSITORY"
+
+            depends_on arch: :arm64
+
+            app "kvmux.app"
+            binary "bin/kvmux-relay"
+          end
+          EOF
+          cat > tap/Formula/kvmux.rb <<EOF
+          class Kvmux < Formula
+            desc "Low-latency KVM viewer for USB capture and CH9329 control"
+            homepage "https://github.com/$GITHUB_REPOSITORY"
+            version "$version"
+            license "MIT"
+
+            depends_on :linux
+            depends_on "ffmpeg"
+            depends_on "libusb"
+
+            on_intel do
+              url "$base/kvmux-$TAG-linux-brew-x64.tar.gz"
+              sha256 "$linux_x64_sha"
+            end
+            on_arm do
+              url "$base/kvmux-$TAG-linux-brew-arm64.tar.gz"
+              sha256 "$linux_arm64_sha"
+            end
+
+            def install
+              prefix.install Dir["*"]
+            end
+
+            test do
+              assert_path_exists bin/"kvmux"
+            end
+          end
+          EOF
+      - name: Push to the tap
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/kvmux.json Casks/kvmux.rb Formula/kvmux.rb
+          if git diff --cached --quiet; then
+            echo "Tap already up to date"
+            exit 0
+          fi
+          git commit -m "kvmux ${TAG#v}"
+          git push
