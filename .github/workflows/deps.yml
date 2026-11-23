@@ -1,0 +1,49 @@
+name: Dependencies
+# Builds the Windows FFmpeg (with x264 and x265) once through vcpkg and
+# publishes the installed tree as a prerelease asset, the way Sunshine
+# (LizardByte/build-deps) and OBS (obs-deps) ship prebuilt dependencies.
+# Release builds download that archive by pinned tag and SHA-256 instead of
+# building FFmpeg. Run this only when vcpkg.json changes, then pin the printed
+# tag and hash in .github/actions/setup/action.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag for the archive, for example deps-2026.11.23
+        required: true
+permissions:
+  contents: write
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      ARCHIVE: kvmux-deps-windows-x64.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      # Clones vcpkg at the manifest's builtin-baseline. No binary cache: this
+      # workflow exists so that releases never build these ports.
+      - uses: lukka/run-vcpkg@v11
+        env:
+          VCPKG_BINARY_SOURCES: clear
+      - name: Build FFmpeg, x264 and x265
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT/vcpkg" install --triplet x64-windows-release --x-install-root deps/vcpkg_installed
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+      - name: Archive the installed tree
+        shell: pwsh
+        run: |
+          & (Join-Path $env:ProgramFiles '7-Zip\7z.exe') a -tzip $env:ARCHIVE ./deps/vcpkg_installed
+          if ($LASTEXITCODE -ne 0) { throw 'archive failed' }
+          $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          "## Pin in .github/actions/setup/action.yml" >> $env:GITHUB_STEP_SUMMARY
+          "KVMUX_DEPS_TAG: ${{ inputs.tag }}" >> $env:GITHUB_STEP_SUMMARY
+          "KVMUX_DEPS_SHA256: $hash" >> $env:GITHUB_STEP_SUMMARY
+          "$hash  $env:ARCHIVE" | Out-File -Encoding ascii "$env:ARCHIVE.sha256"
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ inputs.tag }}" "$env:ARCHIVE" "$env:ARCHIVE.sha256" --repo "$env:GITHUB_REPOSITORY" --prerelease --target "$env:GITHUB_SHA" --title "${{ inputs.tag }}" --notes "Prebuilt Windows x64 dependencies (vcpkg x64-windows-release: FFmpeg with x264 and x265, GPL) for KVMux release builds."
